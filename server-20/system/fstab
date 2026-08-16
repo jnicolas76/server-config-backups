@@ -1,0 +1,30 @@
+# /etc/fstab: static file system information.
+#
+# Use 'blkid' to print the universally unique identifier for a
+# device; this may be used with UUID= as a more robust way to name devices
+# that works even if disks are added and removed. See fstab(5).
+#
+# <file system> <mount point>   <type>  <options>       <dump>  <pass>
+# / was on /dev/sda5 during installation
+UUID=37d7db0a-920a-4a34-8a95-ec21567f6a55 /               ext4    errors=remount-ro 0       1
+# /boot/efi was on /dev/sda1 during installation
+UUID=4F3E-11C5  /boot/efi       vfat    umask=0077      0       1
+/swapfile                                 none            swap    sw              0       0
+
+#UUID=B696F3B596F373E9   /home/jnicolas/Data4   ntfs-3g  defaults  0  0
+#UUID=1AE8C7AEE8C7870B   /home/jnicolas/Data2   ntfs-3g  defaults  0  0
+#UUID=2A28F8D828F8A44B   /home/jnicolas/Data6   ntfs-3g  defaults  0  0
+#UUID=1A04B4DE04B4BE57   /home/jnicolas/Data3   ntfs-3g  defaults  0  0 
+#UUID=0A06A19106A17DF7   /home/jnicolas/Data5   ntfs-3g  defaults  0  0
+#UUID=22E6C68AE6C65DA3   /home/jnicolas/Data8   ntfs-3g  defaults  0  0 
+#UUID=D438-468E          /home/jnicolas/Data    exfat    defaults  0  0
+#UUID=801842EE1842E330   /home/jnicolas/Data7   ntfs-3g  defaults  0  0
+#UUID=00CE-5164          /home/jnicolas/Data9   exfat defaults   0 0 
+#UUID=00CE-5164  /home/jnicolas/Data9  exfat  defaults,uid=1000,gid=1000  0 0
+
+
+# BEGIN CineMediaVault Raspberry Pi mounts
+# Keep the historical local paths so existing CineMediaVault database records remain valid.
+//192.168.1.121/Movies /media/jnicolas/Expansion cifs credentials=/root/.smbcredentials,vers=3.0,sec=ntlmssp,iocharset=utf8,uid=1000,gid=1000,file_mode=0777,dir_mode=0777,noserverino,_netdev,nofail,x-systemd.automount,x-systemd.requires=network-online.target,x-systemd.after=network-online.target 0 0
+//192.168.1.121/TV_Shows /media/jnicolas/Elements cifs credentials=/root/.smbcredentials,vers=3.0,sec=ntlmssp,iocharset=utf8,uid=1000,gid=1000,file_mode=0777,dir_mode=0777,noserverino,_netdev,nofail,x-systemd.automount,x-systemd.requires=network-online.target,x-systemd.after=network-online.target 0 0
+# END CineMediaVault Raspberry Pi mounts

@@ -1,0 +1,7 @@
+- Local:
+    - Homarr:
+        - abbr: HA
+          href: http://192.168.1.134:7575
+    - Jellyfin:
+        - abbr: JF
+          href: http://192.168.1.134:8096

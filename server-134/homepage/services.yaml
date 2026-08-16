@@ -1,0 +1,122 @@
+- Media:
+    - CineMediaVault:
+        href: http://192.168.1.20:8093
+        description: Local movie, TV, comics, books, games, and stream status
+        icon: /icons/cinemediavault.svg
+        widget:
+          type: customapi
+          url: http://192.168.1.20:8093/api/homepage/status
+          refreshInterval: 10000
+          mappings:
+            - field: movies
+              label: Movies
+              format: number
+            - field: tv_shows
+              label: Shows
+              format: number
+            - field: books
+              label: Books
+              format: number
+            - field: comics
+              label: Comics
+              format: number
+            - field: active_streams
+              label: Active Streams
+              format: number
+            - field: downloads
+              label: Downloads
+              format: number
+            - field: nes_games
+              label: NES
+              format: number
+            - field: sega_games
+              label: SEGA
+              format: number
+            - field: dos_games
+              label: DOS
+              format: number
+            - field: mame_games
+              label: MAME
+              format: number
+    - Plex:
+        href: http://192.168.1.19:32400/web
+        description: Plex server on 192.168.1.19
+        icon: plex.png
+        widget:
+          type: plex
+          url: http://192.168.1.19:32400
+          key: uvKNVEHhua4eHfhPuJHR
+    - Overseerr:
+        href: http://192.168.1.134:5055
+        description: Media requests
+        icon: overseerr.png
+        server: local
+        container: overseerr
+    - Jellyseerr:
+        href: http://192.168.1.134:5056
+        description: Alternate request portal
+        icon: jellyseerr.png
+        server: local
+        container: jellyseerr
+    - Radarr:
+        href: http://192.168.1.134:7878
+        description: Movies
+        icon: radarr.png
+        server: local
+        container: radarr
+    - Sonarr:
+        href: http://192.168.1.134:8989
+        description: TV shows
+        icon: sonarr.png
+        server: local
+        container: sonarr
+    - Lidarr:
+        href: http://192.168.1.134:8686
+        description: Music
+        icon: lidarr.png
+        server: local
+        container: lidarr
+    - qBittorrent:
+        href: http://192.168.1.134:8080
+        description: Downloads through Gluetun
+        icon: qbittorrent.png
+        server: local
+        container: qbittorrent
+
+- Tools:
+    - Prowlarr:
+        href: http://192.168.1.134:9696
+        description: Indexers
+        icon: prowlarr.png
+        server: local
+        container: prowlarr
+    - Portainer:
+        href: http://192.168.1.134:9000
+        description: Docker management
+        icon: portainer.png
+        server: local
+        container: portainer
+    - NetAlertX:
+        href: http://192.168.1.134:20211
+        description: Network discovery and device alerts
+        icon: netalertx.png
+        server: local
+        container: netalertx
+    - Tdarr:
+        href: http://192.168.1.134:8265
+        description: Transcode management
+        icon: tdarr.png
+        server: local
+        container: tdarr-server
+    - Mylar:
+        href: http://192.168.1.134:8090
+        description: Comics
+        icon: mylar.png
+        server: local
+        container: mylar
+    - LazyLibrarian:
+        href: http://192.168.1.134:5299
+        description: Books
+        icon: lazylibrarian.png
+        server: local
+        container: lazylibrarian

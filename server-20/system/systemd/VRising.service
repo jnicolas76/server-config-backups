@@ -1,0 +1,9 @@
+[Unit]
+After=network.target
+[Service]
+User=vrising
+Group=vrising
+WorkingDirectory=/home/vrising/steamcmd/VRising
+ExecStart=/home/vrising/steamcmd/VRising/run_server.sh
+[Install]
+WantedBy=multi-user.target

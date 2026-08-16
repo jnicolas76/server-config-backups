@@ -1,0 +1,5 @@
+@reboot /usr/bin/python3 /mnt/c/DATA/transcode_queue_watchdog.py >> /mnt/c/DATA/transcode-queue-watchdog.cron.log 2>&1
+7 * * * * /usr/bin/python3 /mnt/c/DATA/transcode_queue_watchdog.py >> /mnt/c/DATA/transcode-queue-watchdog.cron.log 2>&1
+@reboot /mnt/c/DATA/start_webex_bot_listener.sh >> /mnt/c/DATA/webex-bot-listener.cron.log 2>&1
+@reboot /mnt/c/DATA/BRIDGETTE-H265/start_bridgette_watchdog.sh >> /mnt/c/DATA/BRIDGETTE-H265/cron-watchdog.log 2>&1
+@reboot nohup python3 /mnt/c/DATA/BRIDGETTE-H265/bridgette_vault_refresh_watcher.py >> /mnt/c/DATA/BRIDGETTE-H265/vault-refresh-launch.log 2>&1 </dev/null &

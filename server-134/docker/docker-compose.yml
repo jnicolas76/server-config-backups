@@ -1,0 +1,248 @@
+services:
+  gluetun:
+    image: qmcgaw/gluetun
+    container_name: gluetun
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    ports:
+      - 8080:8080          # qBittorrent WebUI
+      - 6881:6881          # qBittorrent torrent port
+      - 6881:6881/udp
+    volumes:
+      - ./config/gluetun:/gluetun   # This is where client.crt and client.key must be
+    environment:
+      - TZ=America/Denver #Change to your actual timezone, e.g. America/New_York
+      - VPN_SERVICE_PROVIDER=cyberghost
+      - VPN_TYPE=openvpn
+      - OPENVPN_USER=8bqEaeyX3Q
+      - OPENVPN_PASSWORD=<REDACTED>
+      - OPENVPN_PROTOCOL=udp        # Forces UDP (faster and default for torrenting)
+      # Server Certfication Configurations
+      # Optional: restrict to specific countries (remove or edit as you like)
+      - SERVER_COUNTRIES=Spain
+      
+      # Optional: be more specific (examples)
+      # - SERVER_REGIONS=Germany - Frankfurt,US - New York,Netherlands - Amsterdam
+      
+      # DO NOT enable port forwarding — CyberGhost doesn't support it with Gluetun
+      # - VPN_PORT_FORWARDING=on   ← remove or leave commented
+    restart: unless-stopped
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    network_mode: service:gluetun   # All traffic goes through the VPN
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Denver
+      - WEBUI_PORT=8080
+    volumes:
+      - ./config/qbittorrent:/config
+      - ./downloads:/downloads
+    depends_on:
+      - gluetun
+    restart: unless-stopped
+  # --- Overseerr (Requests) ---
+  overseerr:
+
+    image: lscr.io/linuxserver/overseerr:latest
+    container_name: overseerr
+    restart: unless-stopped
+    environment: [PUID=1000, PGID=1000, TZ=America/Denver]
+    ports: ["5055:5055"]
+    volumes: [./overseerr:/config]
+
+  # --- Jellyseerr ---
+  jellyseerr:
+    image: fallenbagel/jellyseerr:latest
+    container_name: jellyseerr
+    restart: unless-stopped
+    environment: [TZ=America/Denver]
+    ports: ["5056:5055"]
+    volumes: [./jellyseerr:/app/config]
+    depends_on: [prowlarr, radarr, sonarr]
+
+ # --- Homarr (Dashboard) ---
+  homarr:
+    image: ghcr.io/ajnart/homarr:latest
+    container_name: homarr
+    restart: unless-stopped
+    environment: [TZ=America/Denver]
+    ports: ["7575:7575"]
+    volumes:
+      - ./homarr:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+ # --- Lidarr (Music) ---
+  lidarr:
+    image: lscr.io/linuxserver/lidarr:latest
+    platform: linux/amd64
+    container_name: lidarr
+    restart: unless-stopped
+    environment: [PUID=1000, PGID=1000, TZ=America/Denver]
+    ports: ["8686:8686"]
+    volumes:
+      - ./lidarr:/config
+      - /mnt/nfs-share-movies/Music:/music
+      - ./downloads:/downloads
+    depends_on: [qbittorrent, prowlarr]
+
+ # --- Mylar3 (Comics) ---
+  mylar:
+    image: lscr.io/linuxserver/mylar3:latest
+    platform: linux/amd64
+    container_name: mylar
+    restart: unless-stopped
+    environment: [PUID=1000, PGID=1000, TZ=America/Denver]
+    ports: ["8090:8090"]
+    volumes:
+      - ./mylar:/config
+      - /mnt/nfs-share-movies/Comics:/comics
+      - ./downloads:/downloads
+    depends_on: [qbittorrent, prowlarr]
+
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    ports:
+      - 9696:9696
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Denver
+    volumes:
+      - ./config/prowlarr:/config
+    restart: unless-stopped
+
+
+#--- LazyLibrarian (books/audiobooks) with MODs ---
+  lazylibrarian:
+    image: docker.io/linuxserver/lazylibrarian:latest
+    platform: linux/amd64
+    container_name: lazylibrarian
+    restart: unless-stopped
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Denver
+      - DOCKER_MODS=linuxserver/mods:universal-calibre|linuxserver/mods:lazylibrarian-ffmpeg|linuxserver/mods:ebook-convert|linuxserver/mods:calibredb
+    ports:
+      - "5299:5299"
+    volumes:
+      - ./lazylibrarian:/config
+      - /mnt/nfs-share-movies:/books
+      - /mnt/nfs-share-movies:/magazines
+      - /mnt/nfs-share-movies:/audiobooks
+      - ./downloads:/downloads
+      - /mnt/nfs-share-movies:/deluge-downloads
+    depends_on:
+      - qbittorrent
+      - prowlarr
+     
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr
+    ports:
+      - 7878:7878
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Denver
+    volumes:
+      - ./config/radarr:/config
+      - ./downloads:/downloads
+      - /mnt/nfs-share-movies:/movies
+    restart: unless-stopped
+
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr
+    ports:
+      - 8989:8989
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Denver
+    volumes:
+      - ./config/sonarr:/config
+      - ./downloads:/downloads
+      - /mnt/nfs-share-tvshows:/tv
+    restart: unless-stopped
+
+# ------------------JellyFin ---------------
+
+
+  seerr:
+    image: ghcr.io/seerr-team/seerr:latest
+    container_name: seerr
+    init: true
+    environment:
+      TZ: America/Denver
+      LOG_LEVEL: info
+      PORT: "5055"
+    volumes:
+      - /opt/seerr/config:/app/config
+    ports:
+      - "5057:5055"
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:5057/api/v1/settings/public || exit 1
+      start_period: 20s
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+
+  homepage:
+    image: ghcr.io/gethomepage/homepage:latest
+    container_name: homepage
+    restart: unless-stopped
+    environment:
+      - TZ=America/Denver
+      - HOMEPAGE_ALLOWED_HOSTS=*
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./homepage:/app/config
+      - ./homepage/icons:/app/public/icons:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  netalertx:
+    image: ghcr.io/jokob-sk/netalertx:latest
+    container_name: netalertx
+    network_mode: host
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+      - NET_BIND_SERVICE
+      - CHOWN
+      - SETUID
+      - SETGID
+    volumes:
+      - ./netalertx:/data:rw
+      - /etc/localtime:/etc/localtime:ro
+    tmpfs:
+      - /tmp:mode=1700,uid=0,gid=0,rw,noexec,nosuid,nodev,async,noatime,nodiratime
+    environment:
+      PUID: "20211"
+      PGID: "20211"
+      LISTEN_ADDR: "0.0.0.0"
+      PORT: "20211"
+      GRAPHQL_PORT: "20212"
+      ALWAYS_FRESH_INSTALL: "false"
+      NETALERTX_DEBUG: "0"
+      TZ: America/Denver
+    mem_limit: 2048m
+    mem_reservation: 1024m
+    cpu_shares: 512
+    pids_limit: 512
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped

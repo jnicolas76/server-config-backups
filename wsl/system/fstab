@@ -1,0 +1,5 @@
+# UNCONFIGURED FSTAB FOR BASE SYSTEM
+
+
+//192.168.1.121/Movies /mnt/nfs-share-movies cifs credentials=/root/.smbcredentials,vers=3.0,sec=ntlmssp,iocharset=utf8,uid=1000,gid=1000,file_mode=0777,dir_mode=0777,noserverino,_netdev,nofail,x-systemd.automount,x-systemd.requires=network-online.target,x-systemd.after=network-online.target 0 0
+//192.168.1.121/TV_Shows /mnt/nfs-share-tvshows cifs credentials=/root/.smbcredentials,vers=3.0,sec=ntlmssp,iocharset=utf8,uid=1000,gid=1000,file_mode=0777,dir_mode=0777,noserverino,_netdev,nofail,x-systemd.automount,x-systemd.requires=network-online.target,x-systemd.after=network-online.target 0 0

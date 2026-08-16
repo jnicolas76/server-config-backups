@@ -1,0 +1,14 @@
+[Unit]
+Description=Webex notifications for local WSL scripts
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jnicolas
+ExecStart=/usr/bin/python3 /home/jnicolas/bin/webex_script_process_monitor.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
