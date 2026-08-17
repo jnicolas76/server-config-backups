@@ -1,8 +1,17 @@
-const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];let state={};
+const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+const byId=id=>document.getElementById(id);
+const login=byId('login'),app=byId('app'),loginForm=byId('loginForm');
+const username=byId('username'),password=byId('password'),loginError=byId('loginError');
+const logout=byId('logout'),refresh=byId('refresh'),start=byId('start'),stop=byId('stop');
+const heartbeat=byId('heartbeat'),movieCount=byId('movieCount'),tvCount=byId('tvCount');
+const current=byId('current'),metrics=byId('metrics'),disks=byId('disks');
+const completedRows=byId('completedRows'),commands=byId('commands'),chart=byId('chart');
+const addDialog=byId('addDialog'),addKind=byId('addKind'),addPath=byId('addPath'),confirmAdd=byId('confirmAdd');
+let state={};
 const fmt=b=>{if(!b)return '0 B';let u=['B','KB','MB','GB','TB'],i=Math.min(4,Math.floor(Math.log(b)/Math.log(1024)));return `${(b/1024**i).toFixed(i>2?2:1)} ${u[i]}`};
-async function api(url,opt={}){let r=await fetch(url,{headers:{'Content-Type':'application/json'},...opt});if(r.status===401){showLogin();throw Error('login')};if(!r.ok)throw Error((await r.json()).error||r.statusText);return r.status===204?{}:r.json()}
+async function api(url,opt={}){let controller=new AbortController(),timer=setTimeout(()=>controller.abort(),15000);try{let r=await fetch(url,{headers:{'Content-Type':'application/json'},credentials:'same-origin',signal:controller.signal,...opt});if(r.status===401){showLogin();throw Error('login')};if(!r.ok){let data=await r.json().catch(()=>({}));throw Error(data.error||r.statusText)}return r.status===204?{}:r.json()}catch(e){if(e.name==='AbortError')throw Error('Server request timed out');throw e}finally{clearTimeout(timer)}}
 function showLogin(){login.hidden=false;app.hidden=true}function showApp(){login.hidden=true;app.hidden=false}
-loginForm.onsubmit=async e=>{e.preventDefault();try{await api('/api/login',{method:'POST',body:JSON.stringify({username:username.value,password:password.value})});showApp();load()}catch(x){loginError.textContent=x.message}};
+loginForm.onsubmit=async e=>{e.preventDefault();let button=loginForm.querySelector('button');button.disabled=true;button.textContent='Signing in...';loginError.textContent='';try{await api('/api/login',{method:'POST',body:JSON.stringify({username:username.value.trim(),password:password.value})});showApp();await load()}catch(x){loginError.textContent=x.message}finally{button.disabled=false;button.textContent='Sign in'}};
 logout.onclick=async()=>{await api('/api/logout',{method:'POST'});showLogin()};refresh.onclick=()=>command('refresh',{});start.onclick=()=>confirm('Start the WSL orchestrator?')&&command('start',{});stop.onclick=()=>confirm('Stop the active orchestrator and encode?')&&command('stop',{});
 $$('nav button').forEach(b=>b.onclick=()=>{$$('nav button,.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');$('#'+b.dataset.tab).classList.add('active')});
 async function command(action,payload){await api('/api/commands',{method:'POST',body:JSON.stringify({action,payload})});setTimeout(load,1000)}
