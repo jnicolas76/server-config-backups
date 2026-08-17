@@ -97,6 +97,7 @@ DIRECT_STREAMS: dict[str, dict] = {}
 DIRECT_BANDWIDTH_SAMPLES = deque(maxlen=50000)
 MOBILE_DOWNLOAD_JOBS: dict[str, dict] = {}
 MEDIA_DURATION_CACHE: dict[str, float] = {}
+MEDIA_CODEC_CACHE: dict[str, tuple[float, int, dict]] = {}
 TRANSCODE_LOCK = threading.Lock()
 DIRECT_STREAM_LOCK = threading.Lock()
 MOBILE_DOWNLOAD_LOCK = threading.Lock()
@@ -3376,13 +3377,14 @@ main{padding:14px}.wall{height:calc(100vh - 92px);min-height:520px;display:grid;
 </style></head><body><header><div class="brand">CineMedia<b>Vault</b> Wall</div><div class="controls"><a class="button" href="/">Home</a><button id="playAll" class="primary">Play all</button><button id="pauseAll">Pause all</button><button id="syncAll">Sync</button><button id="toggleBandwidth">Bandwidth</button><button id="addMedia">Add media</button></div></header><div class="bandwidth" id="bandwidthPanel"><strong id="bandwidthValue">0.00 Mbps</strong><span id="bandwidthBytes">0 B/s</span><span id="playingCount">0 playing</span></div>
 <main><div class="wall" id="wall"></div></main>
 <aside class="drawer" id="drawer"><div class="drawer-head"><div><h2>Add to wall</h2><div class="hint">Search any movie or individual TV episode, then choose a slot.</div></div><button class="icon" id="closeDrawer" aria-label="Close">&#10005;</button></div><input class="search" id="wallSearch" type="search" placeholder="Search movies or episodes"><div class="results" id="results"></div></aside>
-<script>
-const wall=document.getElementById('wall'),drawer=document.getElementById('drawer'),search=document.getElementById('wallSearch'),results=document.getElementById('results');let slots=[],active=1,timer;
+<script src="/assets/hls.min.js"></script><script>
+const wall=document.getElementById('wall'),drawer=document.getElementById('drawer'),search=document.getElementById('wallSearch'),results=document.getElementById('results');let slots=[],active=1,timer,hlsControllers=[];
 const esc=s=>String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function load(){const r=await fetch('/api/video-wall');const d=await r.json();slots=d.slots||[];render()}
 function fmt(t){if(!Number.isFinite(t))return '0:00';t=Math.max(0,Math.floor(t));return `${Math.floor(t/60)}:${String(t%60).padStart(2,'0')}`}
-function render(){wall.innerHTML='';for(let n=1;n<=4;n++){const item=slots.find(x=>x.slot===n),el=document.createElement('section');el.className='tile'+(n===active?' active':'');el.dataset.slot=n;if(!item){el.innerHTML=`<button class="empty" data-add="${n}">Slot ${n}<br>Add a movie or episode</button>`}else{const join=item.stream_url.includes('?')?'&':'?';el.innerHTML=`<video playsinline preload="metadata" muted src="${esc(item.stream_url)}${join}wall=1&slot=${n}"></video><div class="tile-bar"><span class="tile-title">${esc(item.title)} <small>${esc(item.subtitle)}</small></span><button class="icon" data-back title="Rewind 10 seconds">-10</button><button class="icon" data-toggle title="Play or pause">&#9654;</button><input class="seek" data-seek type="range" min="0" max="1000" value="0" aria-label="Seek"><span class="time">0:00 / 0:00</span><button class="icon" data-forward title="Forward 10 seconds">+10</button><button class="icon" data-remove="${n}" title="Remove">&#10005;</button></div>`}wall.appendChild(el)}bindVideos();applyAudio();updateBandwidth()}
-function bindVideos(){document.querySelectorAll('.tile video').forEach(v=>{const tile=v.closest('.tile'),seek=tile.querySelector('[data-seek]'),label=tile.querySelector('.time'),toggle=tile.querySelector('[data-toggle]');const update=()=>{if(seek&&Number.isFinite(v.duration)&&v.duration>0)seek.value=Math.round(v.currentTime/v.duration*1000);if(label)label.textContent=`${fmt(v.currentTime)} / ${fmt(v.duration)}`;if(toggle)toggle.innerHTML=v.paused?'&#9654;':'&#10074;&#10074;'};v.addEventListener('timeupdate',update);v.addEventListener('durationchange',update);v.addEventListener('play',update);v.addEventListener('pause',update);update()})}
+function render(){hlsControllers.forEach(h=>h.destroy());hlsControllers=[];wall.innerHTML='';for(let n=1;n<=4;n++){const item=slots.find(x=>x.slot===n),el=document.createElement('section');el.className='tile'+(n===active?' active':'');el.dataset.slot=n;if(!item){el.innerHTML=`<button class="empty" data-add="${n}">Slot ${n}<br>Add a movie or episode</button>`}else{const source=item.requires_hls?item.hls_url:item.stream_url;el.innerHTML=`<video playsinline preload="metadata" muted data-source="${esc(source)}" data-hls="${item.requires_hls?'1':'0'}" data-slot="${n}"></video><div class="tile-bar"><span class="tile-title">${esc(item.title)} <small>${esc(item.subtitle)}${item.requires_hls?' - HLS':''}</small></span><button class="icon" data-back title="Rewind 10 seconds">-10</button><button class="icon" data-toggle title="Play or pause">&#9654;</button><input class="seek" data-seek type="range" min="0" max="1000" value="0" aria-label="Seek"><span class="time">0:00 / 0:00</span><button class="icon" data-forward title="Forward 10 seconds">+10</button><button class="icon" data-remove="${n}" title="Remove">&#10005;</button></div>`}wall.appendChild(el)}bindVideos();applyAudio();updateBandwidth()}
+function wallUrl(url,slot){const join=url.includes('?')?'&':'?';return `${url}${join}wall=1&slot=${slot}`}
+function bindVideos(){document.querySelectorAll('.tile video').forEach(v=>{const tile=v.closest('.tile'),seek=tile.querySelector('[data-seek]'),label=tile.querySelector('.time'),toggle=tile.querySelector('[data-toggle]'),source=v.dataset.source,slot=v.dataset.slot;if(v.dataset.hls==='1'){if(v.canPlayType('application/vnd.apple.mpegurl'))v.src=wallUrl(source,slot);else if(window.Hls&&Hls.isSupported()){const h=new Hls({lowLatencyMode:false,backBufferLength:90,xhrSetup:(xhr,url)=>xhr.open('GET',wallUrl(url,slot),true)});h.loadSource(wallUrl(source,slot));h.attachMedia(v);hlsControllers.push(h)}else v.src=wallUrl(source,slot)}else v.src=wallUrl(source,slot);const update=()=>{if(seek&&Number.isFinite(v.duration)&&v.duration>0)seek.value=Math.round(v.currentTime/v.duration*1000);if(label)label.textContent=`${fmt(v.currentTime)} / ${fmt(v.duration)}`;if(toggle)toggle.innerHTML=v.paused?'&#9654;':'&#10074;&#10074;'};v.addEventListener('timeupdate',update);v.addEventListener('durationchange',update);v.addEventListener('play',update);v.addEventListener('pause',update);update()})}
 function applyAudio(){document.querySelectorAll('.tile').forEach(t=>{t.classList.toggle('active',+t.dataset.slot===active);const v=t.querySelector('video');if(v)v.muted=+t.dataset.slot!==active})}
 wall.addEventListener('click',async e=>{const tile=e.target.closest('.tile');if(tile){active=+tile.dataset.slot;applyAudio()}const v=tile&&tile.querySelector('video');if(e.target.closest('[data-add]'))openDrawer(+e.target.closest('[data-add]').dataset.add);if(e.target.closest('[data-remove]')){await updateSlot(+e.target.closest('[data-remove]').dataset.remove,null);load()}if(v&&e.target.closest('[data-back]'))v.currentTime=Math.max(0,v.currentTime-10);if(v&&e.target.closest('[data-forward]'))v.currentTime=Math.min(Number.isFinite(v.duration)?v.duration:v.currentTime+10,v.currentTime+10);if(v&&e.target.closest('[data-toggle]'))v.paused?v.play().catch(()=>{}):v.pause()});
 wall.addEventListener('input',e=>{const seek=e.target.closest('[data-seek]');if(!seek)return;const v=seek.closest('.tile').querySelector('video');if(v&&Number.isFinite(v.duration))v.currentTime=(+seek.value/1000)*v.duration});
@@ -5483,27 +5485,31 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
 <title>CineMediaVault Deleted</title><style>:root{{color-scheme:dark}}body{{margin:0;background:#080a0f;color:#fff;font-family:Inter,system-ui,Segoe UI,sans-serif;padding:24px}}a{{color:#fff}}.panel{{max-width:760px;border:1px solid #242b36;border-radius:18px;background:#10141d;padding:20px}}p{{overflow-wrap:anywhere;color:#cfd6e2}}</style></head>
 <body><section class="panel"><h1>Deleted</h1><p>{html.escape(deleted_path)}</p><p><a href="/{'movies' if kind == 'movie' else 'tv'}">Back to library</a></p></section></body></html>""")
 
-    def video_wall_item(self, media_type: str, media_id: int, media_path: str = "") -> dict | None:
+    def video_wall_item(self, media_type: str, media_id: int, media_path: str = "", include_compatibility: bool = True) -> dict | None:
         try:
             if media_type == "movie":
                 item = next((value for value in movie_app.movie_index.items if media_path and str(value.path) == media_path), None)
                 item = item or movie_app.safe_item(str(media_id))
                 meta = movie_app.metadata_for(item)
+                compatibility = browser_media_compatibility(item.path) if include_compatibility else {"requires_hls": False}
                 return {"media_type": "movie", "media_id": int(item.id),
                         "title": meta.get("title") or item.title,
                         "subtitle": str(meta.get("year") or "Movie"),
                         "poster": movie_app.poster_url_for(item) or "",
-                        "stream_url": f"/play/{item.id}", "media_path": str(item.path)}
+                        "stream_url": f"/play/{item.id}", "hls_url": f"/hls/movie/{item.id}/index.m3u8",
+                        "requires_hls": compatibility["requires_hls"], "media_path": str(item.path)}
             episode = next((value for value in tv_app.tv_index.episode_by_id.values() if media_path and str(value.path) == media_path), None)
             episode = episode or tv_app.safe_episode(str(media_id))
             show = show_for_episode(episode)
             meta = tv_app.metadata_for(show) if show else {}
             episode_meta = tv_episode_display_metadata(meta, episode)
+            compatibility = browser_media_compatibility(episode.path) if include_compatibility else {"requires_hls": False}
             return {"media_type": "tv", "media_id": int(episode.id),
                     "title": episode.show,
                     "subtitle": f"{episode_label(episode)} - {episode_meta.get('title') or episode.title}",
                     "poster": (tv_app.poster_url_for(show) if show else "") or "",
-                    "stream_url": f"/play/episode/{episode.id}", "media_path": str(episode.path)}
+                    "stream_url": f"/play/episode/{episode.id}", "hls_url": f"/hls/tv/{episode.id}/index.m3u8",
+                    "requires_hls": compatibility["requires_hls"], "media_path": str(episode.path)}
         except Exception:
             return None
 
@@ -5561,14 +5567,14 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
                 title = str(meta.get("title") or item.title)
                 haystack = f"{title} {meta.get('year') or ''} {item.path.name}".casefold()
                 if query in haystack:
-                    found.append(self.video_wall_item("movie", int(item.id)))
+                    found.append(self.video_wall_item("movie", int(item.id), include_compatibility=False))
                     if len(found) >= 30:
                         break
             if len(found) < 30:
                 for episode in list(tv_app.tv_index.episode_by_id.values()):
                     haystack = f"{episode.show} {episode.title} {episode_label(episode)} {episode.path.name}".casefold()
                     if query in haystack:
-                        found.append(self.video_wall_item("tv", int(episode.id)))
+                        found.append(self.video_wall_item("tv", int(episode.id), include_compatibility=False))
                         if len(found) >= 30:
                             break
         public_items = []
@@ -5718,6 +5724,12 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
         self.send_header("Cache-Control", "no-store" if filename.endswith(".m3u8") else "public, max-age=300")
         self.end_headers()
         self.wfile.write(data)
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        if query.get("wall", [""])[0] == "1":
+            user = self.current_user()
+            if user:
+                with DIRECT_STREAM_LOCK:
+                    DIRECT_BANDWIDTH_SAMPLES.append((time.monotonic(), int(user["id"]), len(data)))
 
     def serve_asset(self, request_path: str):
         name = request_path.rsplit("/", 1)[-1]
@@ -5802,6 +5814,40 @@ def hls_mime_type(filename: str) -> str:
     if filename.endswith(".ts"):
         return "video/mp2t"
     return mimetypes.guess_type(filename)[0] or "application/octet-stream"
+
+
+def browser_media_compatibility(path: Path) -> dict:
+    """Return a conservative direct-play decision, cached by file identity."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return {"requires_hls": True, "video_codec": "", "audio_codec": ""}
+    key = str(path)
+    cached = MEDIA_CODEC_CACHE.get(key)
+    if cached and cached[0] == stat.st_mtime and cached[1] == stat.st_size:
+        return dict(cached[2])
+    video_codec = ""
+    audio_codec = ""
+    try:
+        result = subprocess.run([
+            "ffprobe", "-v", "error", "-show_entries", "stream=codec_type,codec_name",
+            "-of", "json", str(path),
+        ], capture_output=True, text=True, timeout=20, check=False)
+        for stream in json.loads(result.stdout or "{}").get("streams", []):
+            codec_type = str(stream.get("codec_type") or "")
+            codec_name = str(stream.get("codec_name") or "").lower()
+            if codec_type == "video" and not video_codec:
+                video_codec = codec_name
+            elif codec_type == "audio" and not audio_codec:
+                audio_codec = codec_name
+    except Exception:
+        pass
+    direct_video = {"h264", "vp8", "vp9", "av1"}
+    direct_audio = {"aac", "mp3", "opus", "vorbis"}
+    requires_hls = not video_codec or video_codec not in direct_video or (audio_codec and audio_codec not in direct_audio)
+    value = {"requires_hls": requires_hls, "video_codec": video_codec, "audio_codec": audio_codec}
+    MEDIA_CODEC_CACHE[key] = (stat.st_mtime, stat.st_size, value)
+    return dict(value)
 
 
 def ffprobe_duration(path: Path) -> float:

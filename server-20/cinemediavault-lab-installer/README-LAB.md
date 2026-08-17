@@ -115,3 +115,9 @@ The `Bandwidth` button shows or hides a live meter. It reports actual bytes
 served to that user's wall over a rolling three-second window, in Mbps and
 bytes per second, plus the number of videos currently playing. The reading
 falls automatically when playback is paused or a tile is removed.
+
+Wall items are codec-checked when they are loaded. Browser-compatible video
+and audio use direct Range playback. Sources such as HEVC/E-AC-3 automatically
+use the existing HLS engine and are delivered as H.264/AAC, preventing silent
+video or unsupported-codec failures. Probe results are cached by file size and
+modification time. HLS segment traffic is included in the bandwidth meter.
