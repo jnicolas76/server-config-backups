@@ -2,6 +2,8 @@
 import argparse
 import base64
 import concurrent.futures
+import datetime
+import gzip
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="cgi")
 import cgi
@@ -28,6 +30,7 @@ import urllib.parse
 import urllib.error
 import urllib.request
 import zipfile
+import xml.etree.ElementTree as ET
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -85,6 +88,8 @@ MOBILE_DOWNLOAD_CACHE_MAX_AGE_HOURS = float(os.environ.get("MOBILE_DOWNLOAD_CACH
 MOBILE_DOWNLOAD_CACHE_MAX_AGE_OPTIONS = {6, 12, 24}
 MOBILE_DOWNLOAD_SETTINGS_FILE = CINEVAULT_DB.parent / "mobile-download-settings.json"
 MOBILE_DOWNLOAD_TARGET_MB_PER_HOUR = float(os.environ.get("MOBILE_DOWNLOAD_TARGET_MB_PER_HOUR", "150"))
+HDHR_GUIDE_CACHE_FILE = Path(os.environ.get("HDHR_GUIDE_CACHE_FILE", "/home/jnicolas/cinemediavault-lab/hdhr-guide-cache.json")).resolve()
+HDHR_GUIDE_MAX_AGE_HOURS = float(os.environ.get("HDHR_GUIDE_MAX_AGE_HOURS", "22"))
 MOBILE_DOWNLOAD_TARGET_SOURCE_RATIO = float(os.environ.get("MOBILE_DOWNLOAD_TARGET_SOURCE_RATIO", "0.40"))
 MOBILE_DOWNLOAD_MAX_OUTPUT_RATIO = float(os.environ.get("MOBILE_DOWNLOAD_MAX_OUTPUT_RATIO", "0.98"))
 MOBILE_DOWNLOAD_ABSOLUTE_MAX_OUTPUT_RATIO = float(os.environ.get("MOBILE_DOWNLOAD_ABSOLUTE_MAX_OUTPUT_RATIO", "1.00"))
@@ -110,6 +115,7 @@ MEDIA_SCAN_PROCESS = None
 MEDIA_SCAN_LOCK = threading.Lock()
 MEDIA_SCAN_LAST_RESULT = {"running": False}
 HDHR_SCAN_LOCK = threading.Lock()
+HDHR_GUIDE_LOCK = threading.Lock()
 
 
 def save_scan_progress(payload: dict) -> None:
@@ -589,6 +595,99 @@ def hdhr_channel(channel_id: int):
             WHERE c.id=? AND d.enabled=1""", (int(channel_id),)).fetchone()
     finally:
         conn.close()
+
+
+def xmltv_timestamp(value: str) -> int:
+    try:
+        return int(datetime.datetime.strptime(value.strip(), "%Y%m%d%H%M%S %z").timestamp())
+    except (TypeError, ValueError):
+        return 0
+
+
+def refresh_hdhr_guide(force: bool = False) -> dict:
+    with HDHR_GUIDE_LOCK:
+        if not force and HDHR_GUIDE_CACHE_FILE.is_file():
+            age = time.time() - HDHR_GUIDE_CACHE_FILE.stat().st_mtime
+            if age < HDHR_GUIDE_MAX_AGE_HOURS * 3600:
+                cached = json.loads(HDHR_GUIDE_CACHE_FILE.read_text(encoding="utf-8"))
+                return {"ok": True, "cached": True, "programmes": cached.get("programme_count", 0)}
+        conn = db_connect()
+        try:
+            devices = [dict(row) for row in conn.execute(
+                "SELECT device_id,base_url FROM hdhr_devices WHERE enabled=1 ORDER BY device_id"
+            ).fetchall()]
+        finally:
+            conn.close()
+        auth_tokens = []
+        for device in devices:
+            try:
+                details = hdhr_json(device["base_url"].rstrip("/") + "/discover.json", 5.0)
+                token = str(details.get("DeviceAuth") or "").strip()
+                if token:
+                    auth_tokens.append(token)
+            except Exception:
+                continue
+        if not auth_tokens:
+            raise RuntimeError("No HDHomeRun DeviceAuth token is available")
+        url = "https://api.hdhomerun.com/api/xmltv?DeviceAuth=" + urllib.parse.quote("".join(auth_tokens))
+        request = urllib.request.Request(url, headers={"Accept-Encoding": "gzip", "User-Agent": "CineMediaVault/1.0"})
+        with urllib.request.urlopen(request, timeout=45) as response:
+            raw = response.read()
+        if raw[:2] == b"\x1f\x8b":
+            raw = gzip.decompress(raw)
+        root = ET.fromstring(raw)
+        channel_numbers = {}
+        for channel in root.findall("channel"):
+            names = [str(item.text or "").strip() for item in channel.findall("display-name")]
+            number = next((name for name in names if re.fullmatch(r"\d+(?:\.\d+)?", name)), "")
+            if number:
+                channel_numbers[str(channel.get("id") or "")] = number
+        programmes = {}
+        count = 0
+        for item in root.findall("programme"):
+            number = channel_numbers.get(str(item.get("channel") or ""))
+            if not number:
+                continue
+            start = xmltv_timestamp(str(item.get("start") or ""))
+            stop = xmltv_timestamp(str(item.get("stop") or ""))
+            if not start or stop < time.time() - 7200:
+                continue
+            entry = {
+                "title": str(item.findtext("title") or "Live TV").strip(),
+                "subtitle": str(item.findtext("sub-title") or "").strip(),
+                "description": str(item.findtext("desc") or "").strip(),
+                "category": str(item.findtext("category") or "").strip(),
+                "start": start,
+                "stop": stop,
+            }
+            programmes.setdefault(number, []).append(entry)
+            count += 1
+        for values in programmes.values():
+            values.sort(key=lambda entry: entry["start"])
+        payload = {"updated_at": int(time.time()), "programme_count": count, "programmes": programmes}
+        HDHR_GUIDE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        temporary = HDHR_GUIDE_CACHE_FILE.with_suffix(".tmp")
+        temporary.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+        temporary.replace(HDHR_GUIDE_CACHE_FILE)
+        return {"ok": True, "cached": False, "channels": len(programmes), "programmes": count}
+
+
+def hdhr_guide_snapshot() -> dict:
+    try:
+        return json.loads(HDHR_GUIDE_CACHE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {"updated_at": 0, "programme_count": 0, "programmes": {}}
+
+
+def start_hdhr_guide_thread() -> None:
+    def worker() -> None:
+        while True:
+            try:
+                refresh_hdhr_guide(False)
+            except Exception as exc:
+                print(f"HDHomeRun guide refresh failed: {exc}", flush=True)
+            time.sleep(random.uniform(20, 28) * 3600)
+    threading.Thread(target=worker, daemon=True, name="hdhr-guide-refresh").start()
 
 
 def cinevault_db_status() -> dict:
@@ -3496,11 +3595,13 @@ def cleanup_mobile_download_cache_once() -> None:
 LIVE_TV_PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>CineMediaVault Live TV</title><style>
 :root{color-scheme:dark;--bg:#080a0f;--panel:#121720;--line:#2a3340;--muted:#9ba7b8;--gold:#f5b73f;--green:#35dc79}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:#fff;font-family:Inter,system-ui,Segoe UI,sans-serif}header{position:sticky;top:0;z-index:4;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 18px;background:rgba(8,10,15,.95);border-bottom:1px solid var(--line)}h1{font-size:24px;margin:0}h1 b{color:var(--gold)}button,.button{border:1px solid var(--line);border-radius:8px;min-height:40px;padding:0 14px;background:#1a202a;color:#fff;font-weight:850;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;cursor:pointer}.primary{background:var(--gold);border-color:var(--gold);color:#111}main{max-width:1200px;margin:auto;padding:18px}.summary{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:16px}.device{border:1px solid var(--line);background:var(--panel);padding:12px;border-radius:8px}.device small{display:block;color:var(--muted);margin-top:4px}.search{width:100%;min-height:48px;border:1px solid var(--line);border-radius:8px;background:#151b25;color:#fff;padding:0 14px;font-size:16px;margin-bottom:14px}.guide{display:grid;gap:8px}.channel{display:grid;grid-template-columns:72px 1fr auto;gap:12px;align-items:center;padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}.number{font-size:20px;color:var(--gold);font-weight:950}.channel small{display:block;color:var(--muted);margin-top:3px}.actions{display:flex;gap:7px}.live{color:var(--green);font-size:12px;font-weight:950}.slots{display:none;gap:5px}.channel.choosing .slots{display:flex}.channel.choosing .watch{display:none}.slots button{width:36px;padding:0}.player{display:none;position:fixed;inset:0;z-index:20;background:#000}.player.open{display:block}.player video{width:100%;height:100%;object-fit:contain}.player .close{position:absolute;right:16px;top:16px;z-index:2;border-radius:50%;width:44px;padding:0}@media(max-width:650px){header{align-items:flex-start}.channel{grid-template-columns:58px 1fr}.actions{grid-column:1/-1}.channel{padding:10px}h1{font-size:20px}}
-</style></head><body><header><h1>CineMedia<b>Vault</b> Live TV</h1><div><a class="button" href="/">Home</a> <a class="button" href="/wall">Wall</a> <button class="primary" id="scan">Scan tuners</button></div></header><main><div class="summary" id="devices"></div><input class="search" id="query" type="search" placeholder="Search channel number or name"><div class="guide" id="guide"></div></main><div class="player" id="player"><button class="close" id="close">&#10005;</button><video id="video" controls autoplay playsinline></video></div><script src="/assets/hls.min.js"></script><script>
+</style></head><body><header><h1>CineMedia<b>Vault</b> Live TV</h1><div><a class="button" href="/">Home</a> <a class="button" href="/wall">Wall</a> <button id="refreshGuide">Refresh guide</button> <button class="primary" id="scan">Scan tuners</button></div></header><main><div class="summary" id="devices"></div><input class="search" id="query" type="search" placeholder="Search channel, program, or description"><div class="guide" id="guide"></div></main><div class="player" id="player"><button class="close" id="close">&#10005;</button><video id="video" controls autoplay playsinline></video></div><script src="/assets/hls.min.js"></script><script>
 let channels=[],hls=null;const esc=s=>String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-async function load(){const r=await fetch('/api/hdhr/devices',{cache:'no-store'}),d=await r.json();channels=d.channels||[];document.getElementById('devices').innerHTML=(d.devices||[]).map(x=>`<div class="device"><strong>${esc(x.friendly_name)} ${esc(x.model_number)}</strong><small>${esc(x.device_id)} · ${x.tuner_count} tuners · ${x.channel_count} channels</small><small><a href="${esc(x.base_url)}" target="_blank">Device resources</a></small></div>`).join('')||'<p>No tuner saved yet. Select Scan tuners.</p>';render()}
-function render(){const q=document.getElementById('query').value.trim().toLowerCase();const list=channels.filter(c=>!q||(`${c.guide_number} ${c.guide_name}`).toLowerCase().includes(q));document.getElementById('guide').innerHTML=list.map(c=>`<article class="channel" data-id="${c.id}"><div class="number">${esc(c.guide_number)}</div><div><strong>${esc(c.guide_name)}</strong><small><span class="live">LIVE</span> · ${esc(c.friendly_name)}${c.video_codec?' · '+esc(c.video_codec):''}${c.audio_codec?' / '+esc(c.audio_codec):''}</small></div><div class="actions"><button class="watch">Watch</button><button class="wall">Add to wall</button><span class="slots">${[1,2,3,4].map(n=>`<button data-slot="${n}">${n}</button>`).join('')}</span></div></article>`).join('')||'<p>No matching channels.</p>'}
+const clock=n=>n?new Date(n*1000).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):'';
+async function load(){const r=await fetch('/api/hdhr/devices',{cache:'no-store'}),d=await r.json();channels=d.channels||[];const updated=d.guide_updated_at?new Date(d.guide_updated_at*1000).toLocaleString():'not loaded';document.getElementById('devices').innerHTML=(d.devices||[]).map(x=>`<div class="device"><strong>${esc(x.friendly_name)} ${esc(x.model_number)}</strong><small>${esc(x.device_id)} · ${x.tuner_count} tuners · ${x.channel_count} channels</small><small>${d.programme_count||0} guide entries · updated ${esc(updated)}</small><small><a href="${esc(x.base_url)}" target="_blank">Device resources</a></small></div>`).join('')||'<p>No tuner saved yet. Select Scan tuners.</p>';render()}
+function render(){const q=document.getElementById('query').value.trim().toLowerCase();const text=c=>`${c.guide_number} ${c.guide_name} ${c.current?.title||''} ${c.current?.subtitle||''} ${c.current?.description||''} ${c.next?.title||''}`.toLowerCase();const list=channels.filter(c=>!q||text(c).includes(q));document.getElementById('guide').innerHTML=list.map(c=>`<article class="channel" data-id="${c.id}"><div class="number">${esc(c.guide_number)}</div><div><strong>${esc(c.guide_name)}</strong>${c.current?`<small><b>${clock(c.current.start)}-${clock(c.current.stop)} · ${esc(c.current.title)}</b>${c.current.subtitle?' · '+esc(c.current.subtitle):''}</small><small>${esc(c.current.description||c.current.category||'')}</small>`:'<small>Program information unavailable</small>'}${c.next?`<small>Next ${clock(c.next.start)} · ${esc(c.next.title)}</small>`:''}<small><span class="live">LIVE</span> · ${esc(c.friendly_name)}${c.video_codec?' · '+esc(c.video_codec):''}${c.audio_codec?' / '+esc(c.audio_codec):''}</small></div><div class="actions"><button class="watch">Watch</button><button class="wall">Add to wall</button><span class="slots">${[1,2,3,4].map(n=>`<button data-slot="${n}">${n}</button>`).join('')}</span></div></article>`).join('')||'<p>No matching channels or programs.</p>'}
 document.getElementById('query').oninput=render;document.getElementById('scan').onclick=async()=>{const b=document.getElementById('scan');b.disabled=true;b.textContent='Scanning...';try{const r=await fetch('/api/hdhr/scan',{method:'POST'}),d=await r.json();if(!d.ok)alert(d.error||'Scan failed');await load()}finally{b.disabled=false;b.textContent='Scan tuners'}};
+document.getElementById('refreshGuide').onclick=async()=>{const b=document.getElementById('refreshGuide');b.disabled=true;b.textContent='Refreshing...';try{const r=await fetch('/api/hdhr/guide/refresh',{method:'POST'}),d=await r.json();if(!d.ok)alert(d.error||'Guide refresh failed');await load()}finally{b.disabled=false;b.textContent='Refresh guide'}};
 document.getElementById('guide').onclick=async e=>{const row=e.target.closest('.channel');if(!row)return;const id=+row.dataset.id;if(e.target.closest('.watch'))play(id);if(e.target.closest('.wall'))row.classList.toggle('choosing');const slot=e.target.closest('[data-slot]');if(slot){await fetch('/api/video-wall/slot',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({slot:+slot.dataset.slot,media_type:'tuner',media_id:id})});row.classList.remove('choosing');alert(`Live channel added to wall ${slot.dataset.slot}`)}};
 function play(id){const v=document.getElementById('video'),url=`/hls/tuner/${id}/index.m3u8`;document.getElementById('player').classList.add('open');if(hls){hls.destroy();hls=null}if(v.canPlayType('application/vnd.apple.mpegurl'))v.src=url;else if(window.Hls&&Hls.isSupported()){hls=new Hls({liveSyncDurationCount:3});hls.loadSource(url);hls.attachMedia(v)}else v.src=url;v.play().catch(()=>{})}document.getElementById('close').onclick=()=>{const v=document.getElementById('video');v.pause();v.removeAttribute('src');v.load();if(hls){hls.destroy();hls=null}document.getElementById('player').classList.remove('open')};load();
 </script></body></html>"""
@@ -3619,7 +3720,17 @@ class CombinedHandler(BaseHTTPRequestHandler):
             if not user or not user["is_admin"]:
                 return self.send_error(403)
             try:
-                return self.json_response(scan_hdhr_devices())
+                result = scan_hdhr_devices()
+                result["guide"] = refresh_hdhr_guide(True)
+                return self.json_response(result)
+            except Exception as exc:
+                return self.json_response({"ok": False, "error": str(exc)})
+        if path == "/api/hdhr/guide/refresh":
+            user = self.current_user()
+            if not user or not user["is_admin"]:
+                return self.send_error(403)
+            try:
+                return self.json_response(refresh_hdhr_guide(True))
             except Exception as exc:
                 return self.json_response({"ok": False, "error": str(exc)})
         if path.startswith("/movie/upload-art/"):
@@ -5713,7 +5824,15 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
                 WHERE d.enabled=1 ORDER BY CAST(c.guide_number AS REAL),c.guide_number""").fetchall()]
         finally:
             conn.close()
-        return self.json_response({"ok": True, "devices": devices, "channels": channels})
+        guide = hdhr_guide_snapshot()
+        now = int(time.time())
+        for channel in channels:
+            schedule = guide.get("programmes", {}).get(str(channel["guide_number"]), [])
+            current_index = next((index for index, item in enumerate(schedule) if item["start"] <= now < item["stop"]), -1)
+            channel["current"] = schedule[current_index] if current_index >= 0 else None
+            channel["next"] = schedule[current_index + 1] if current_index >= 0 and current_index + 1 < len(schedule) else None
+        return self.json_response({"ok": True, "devices": devices, "channels": channels,
+            "guide_updated_at": guide.get("updated_at", 0), "programme_count": guide.get("programme_count", 0)})
 
     def api_video_wall(self, user):
         conn = db_connect()
@@ -6501,6 +6620,7 @@ def main():
     movie_app.movie_index.refresh_background()
     tv_app.tv_index.refresh_background()
     start_hls_cleanup_thread()
+    start_hdhr_guide_thread()
 
     print(f"Loaded {len(movie_app.movie_index.items)} movies", flush=True)
     print(f"Loaded {len(tv_app.tv_index.shows)} shows and {len(tv_app.tv_index.episode_by_id)} episodes", flush=True)

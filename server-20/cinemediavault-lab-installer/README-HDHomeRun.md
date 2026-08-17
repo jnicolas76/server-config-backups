@@ -7,7 +7,7 @@ devices and channel lineups in the lab SQLite database, and exposes Live TV at
 ## Use
 
 1. Sign in to the lab as an administrator.
-2. Open `http://SERVER:5000/live-tv`.
+2. Open `https://SERVER:5000/live-tv`.
 3. Select **Scan tuners** to refresh devices and channel lineups.
 4. Select **Watch** for live playback, or **Add to wall** and choose wall 1-4.
 
@@ -26,3 +26,17 @@ TV episodes. Existing wall selections are preserved during migration.
 The scanner probes the server's local `/24` network and `192.168.1.0/24` for
 `/discover.json`. The media server must be able to reach the tuner HTTP ports
 80 and 5004.
+
+## Program Guide
+
+The Live TV page uses SiliconDust's official XMLTV API. CineMediaVault reads
+the current DeviceAuth token directly from each enabled tuner, downloads the
+guide, and caches parsed listings locally. The free feed provides two days of
+listings; an HDHomeRun DVR guide subscription extends this to 14 days.
+
+The guide refreshes automatically after a randomized 20 to 28 hour delay. An
+administrator can also select **Refresh guide** or run **Scan tuners**, which
+refreshes both the channel lineup and guide.
+
+- `HDHR_GUIDE_CACHE_FILE`: parsed guide cache location.
+- `HDHR_GUIDE_MAX_AGE_HOURS`: cache age before refresh; default `22`.
