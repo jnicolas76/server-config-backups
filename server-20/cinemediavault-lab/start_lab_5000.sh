@@ -49,7 +49,15 @@ nohup python3 "$LAB/cinemediavault-lab-5000.py" --host "$CINEVAULT_HOST" --port 
 echo $! > "$PID_FILE"
 sleep 2
 if kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-  if healthy; then
+  ready=0
+  for _ in $(seq 1 30); do
+    if healthy; then
+      ready=1
+      break
+    fi
+    sleep 2
+  done
+  if [[ "$ready" -eq 1 ]]; then
     echo "Started CineMediaVault LAB PID $(cat "$PID_FILE")"
     echo "URL: https://192.168.1.20:${PORT}/"
   else
