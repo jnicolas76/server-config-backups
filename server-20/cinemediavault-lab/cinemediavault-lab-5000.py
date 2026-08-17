@@ -94,12 +94,14 @@ MOBILE_DOWNLOAD_CONTAINER_OVERHEAD_KBPS = int(os.environ.get("MOBILE_DOWNLOAD_CO
 SERVER_DISPLAY_NAME = os.environ.get("CINEVAULT_SERVER_NAME") or socket.gethostname()
 TRANSCODES: dict[str, dict] = {}
 DIRECT_STREAMS: dict[str, dict] = {}
+HLS_VIEWERS: dict[str, dict] = {}
 DIRECT_BANDWIDTH_SAMPLES = deque(maxlen=50000)
 MOBILE_DOWNLOAD_JOBS: dict[str, dict] = {}
 MEDIA_DURATION_CACHE: dict[str, float] = {}
 MEDIA_CODEC_CACHE: dict[str, tuple[float, int, dict]] = {}
 TRANSCODE_LOCK = threading.Lock()
 DIRECT_STREAM_LOCK = threading.Lock()
+HLS_VIEWER_LOCK = threading.Lock()
 MOBILE_DOWNLOAD_LOCK = threading.Lock()
 MEDIA_SCAN_PROCESS = None
 MEDIA_SCAN_LOCK = threading.Lock()
@@ -3371,7 +3373,7 @@ VIDEO_WALL_PAGE = r"""<!doctype html>
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,Segoe UI,sans-serif;overflow-x:hidden}
 header{position:sticky;top:0;z-index:5;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 18px;background:rgba(7,9,13,.94);border-bottom:1px solid var(--line);backdrop-filter:blur(14px)}
 .brand{font-size:24px;font-weight:950}.brand b{color:var(--gold)}.controls{display:flex;gap:8px;flex-wrap:wrap}button,.button{min-height:38px;border:1px solid var(--line);border-radius:8px;padding:0 13px;background:#171d27;color:#fff;font-weight:850;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}.primary{background:var(--gold);color:#111;border-color:var(--gold)}
-main{padding:14px}.wall{height:calc(100vh - 92px);min-height:520px;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:10px}.tile{position:relative;min-width:0;min-height:0;overflow:hidden;background:#000;border:2px solid transparent;border-radius:8px}.tile.active{border-color:var(--green)}.tile video{width:100%;height:100%;object-fit:contain;background:#000}.empty{height:100%;display:grid;place-items:center;text-align:center;color:var(--muted);border:1px dashed var(--line);padding:18px}.tile-bar{position:absolute;left:0;right:0;bottom:0;display:grid;grid-template-columns:auto auto minmax(90px,1fr) auto auto auto;align-items:center;gap:7px;padding:26px 9px 9px;background:linear-gradient(transparent,rgba(0,0,0,.94));opacity:0;transition:opacity .18s}.tile:hover .tile-bar,.tile.active .tile-bar{opacity:1}.tile-title{position:absolute;left:10px;right:10px;bottom:50px;min-width:0;font-weight:850;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 3px #000}.icon{width:34px;height:34px;padding:0;border-radius:50%}.seek{width:100%;accent-color:var(--gold)}.time{font-size:12px;color:#fff;white-space:nowrap;font-variant-numeric:tabular-nums}.bandwidth{display:none;align-items:center;gap:14px;padding:9px 14px;border-bottom:1px solid var(--line);background:#101620}.bandwidth.open{display:flex}.bandwidth strong{font-size:18px;color:var(--green);font-variant-numeric:tabular-nums}.bandwidth span{color:var(--muted);font-size:13px}
+main{padding:14px}.wall{height:calc(100vh - 92px);min-height:520px;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:10px}.tile{position:relative;min-width:0;min-height:0;overflow:hidden;background:#000;border:2px solid transparent;border-radius:8px}.tile.active{border-color:var(--green)}.tile.expanded{position:fixed;inset:0;z-index:30;border:0;border-radius:0}.tile video{width:100%;height:100%;object-fit:contain;background:#000}.empty{height:100%;display:grid;place-items:center;text-align:center;color:var(--muted);border:1px dashed var(--line);padding:18px}.tile-bar{position:absolute;left:0;right:0;bottom:0;display:grid;grid-template-columns:auto auto minmax(90px,1fr) auto auto auto auto;align-items:center;gap:7px;padding:26px 9px 9px;background:linear-gradient(transparent,rgba(0,0,0,.94));opacity:0;transition:opacity .18s}.tile:hover .tile-bar,.tile.active .tile-bar,.tile.expanded .tile-bar{opacity:1}.tile-title{position:absolute;left:10px;right:10px;bottom:50px;min-width:0;font-weight:850;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 3px #000}.icon{width:34px;height:34px;padding:0;border-radius:50%}.seek{width:100%;accent-color:var(--gold)}.time{font-size:12px;color:#fff;white-space:nowrap;font-variant-numeric:tabular-nums}.bandwidth{display:none;align-items:center;gap:14px;padding:9px 14px;border-bottom:1px solid var(--line);background:#101620}.bandwidth.open{display:flex}.bandwidth strong{font-size:18px;color:var(--green);font-variant-numeric:tabular-nums}.bandwidth span{color:var(--muted);font-size:13px}
 .drawer{position:fixed;inset:0 0 0 auto;z-index:10;width:min(440px,100%);padding:18px;background:#0c1017;border-left:1px solid var(--line);transform:translateX(105%);transition:transform .2s;overflow:auto}.drawer.open{transform:none}.drawer-head{display:flex;justify-content:space-between;align-items:center}.search{width:100%;min-height:48px;margin:16px 0;border:1px solid var(--line);border-radius:8px;background:#171d27;color:#fff;padding:0 14px;font-size:16px}.results{display:grid;gap:9px}.result{display:grid;grid-template-columns:52px 1fr auto;align-items:center;gap:10px;border:1px solid var(--line);border-radius:8px;padding:8px;background:var(--panel)}.result img{width:52px;aspect-ratio:2/3;object-fit:cover;background:#06080c}.result small{display:block;color:var(--muted);margin-top:3px}.slot-picker{display:flex;gap:5px}.slot-picker button{width:34px;height:34px;min-height:34px;padding:0}.hint{color:var(--muted);font-size:13px}
 @media(max-width:720px){header{align-items:flex-start;flex-direction:column}.wall{height:auto;min-height:0;grid-template-columns:1fr;grid-template-rows:none}.tile{aspect-ratio:16/9}.tile-bar{opacity:1}.brand{font-size:20px}}
 </style></head><body><header><div class="brand">CineMedia<b>Vault</b> Wall</div><div class="controls"><a class="button" href="/">Home</a><button id="playAll" class="primary">Play all</button><button id="pauseAll">Pause all</button><button id="syncAll">Sync</button><button id="toggleBandwidth">Bandwidth</button><button id="addMedia">Add media</button></div></header><div class="bandwidth" id="bandwidthPanel"><strong id="bandwidthValue">0.00 Mbps</strong><span id="bandwidthBytes">0 B/s</span><span id="playingCount">0 playing</span></div>
@@ -3382,11 +3384,11 @@ const wall=document.getElementById('wall'),drawer=document.getElementById('drawe
 const esc=s=>String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function load(){const r=await fetch('/api/video-wall');const d=await r.json();slots=d.slots||[];render()}
 function fmt(t){if(!Number.isFinite(t))return '0:00';t=Math.max(0,Math.floor(t));return `${Math.floor(t/60)}:${String(t%60).padStart(2,'0')}`}
-function render(){hlsControllers.forEach(h=>h.destroy());hlsControllers=[];wall.innerHTML='';for(let n=1;n<=4;n++){const item=slots.find(x=>x.slot===n),el=document.createElement('section');el.className='tile'+(n===active?' active':'');el.dataset.slot=n;if(!item){el.innerHTML=`<button class="empty" data-add="${n}">Slot ${n}<br>Add a movie or episode</button>`}else{const source=item.requires_hls?item.hls_url:item.stream_url;el.innerHTML=`<video playsinline preload="metadata" muted data-source="${esc(source)}" data-hls="${item.requires_hls?'1':'0'}" data-slot="${n}"></video><div class="tile-bar"><span class="tile-title">${esc(item.title)} <small>${esc(item.subtitle)}${item.requires_hls?' - HLS':''}</small></span><button class="icon" data-back title="Rewind 10 seconds">-10</button><button class="icon" data-toggle title="Play or pause">&#9654;</button><input class="seek" data-seek type="range" min="0" max="1000" value="0" aria-label="Seek"><span class="time">0:00 / 0:00</span><button class="icon" data-forward title="Forward 10 seconds">+10</button><button class="icon" data-remove="${n}" title="Remove">&#10005;</button></div>`}wall.appendChild(el)}bindVideos();applyAudio();updateBandwidth()}
+function render(){hlsControllers.forEach(h=>h.destroy());hlsControllers=[];wall.innerHTML='';for(let n=1;n<=4;n++){const item=slots.find(x=>x.slot===n),el=document.createElement('section');el.className='tile'+(n===active?' active':'');el.dataset.slot=n;if(!item){el.innerHTML=`<button class="empty" data-add="${n}">Slot ${n}<br>Add a movie or episode</button>`}else{const source=item.requires_hls?item.hls_url:item.stream_url;el.innerHTML=`<video playsinline preload="metadata" muted data-source="${esc(source)}" data-hls="${item.requires_hls?'1':'0'}" data-slot="${n}"></video><div class="tile-bar"><span class="tile-title">${esc(item.title)} <small>${esc(item.subtitle)}${item.requires_hls?' - HLS':''}</small></span><button class="icon" data-back title="Rewind 10 seconds">-10</button><button class="icon" data-toggle title="Play or pause">&#9654;</button><input class="seek" data-seek type="range" min="0" max="1000" value="0" aria-label="Seek"><span class="time">0:00 / 0:00</span><button class="icon" data-forward title="Forward 10 seconds">+10</button><button class="icon" data-fullscreen title="Full screen">&#9974;</button><button class="icon" data-remove="${n}" title="Remove">&#10005;</button></div>`}wall.appendChild(el)}bindVideos();applyAudio();updateBandwidth()}
 function wallUrl(url,slot){const join=url.includes('?')?'&':'?';return `${url}${join}wall=1&slot=${slot}`}
 function bindVideos(){document.querySelectorAll('.tile video').forEach(v=>{const tile=v.closest('.tile'),seek=tile.querySelector('[data-seek]'),label=tile.querySelector('.time'),toggle=tile.querySelector('[data-toggle]'),source=v.dataset.source,slot=v.dataset.slot;if(v.dataset.hls==='1'){if(v.canPlayType('application/vnd.apple.mpegurl'))v.src=wallUrl(source,slot);else if(window.Hls&&Hls.isSupported()){const h=new Hls({lowLatencyMode:false,backBufferLength:90,xhrSetup:(xhr,url)=>xhr.open('GET',wallUrl(url,slot),true)});h.loadSource(wallUrl(source,slot));h.attachMedia(v);hlsControllers.push(h)}else v.src=wallUrl(source,slot)}else v.src=wallUrl(source,slot);const update=()=>{if(seek&&Number.isFinite(v.duration)&&v.duration>0)seek.value=Math.round(v.currentTime/v.duration*1000);if(label)label.textContent=`${fmt(v.currentTime)} / ${fmt(v.duration)}`;if(toggle)toggle.innerHTML=v.paused?'&#9654;':'&#10074;&#10074;'};v.addEventListener('timeupdate',update);v.addEventListener('durationchange',update);v.addEventListener('play',update);v.addEventListener('pause',update);update()})}
 function applyAudio(){document.querySelectorAll('.tile').forEach(t=>{t.classList.toggle('active',+t.dataset.slot===active);const v=t.querySelector('video');if(v)v.muted=+t.dataset.slot!==active})}
-wall.addEventListener('click',async e=>{const tile=e.target.closest('.tile');if(tile){active=+tile.dataset.slot;applyAudio()}const v=tile&&tile.querySelector('video');if(e.target.closest('[data-add]'))openDrawer(+e.target.closest('[data-add]').dataset.add);if(e.target.closest('[data-remove]')){await updateSlot(+e.target.closest('[data-remove]').dataset.remove,null);load()}if(v&&e.target.closest('[data-back]'))v.currentTime=Math.max(0,v.currentTime-10);if(v&&e.target.closest('[data-forward]'))v.currentTime=Math.min(Number.isFinite(v.duration)?v.duration:v.currentTime+10,v.currentTime+10);if(v&&e.target.closest('[data-toggle]'))v.paused?v.play().catch(()=>{}):v.pause()});
+wall.addEventListener('click',async e=>{const tile=e.target.closest('.tile');if(tile){active=+tile.dataset.slot;applyAudio()}const v=tile&&tile.querySelector('video');if(e.target.closest('[data-add]'))openDrawer(+e.target.closest('[data-add]').dataset.add);if(e.target.closest('[data-remove]')){await updateSlot(+e.target.closest('[data-remove]').dataset.remove,null);load()}if(v&&e.target.closest('[data-back]'))v.currentTime=Math.max(0,v.currentTime-10);if(v&&e.target.closest('[data-forward]'))v.currentTime=Math.min(Number.isFinite(v.duration)?v.duration:v.currentTime+10,v.currentTime+10);if(v&&e.target.closest('[data-toggle]'))v.paused?v.play().catch(()=>{}):v.pause();if(tile&&e.target.closest('[data-fullscreen]')){if(document.fullscreenElement)document.exitFullscreen().catch(()=>{});else if(tile.requestFullscreen)tile.requestFullscreen().catch(()=>tile.classList.toggle('expanded'));else if(tile.webkitRequestFullscreen)tile.webkitRequestFullscreen();else tile.classList.toggle('expanded')}});
 wall.addEventListener('input',e=>{const seek=e.target.closest('[data-seek]');if(!seek)return;const v=seek.closest('.tile').querySelector('video');if(v&&Number.isFinite(v.duration))v.currentTime=(+seek.value/1000)*v.duration});
 function openDrawer(slot){active=slot||active;drawer.classList.add('open');search.focus()}
 document.getElementById('addMedia').onclick=()=>openDrawer(active);document.getElementById('closeDrawer').onclick=()=>drawer.classList.remove('open');
@@ -4819,6 +4821,25 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
             conn.close()
 
     def hls_user_progress(self, kind: str, item_id: str) -> list[dict]:
+        now = time.time()
+        active = []
+        with HLS_VIEWER_LOCK:
+            for key, viewer in list(HLS_VIEWERS.items()):
+                if now - float(viewer.get("updated_at") or 0) > 45:
+                    HLS_VIEWERS.pop(key, None)
+                    continue
+                if viewer.get("kind") == kind and str(viewer.get("item_id")) == str(item_id):
+                    duration = float(viewer.get("duration") or 0)
+                    position = float(viewer.get("position") or 0)
+                    active.append({
+                        "user": viewer.get("user") or "Signed-in user",
+                        "position": position,
+                        "duration": duration,
+                        "progress": (position / duration * 100.0) if duration > 0 else 0.0,
+                        "updated": viewer.get("updated_at") or 0,
+                    })
+        if active:
+            return sorted(active, key=lambda row: float(row["updated"] or 0), reverse=True)[:6]
         conn = db_connect()
         try:
             rows = conn.execute(
@@ -5687,6 +5708,27 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
             return
         item = media_for_kind(kind, item_id)
         stream = ensure_hls_stream(kind, item_id, item["path"])
+        user = self.current_user()
+        if user:
+            user_id = int(user["id"])
+            remote = self.client_address[0] if self.client_address else ""
+            viewer_key = f"{stream['key']}:{user_id}:{remote}"
+            segment_match = re.search(r"(\d+)(?=\.[^.]+$)", filename)
+            with HLS_VIEWER_LOCK:
+                previous = HLS_VIEWERS.get(viewer_key, {})
+                position = float(previous.get("position") or 0)
+                if segment_match:
+                    position = (int(segment_match.group(1)) + 1) * max(1.0, float(HLS_SEGMENT_SECONDS))
+                HLS_VIEWERS[viewer_key] = {
+                    "kind": kind,
+                    "item_id": str(item_id),
+                    "user_id": user_id,
+                    "user": user["full_name"] or user["username"] or "Signed-in user",
+                    "remote": remote,
+                    "position": position,
+                    "duration": float(item.get("duration") or ffprobe_duration(item["path"]) or 0),
+                    "updated_at": time.time(),
+                }
         if filename.endswith(".m3u8") and HLS_VIRTUAL_VOD:
             data = virtual_vod_playlist(item["path"])
             if data:
@@ -5726,7 +5768,6 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
         self.wfile.write(data)
         query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         if query.get("wall", [""])[0] == "1":
-            user = self.current_user()
             if user:
                 with DIRECT_STREAM_LOCK:
                     DIRECT_BANDWIDTH_SAMPLES.append((time.monotonic(), int(user["id"]), len(data)))

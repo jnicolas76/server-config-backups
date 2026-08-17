@@ -109,7 +109,9 @@ Compressed mobile downloads in the lab target `MOBILE_DOWNLOAD_TARGET_SOURCE_RAT
 Open `/wall` after signing in. Each user has four saved slots that can mix
 movies and individual TV episodes. Every occupied tile includes independent
 play/pause, 10-second rewind/forward, and timeline seeking controls. Selecting
-a tile makes it the only audible source.
+a tile makes it the only audible source. The full-screen control expands one
+tile using the browser Fullscreen API, with a full-window fallback when the
+browser restricts native fullscreen.
 
 The `Bandwidth` button shows or hides a live meter. It reports actual bytes
 served to that user's wall over a rolling three-second window, in Mbps and
@@ -121,3 +123,5 @@ and audio use direct Range playback. Sources such as HEVC/E-AC-3 automatically
 use the existing HLS engine and are delivered as H.264/AAC, preventing silent
 video or unsupported-codec failures. Probe results are cached by file size and
 modification time. HLS segment traffic is included in the bandwidth meter.
+Authenticated HLS playlist and segment requests register the active user, so
+the HLS admin page identifies who is watching wall and regular HLS streams.

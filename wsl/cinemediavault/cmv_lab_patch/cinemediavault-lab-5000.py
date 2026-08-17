@@ -24,16 +24,38 @@ import sys
 import threading
 import time
 import urllib.parse
+import zipfile
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 MOVIE_APP_DIR = Path(os.environ.get("MOVIE_APP_DIR", "/home/jnicolas/media-download-library")).resolve()
 TV_APP_DIR = Path(os.environ.get("TV_APP_DIR", "/home/jnicolas/tv-download-library")).resolve()
-MOVIE_ROOT = os.environ.get("MOVIE_ROOT", "/home/jnicolas/Data4/Movies")
-TV_ROOT = os.environ.get("TV_ROOT", "/home/jnicolas/Data2/TV Shows")
+MOVIE_ROOT = os.environ.get("MOVIE_ROOT", "/media/jnicolas/Expansion/Movies")
+TV_ROOT = os.environ.get("TV_ROOT", "/media/jnicolas/Elements/TV Shows")
 ASSET_DIR = Path(os.environ.get("MEDIA_LIBRARY_ASSET_DIR", "/home/jnicolas/media-library-assets")).resolve()
+COMIC_LIBRARY_ROOT = Path(os.environ.get("CINEVAULT_COMIC_LIBRARY_ROOT", "/media/jnicolas/Expansion/comic-library")).resolve()
+BOOK_ROOT = Path(os.environ.get("CINEVAULT_BOOK_ROOT", "/media/jnicolas/Expansion/Books")).resolve()
+BOOKVAULT_INDEX_CACHE = Path(os.environ.get("CINEVAULT_BOOKVAULT_INDEX_CACHE", "/home/jnicolas/bookvault/book-index-cache.json")).resolve()
+ROM_ROOT = Path(os.environ.get("CINEVAULT_ROM_ROOT", "/home/jnicolas/roms")).resolve()
+MODULE_GAME_ROOTS = {
+    "nes": (Path("/home/jnicolas/software/NES/roms"), {".nes", ".zip", ".7z"}),
+    "sega": (Path("/home/jnicolas/software/SEGA/roms"), {".gen", ".md", ".smd", ".bin", ".zip", ".7z"}),
+    "dos": (Path("/home/jnicolas/software/DOS/games/library"), {".jsdos", ".zip", ".7z"}),
+    "mame": (Path("/home/jnicolas/software/MAME/roms"), {".zip", ".7z"}),
+    "arcade": (ROM_ROOT / "arcade", {".zip", ".7z"}),
+    "gameboy": (Path("/home/jnicolas/software/GAMEBOY/roms"), {".gb", ".gbc", ".zip", ".7z"}),
+    "gba": (Path("/home/jnicolas/software/GBA/roms"), {".gba", ".zip", ".7z"}),
+    "n64": (Path("/home/jnicolas/software/N64/roms"), {".n64", ".z64", ".v64", ".zip", ".7z"}),
+    "ps1": (Path("/home/jnicolas/software/PS1/roms"), {".bin", ".cue", ".iso", ".chd", ".pbp", ".zip", ".7z"}),
+    "c64": (Path("/home/jnicolas/software/C64/roms"), {".d64", ".t64", ".crt", ".prg", ".zip", ".7z"}),
+    "atari2600": (Path("/home/jnicolas/software/ATARI2600/roms"), {".a26", ".bin", ".zip", ".7z"}),
+    "atari5200": (Path("/home/jnicolas/software/ATARI5200/roms"), {".a52", ".bin", ".zip", ".7z"}),
+    "atari7800": (Path("/home/jnicolas/software/ATARI7800/roms"), {".a78", ".bin", ".zip", ".7z"}),
+}
 HLS_CACHE_DIR = Path(os.environ.get("HLS_CACHE_DIR", "/tmp/cinevault-hls")).resolve()
 MEDIA_REFRESH_SCRIPT = Path(os.environ.get("MEDIA_REFRESH_SCRIPT", "/home/jnicolas/media-library-refresh.sh")).resolve()
+SCAN_PROGRESS_FILE = Path(os.environ.get("SCAN_PROGRESS_FILE", "/home/jnicolas/cinemediavault-lab/.cinemediavault-scan-progress-5000.json")).resolve()
 CINEVAULT_DB = Path(os.environ.get("CINEVAULT_DB", "/home/jnicolas/cinevault-data/cinevault.db")).resolve()
 CINEVAULT_BACKUP_DIR = Path(os.environ.get("CINEVAULT_BACKUP_DIR", str(CINEVAULT_DB.parent / "backups"))).resolve()
 CINEVAULT_BACKUP_KEEP = int(os.environ.get("CINEVAULT_BACKUP_KEEP", "10"))
@@ -55,19 +77,56 @@ HLS_CACHE_MAX_AGE_HOURS = float(os.environ.get("HLS_CACHE_MAX_AGE_HOURS", "6"))
 HLS_CLEANUP_INTERVAL_MINUTES = float(os.environ.get("HLS_CLEANUP_INTERVAL_MINUTES", "30"))
 HLS_IDLE_STOP_MINUTES = float(os.environ.get("HLS_IDLE_STOP_MINUTES", "10"))
 HLS_VIRTUAL_VOD = os.environ.get("HLS_VIRTUAL_VOD", "1").lower() not in {"0", "false", "no"}
+MOBILE_DOWNLOAD_CACHE_DIR = Path(os.environ.get("MOBILE_DOWNLOAD_CACHE_DIR", "/home/jnicolas/cinemediavault-lab/mobile-download-cache")).resolve()
+MOBILE_DOWNLOAD_CACHE_MAX_AGE_HOURS = float(os.environ.get("MOBILE_DOWNLOAD_CACHE_MAX_AGE_HOURS", "24"))
+MOBILE_DOWNLOAD_CACHE_MAX_AGE_OPTIONS = {6, 12, 24}
+MOBILE_DOWNLOAD_SETTINGS_FILE = CINEVAULT_DB.parent / "mobile-download-settings.json"
+MOBILE_DOWNLOAD_TARGET_MB_PER_HOUR = float(os.environ.get("MOBILE_DOWNLOAD_TARGET_MB_PER_HOUR", "150"))
+MOBILE_DOWNLOAD_TARGET_SOURCE_RATIO = float(os.environ.get("MOBILE_DOWNLOAD_TARGET_SOURCE_RATIO", "0.40"))
+MOBILE_DOWNLOAD_MAX_OUTPUT_RATIO = float(os.environ.get("MOBILE_DOWNLOAD_MAX_OUTPUT_RATIO", "0.98"))
+MOBILE_DOWNLOAD_ABSOLUTE_MAX_OUTPUT_RATIO = float(os.environ.get("MOBILE_DOWNLOAD_ABSOLUTE_MAX_OUTPUT_RATIO", "1.00"))
+MOBILE_DOWNLOAD_TARGET_TOLERANCE = float(os.environ.get("MOBILE_DOWNLOAD_TARGET_TOLERANCE", "1.08"))
+MOBILE_DOWNLOAD_MIN_EPISODE_MB = float(os.environ.get("MOBILE_DOWNLOAD_MIN_EPISODE_MB", "8"))
+MOBILE_DOWNLOAD_VIDEO_CODEC = os.environ.get("MOBILE_DOWNLOAD_VIDEO_CODEC", "libx265")
+MOBILE_DOWNLOAD_VIDEO_PRESET = os.environ.get("MOBILE_DOWNLOAD_VIDEO_PRESET", "fast")
+MOBILE_DOWNLOAD_AUDIO_KBPS = int(os.environ.get("MOBILE_DOWNLOAD_AUDIO_KBPS", "64"))
+MOBILE_DOWNLOAD_CONTAINER_OVERHEAD_KBPS = int(os.environ.get("MOBILE_DOWNLOAD_CONTAINER_OVERHEAD_KBPS", "25"))
 SERVER_DISPLAY_NAME = os.environ.get("CINEVAULT_SERVER_NAME") or socket.gethostname()
 TRANSCODES: dict[str, dict] = {}
 DIRECT_STREAMS: dict[str, dict] = {}
+HLS_VIEWERS: dict[str, dict] = {}
+DIRECT_BANDWIDTH_SAMPLES = deque(maxlen=50000)
+MOBILE_DOWNLOAD_JOBS: dict[str, dict] = {}
 MEDIA_DURATION_CACHE: dict[str, float] = {}
+MEDIA_CODEC_CACHE: dict[str, tuple[float, int, dict]] = {}
 TRANSCODE_LOCK = threading.Lock()
 DIRECT_STREAM_LOCK = threading.Lock()
+HLS_VIEWER_LOCK = threading.Lock()
+MOBILE_DOWNLOAD_LOCK = threading.Lock()
 MEDIA_SCAN_PROCESS = None
 MEDIA_SCAN_LOCK = threading.Lock()
 MEDIA_SCAN_LAST_RESULT = {"running": False}
 
 
+def save_scan_progress(payload: dict) -> None:
+    data = dict(payload)
+    data["updated_at"] = time.time()
+    SCAN_PROGRESS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    temp = SCAN_PROGRESS_FILE.with_suffix(SCAN_PROGRESS_FILE.suffix + ".tmp")
+    temp.write_text(json.dumps(data), encoding="utf-8")
+    temp.replace(SCAN_PROGRESS_FILE)
+
+
+def load_scan_progress() -> dict:
+    try:
+        return json.loads(SCAN_PROGRESS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
 DEFAULT_MODULES = [
-    {"id": "comics", "name": "Comics", "logo": "COMICS", "enabled": True, "protocol": "http", "port": 8110, "url": "", "start_script": "/home/jnicolas/Data4/comic-library/start_library.sh", "pid_file": "/home/jnicolas/Data4/comic-library/.server.pid", "stop_pattern": "python3 -m http.server 8110"},
+    {"id": "comics", "name": "Comics", "logo": "COMICS", "enabled": True, "protocol": "http", "port": 8110, "url": "", "start_script": "/media/jnicolas/Expansion/comic-library/start_library.sh", "pid_file": "/media/jnicolas/Expansion/comic-library/.server.pid", "stop_pattern": "python3 -m http.server 8110"},
+    {"id": "bookvault", "name": "BookVault", "logo": "BOOKS", "enabled": True, "protocol": "http", "port": 8112, "url": "", "start_script": "/home/jnicolas/start_bookvault_8112.sh", "pid_file": "/home/jnicolas/bookvault-8112.pid", "stop_pattern": "bookvault_server.py"},
     {"id": "nes", "name": "NES", "logo": "NES", "enabled": True, "protocol": "https", "port": 8092, "url": "", "start_script": "/home/jnicolas/software/NES/start.sh", "pid_file": "/home/jnicolas/software/NES/.server.pid", "stop_pattern": "/home/jnicolas/software/NES/scripts/serve.py"},
     {"id": "sega", "name": "SEGA", "logo": "SEGA", "enabled": True, "protocol": "https", "port": 8094, "url": "", "start_script": "/home/jnicolas/software/SEGA/start.sh", "pid_file": "/home/jnicolas/software/SEGA/.server.pid", "stop_pattern": "/home/jnicolas/software/SEGA/scripts/serve.py"},
     {"id": "dos", "name": "DOS", "logo": "DOS", "enabled": True, "protocol": "http", "port": 8091, "url": "", "start_script": "/home/jnicolas/software/DOS/start.sh", "pid_file": "/home/jnicolas/software/DOS/.server.pid", "stop_pattern": "/home/jnicolas/software/DOS/scripts/serve.py"},
@@ -317,6 +376,24 @@ CREATE TABLE IF NOT EXISTS pending_users (
   note TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_pending_users_status ON pending_users(status, requested_at);
+CREATE TABLE IF NOT EXISTS actors (id INTEGER PRIMARY KEY, name TEXT NOT NULL, name_norm TEXT NOT NULL UNIQUE);
+CREATE TABLE IF NOT EXISTS actor_media (
+  actor_id INTEGER NOT NULL REFERENCES actors(id) ON DELETE CASCADE,
+  media_type TEXT NOT NULL, media_id INTEGER NOT NULL, title TEXT NOT NULL,
+  subtitle TEXT, poster TEXT, href TEXT NOT NULL,
+  PRIMARY KEY(actor_id, media_type, media_id)
+);
+CREATE INDEX IF NOT EXISTS idx_actors_name_norm ON actors(name_norm);
+CREATE INDEX IF NOT EXISTS idx_actor_media_actor ON actor_media(actor_id, media_type, title);
+CREATE TABLE IF NOT EXISTS user_video_wall (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  slot INTEGER NOT NULL CHECK(slot BETWEEN 1 AND 4),
+  media_type TEXT NOT NULL CHECK(media_type IN ('movie', 'tv')),
+  media_id INTEGER NOT NULL,
+  media_path TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(user_id, slot)
+);
 """
 
 
@@ -360,6 +437,9 @@ def ensure_auth_schema() -> None:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
         if "is_super_admin" not in columns:
             conn.execute("ALTER TABLE users ADD COLUMN is_super_admin INTEGER NOT NULL DEFAULT 0")
+        wall_columns = {row["name"] for row in conn.execute("PRAGMA table_info(user_video_wall)").fetchall()}
+        if "media_path" not in wall_columns:
+            conn.execute("ALTER TABLE user_video_wall ADD COLUMN media_path TEXT NOT NULL DEFAULT ''")
         now = auth_now()
         admin_hash = password_hash("admin1")
         conn.execute(
@@ -526,6 +606,7 @@ def reload_media_state() -> dict:
     movie_app.load_metadata_map()
     tv_app.load_poster_map()
     tv_app.load_metadata_map()
+    rebuild_actor_index()
     return {
         "movies": len(movie_app.movie_index.items),
         "shows": len(tv_app.tv_index.shows),
@@ -555,6 +636,12 @@ def watch_full_scan(process, out_path: Path, err_path: Path) -> None:
             payload["reload_error"] = str(exc)
     with MEDIA_SCAN_LOCK:
         MEDIA_SCAN_LAST_RESULT = payload
+    final = dict(load_scan_progress())
+    final.update(payload)
+    final.update({"percent": 100 if return_code == 0 else final.get("percent", 0),
+                  "phase": "Complete" if return_code == 0 else "Scan error",
+                  "message": "Library scan completed" if return_code == 0 else "Library scan failed"})
+    save_scan_progress(final)
 
 
 PLAYER_PAGE = """<!doctype html>
@@ -789,6 +876,11 @@ HOME_PAGE = """<!doctype html>
     .home-search-button { background:rgba(255,255,255,.08); border-color:rgba(255,255,255,.18); gap:7px; }
     .home-search-button svg { width:15px; height:15px; display:block; }
     .scan-button.running { opacity:.7; cursor:wait; }
+    .scan-progress { display:none; position:relative; z-index:2; margin:0 24px 16px; }
+    .scan-progress.visible { display:block; }
+    .scan-progress-row { display:flex; justify-content:space-between; gap:12px; color:#d9dde5; font-size:12px; margin-bottom:6px; }
+    .scan-progress-track { height:7px; overflow:hidden; border-radius:999px; background:rgba(255,255,255,.14); }
+    .scan-progress-fill { width:0; height:100%; border-radius:999px; background:var(--gold); transition:width .35s ease; }
     .account-wrap { position:relative; }
     .avatar { width:29px; height:29px; display:grid; place-items:center; border-radius:999px; background:#75a9d9; color:#fff; font-weight:900; font-size:14px; position:relative; text-decoration:none; border:0; cursor:pointer; }
     .avatar .badge { position:absolute; top:-6px; right:-6px; min-width:16px; height:16px; padding:0 4px; display:grid; place-items:center; border-radius:999px; background:#e83f4f; color:#fff; font-size:10px; line-height:1; border:2px solid #08090c; }
@@ -822,6 +914,8 @@ HOME_PAGE = """<!doctype html>
     .poster { position:relative; width:100%; aspect-ratio:2/3; border-radius:8px; overflow:hidden; background:#16181d; box-shadow:0 12px 26px rgba(0,0,0,.42); }
     .poster img { width:100%; height:100%; object-fit:cover; display:block; }
     .poster.missing { display:grid; place-items:center; color:#818793; font-weight:900; border:1px solid var(--line); }
+    .card.watched .poster { outline:3px solid #30d158; outline-offset:2px; }
+    .watched-badge { position:absolute; left:8px; top:8px; z-index:2; border-radius:999px; padding:3px 7px; background:rgba(48,209,88,.92); color:#031007; font-size:10px; font-weight:950; text-transform:uppercase; letter-spacing:.02em; }
     .progress { position:absolute; left:8px; right:8px; bottom:8px; height:6px; border-radius:999px; background:rgba(0,0,0,.72); overflow:hidden; }
     .progress span { display:block; height:100%; width:0%; background:var(--gold); border-radius:999px; }
     .card-title { margin-top:10px; font-size:19px; line-height:1.15; font-weight:800; overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
@@ -903,9 +997,10 @@ HOME_PAGE = """<!doctype html>
     <div class="brand cmv-logo"><span class="cmv-left"><span class="cmv-cine">Cine</span><span class="cmv-media">Media</span></span><span class="cmv-divider"></span><span class="cmv-vault">Vault</span><svg class="cmv-mark" viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="32" r="26" fill="none" stroke="currentColor" stroke-width="4"/><circle cx="32" cy="32" r="9" fill="none" stroke="currentColor" stroke-width="4"/><path d="M32 6v17M32 41v17M6 32h17M41 32h17M13.6 13.6l12 12M38.4 38.4l12 12M50.4 13.6l-12 12M25.6 38.4l-12 12" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"/><circle cx="32" cy="32" r="3" fill="currentColor"/><path d="M32 32l5 4M32 32l-5 4M32 32v-6" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg></div>
     <div class="top-actions"><button class="scan-button" id="scanButton">Scan</button><button class="playback-toggle {{GLOBAL_PLAYBACK_MODE_CLASS}}" id="playbackModeButton" type="button" data-mode="{{GLOBAL_PLAYBACK_MODE}}" title="Default playback mode">{{GLOBAL_PLAYBACK_MODE_LABEL}}</button><button class="home-search-button" id="homeSearchToggle" type="button" aria-label="Search" title="Search"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.8 18.2a7.4 7.4 0 1 1 0-14.8 7.4 7.4 0 0 1 0 14.8Zm5.3-2.1 4.5 4.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg><span>Search</span></button><button class="icon cast-button" id="castButton" type="button" aria-label="Cast" title="Cast"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M5 10V7.5C5 6.1 6.1 5 7.5 5h17C25.9 5 27 6.1 27 7.5v17c0 1.4-1.1 2.5-2.5 2.5H22" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="M5 21c3.3 0 6 2.7 6 6M5 15c6.6 0 12 5.4 12 12M5 27h.1" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round"/></svg></button><div class="avatar">J</div></div>
   </header>
+  <div class="scan-progress" id="scanProgress"><div class="scan-progress-row"><span id="scanProgressMessage">Preparing scan</span><strong id="scanProgressPercent">0%</strong></div><div class="scan-progress-track"><div class="scan-progress-fill" id="scanProgressFill"></div></div></div>
   <div class="home-search-panel" id="homeSearchPanel"><input id="homeSearch" type="search" placeholder="Search movies, shows, actors, or genres"></div>
   <main>
-    <nav class="tabs"><a class="tab active" href="/">Home</a><a class="tab" href="/movies">Movies</a><a class="tab" href="/tv">TV Shows</a>{{MODULE_TABS}}</nav>
+    <nav class="tabs"><a class="tab active" href="/">Home</a><a class="tab" href="/movies">Movies</a><a class="tab" href="/tv">TV Shows</a><a class="tab" href="/wall">Video Wall</a>{{MODULE_TABS}}</nav>
     <section class="section" id="continueSection">
       <div class="section-head"><div><h2>Continue Watching</h2></div></div>
       <div class="rail" id="continueRail"></div>
@@ -1124,26 +1219,55 @@ HOME_PAGE = """<!doctype html>
       }
     }
     refreshContinueMetadata();
+    let scanObservedRunning = false;
     async function pollScanStatus() {
       try {
         const response = await fetch("/api/full-scan-status", { cache: "no-store" });
         const payload = await response.json();
+        updateScanProgress(payload);
         if (payload.running) {
-          setTimeout(pollScanStatus, 5000);
+          scanObservedRunning = true;
+          setTimeout(pollScanStatus, 2000);
           return;
         }
         scanButton.classList.remove("running");
         if (payload.returncode === 0 && payload.reloaded) {
           scanButton.textContent = "Updated";
-          setTimeout(() => location.reload(), 900);
+          const completionId = String(payload.started_at || payload.finished_at || payload.pid || "complete");
+          const reloadKey = "cmvLastCompletedScanReload";
+          if (scanObservedRunning && sessionStorage.getItem(reloadKey) !== completionId) {
+            sessionStorage.setItem(reloadKey, completionId);
+            setTimeout(() => location.reload(), 900);
+          } else {
+            scanButton.textContent = "Scan";
+          }
         } else if (payload.returncode === 0) {
           scanButton.textContent = "Scan Done";
+        } else if (payload.returncode === undefined || payload.returncode === null) {
+          scanButton.textContent = "Scan";
         } else {
           scanButton.textContent = "Scan Error";
         }
       } catch (_) {
         scanButton.textContent = "Scan Error";
         scanButton.classList.remove("running");
+      }
+    }
+    function updateScanProgress(payload) {
+      const box = document.getElementById("scanProgress");
+      const fill = document.getElementById("scanProgressFill");
+      const label = document.getElementById("scanProgressMessage");
+      const value = document.getElementById("scanProgressPercent");
+      const percent = Math.max(0, Math.min(100, Number(payload.percent || 0)));
+      if (payload.running || scanObservedRunning) box.classList.add("visible");
+      else box.classList.remove("visible");
+      fill.style.width = `${percent}%`;
+      value.textContent = `${Math.round(percent)}%`;
+      label.textContent = payload.message || payload.phase || "Scanning library";
+      scanButton.textContent = payload.running ? `Scan ${Math.round(percent)}%` : "Scan";
+      scanButton.classList.toggle("running", !!payload.running);
+      if (!payload.running && scanObservedRunning && percent >= 100) {
+        setTimeout(() => box.classList.remove("visible"), 1800);
       }
     }
     scanButton.addEventListener("click", async () => {
@@ -1157,6 +1281,7 @@ HOME_PAGE = """<!doctype html>
           scanButton.classList.remove("running");
           return;
         }
+        if (payload.running) scanObservedRunning = true;
         scanButton.textContent = payload.running ? "Scanning" : "Scan Started";
         setTimeout(pollScanStatus, 1500);
       } catch (_) {
@@ -1164,6 +1289,7 @@ HOME_PAGE = """<!doctype html>
         scanButton.classList.remove("running");
       }
     });
+    pollScanStatus();
   </script>
 </body>
 </html>
@@ -1291,9 +1417,16 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
     .restart { width:44px; height:44px; display:grid; place-items:center; border-radius:999px; border:1px solid rgba(255,255,255,.12); background:rgba(122,54,70,.50); color:#fff; font-size:0; cursor:pointer; position:relative; }
     .restart::before { content:"\\21BB"; font-size:23px; line-height:1; transform:translateX(-2px); }
     .restart::after { content:"\\25B6"; position:absolute; font-size:11px; line-height:1; transform:translate(5px,1px); }
-    .mode-switch { display:inline-flex; gap:6px; align-items:center; justify-content:center; padding:5px; margin:0 auto 14px; border-radius:999px; background:rgba(255,255,255,.10); border:1px solid rgba(255,255,255,.12); }
+    .mode-switch { display:inline-flex; gap:6px; align-items:center; justify-content:center; padding:5px; margin:0 auto 10px; border-radius:999px; background:rgba(255,255,255,.10); border:1px solid rgba(255,255,255,.12); }
     .mode-switch a { min-width:74px; min-height:30px; display:inline-flex; align-items:center; justify-content:center; border-radius:999px; color:#e8edf5; text-decoration:none; font-size:12px; font-weight:950; }
     .mode-switch a.active { background:#fff; color:#111; }
+    .download-size-panel { display:none; width:min(500px,100%); margin:0 auto 14px; padding:12px 14px; border-radius:18px; background:rgba(0,0,0,.34); border:1px solid rgba(255,255,255,.15); backdrop-filter:blur(10px); }
+    .download-size-panel.open { display:block; }
+    .download-size-panel.visible { display:block; }
+    .download-size-head { display:flex; align-items:baseline; justify-content:space-between; gap:10px; color:#fff; font-size:13px; font-weight:900; }
+    .download-size-head span:last-child { color:#f5b73f; }
+    .download-size-panel input[type=range] { width:100%; accent-color:#f5b73f; margin:8px 0 6px; }
+    .download-size-meta { display:flex; justify-content:space-between; gap:10px; color:rgba(238,242,247,.78); font-size:11px; font-weight:800; }
     .actions { display:flex; flex-wrap:wrap; justify-content:center; gap:13px; margin:0 0 26px; }
     .action { width:84px; color:#e8edf5; text-decoration:none; font-size:12px; line-height:1.25; }
     .action span { width:50px; height:50px; display:grid; place-items:center; margin:0 auto 7px; border-radius:999px; background:rgba(255,255,255,.12); border:1px solid rgba(255,255,255,.12); font-size:21px; }
@@ -1365,6 +1498,7 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
       .action { width:70px; font-size:11px; }
       .action span { width:46px; height:46px; font-size:20px; }
       .action.download span, .action.mark-watched span { width:46px; height:46px; font-size:24px; border-width:3px; }
+      .download-size-panel { padding:10px 12px; margin-bottom:12px; }
       .summary { font-size:17px; }
       .cast-panel h2 { font-size:20px; }
       .file-grid { font-size:16px; }
@@ -1384,6 +1518,11 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
       <div class="meta">{{META}}</div>
       <div class="resume-row"><button class="resume" id="resumeButton">Play</button><button class="restart" id="restartButton" title="Start from beginning" aria-label="Start from beginning">Start over</button></div>
       <div class="mode-switch"><a class="{{DIRECT_MODE_CLASS}}" href="{{DIRECT_MODE_HREF}}">Direct</a><a class="{{HLS_MODE_CLASS}}" href="{{HLS_MODE_HREF}}">HLS</a></div>
+      <div class="download-size-panel{{DOWNLOAD_SIZE_OPEN_CLASS}}" id="downloadSizePanel" data-source-bytes="{{SOURCE_BYTES}}" data-default-ratio="{{DOWNLOAD_DEFAULT_RATIO}}">
+        <div class="download-size-head"><span>HLS compressed download size</span><span id="downloadSizeValue">{{DOWNLOAD_DEFAULT_LABEL}}</span></div>
+        <input id="downloadSizeSlider" type="range" min="20" max="95" step="5" value="{{DOWNLOAD_DEFAULT_PERCENT}}" aria-label="Compressed download target size">
+        <div class="download-size-meta"><span>Smaller file</span><span>Original: {{SOURCE_SIZE_LABEL}}</span><span>Better quality</span></div>
+      </div>
       <div class="actions">{{ACTIONS}}</div>
       <p class="summary">{{SUMMARY}}</p>
       <section class="cast-panel" id="castPanel"><h2>Cast & Crew</h2><ul class="cast-list">{{ACTORS}}</ul></section>
@@ -1435,6 +1574,60 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
     const resumeButton = document.getElementById("resumeButton");
     const key = "cinevaultContinue";
     const mediaSource = video.dataset.source;
+    const downloadSizePanel = document.getElementById("downloadSizePanel");
+    const downloadSizeSlider = document.getElementById("downloadSizeSlider");
+    const downloadSizeValue = document.getElementById("downloadSizeValue");
+    const sourceBytes = Number(downloadSizePanel?.dataset.sourceBytes || 0);
+    const modeLinks = Array.from(document.querySelectorAll(".mode-switch a"));
+    let selectedPlaybackMode = "direct";
+    function setDownloadSizePanelVisible(isVisible) {
+      if (downloadSizePanel) downloadSizePanel.classList.toggle("visible", !!isVisible);
+    }
+    function modeFromHref(href) {
+      return /mode=hls/.test(href || "") ? "hls" : "direct";
+    }
+    function currentModeFromLinks() {
+      const active = modeLinks.find(link => link.classList.contains("active"));
+      return modeFromHref(active ? active.getAttribute("href") : "");
+    }
+    function setSelectedPlaybackMode(mode, updateUrl=false) {
+      selectedPlaybackMode = mode === "hls" ? "hls" : "direct";
+      modeLinks.forEach(link => link.classList.toggle("active", modeFromHref(link.getAttribute("href")) === selectedPlaybackMode));
+      setDownloadSizePanelVisible(selectedPlaybackMode === "hls");
+      if (updateUrl && history.replaceState) {
+        const url = new URL(location.href);
+        url.searchParams.set("mode", selectedPlaybackMode);
+        history.replaceState(null, "", url.toString());
+      }
+    }
+    function humanBytes(bytes) {
+      if (!Number.isFinite(bytes) || bytes <= 0) return "0 MB";
+      const units = ["B","KB","MB","GB","TB"];
+      let value = bytes;
+      let idx = 0;
+      while (value >= 1024 && idx < units.length - 1) { value /= 1024; idx += 1; }
+      const digits = idx >= 3 ? 1 : 0;
+      return `${value.toFixed(digits)} ${units[idx]}`;
+    }
+    function selectedDownloadRatio() {
+      return Math.max(0.20, Math.min(0.95, Number(downloadSizeSlider?.value || 40) / 100));
+    }
+    function updateDownloadSizeLabel() {
+      if (!downloadSizeSlider || !downloadSizeValue) return;
+      const percent = Math.round(selectedDownloadRatio() * 100);
+      downloadSizeValue.textContent = `${humanBytes(sourceBytes * selectedDownloadRatio())} (${percent}%)`;
+    }
+    if (downloadSizeSlider) {
+      downloadSizeSlider.addEventListener("input", updateDownloadSizeLabel);
+      updateDownloadSizeLabel();
+    }
+    setSelectedPlaybackMode(currentModeFromLinks(), false);
+    modeLinks.forEach(link => {
+      link.addEventListener("click", event => {
+        event.preventDefault();
+        setSelectedPlaybackMode(modeFromHref(link.getAttribute("href") || ""), true);
+      });
+    });
     let serverState = null;
     let watchedState = false;
     const playerOverlay = document.getElementById("playerOverlay");
@@ -1647,6 +1840,14 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
       }
     }
     function startPlayback(fromBeginning=false, askFullscreen=true) {
+      if (selectedPlaybackMode === "hls" && !mediaSource.endsWith(".m3u8")) {
+        const url = new URL(location.href);
+        url.searchParams.set("mode", "hls");
+        url.searchParams.set("play", "1");
+        if (fromBeginning) url.searchParams.set("restart", "1");
+        location.href = url.toString();
+        return;
+      }
       if (fromBeginning) {
         video._forceStartFromBeginning = true;
         serverState = null;
@@ -1739,6 +1940,38 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
         const isOpen = panel.classList.toggle("open");
         link.classList.toggle("watched", isOpen);
         if (isOpen) panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      });
+    });
+    document.querySelectorAll("[data-mobile-download]").forEach(link => {
+      link.addEventListener("click", async event => {
+        if (selectedPlaybackMode !== "hls") return;
+        event.preventDefault();
+        const originalText = link.lastChild ? link.lastChild.textContent : "Download";
+        if (link.dataset.busy === "1") return;
+        link.dataset.busy = "1";
+        if (link.lastChild) link.lastChild.textContent = "Queueing";
+        try {
+          const response = await fetch("/api/mobile-download/enqueue", {
+            method: "POST",
+            headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({scope: link.dataset.mobileScope, item_id: link.dataset.mobileId, target_ratio: selectedDownloadRatio()})
+          });
+          const payload = await response.json();
+          if (!payload.ok) throw new Error(payload.error || "Download queue failed");
+          if (payload.ready && payload.download_url) {
+            if (link.lastChild) link.lastChild.textContent = "Ready";
+            location.href = payload.download_url;
+          } else {
+            const eta = payload.estimate_seconds ? Math.ceil(payload.estimate_seconds / 60) : null;
+            if (link.lastChild) link.lastChild.textContent = eta ? `Queued ${eta}m` : "Queued";
+          }
+        } catch (error) {
+          if (link.lastChild) link.lastChild.textContent = "Failed";
+          alert(error.message || String(error));
+          setTimeout(() => { if (link.lastChild) link.lastChild.textContent = originalText; }, 2500);
+        } finally {
+          setTimeout(() => { link.dataset.busy = "0"; }, 1000);
+        }
       });
     });
     resumeButton.addEventListener("click", () => startPlayback(false, true));
@@ -1938,31 +2171,57 @@ def home_poster_html(poster: str) -> str:
     return "No Poster"
 
 
-def home_movie_card(item) -> str:
+def watched_keys_for_user(user) -> set[str]:
+    if not user:
+        return set()
+    conn = db_connect()
+    try:
+        rows = conn.execute("SELECT media_key FROM user_media_state WHERE user_id=? AND watched=1", (int(user["id"]),)).fetchall()
+        return {str(row["media_key"]) for row in rows}
+    finally:
+        conn.close()
+
+
+def watched_badge_html(watched: bool) -> str:
+    return "<span class='watched-badge'>Watched</span>" if watched else ""
+
+
+def home_movie_card(item, watched_keys: set[str] | None = None) -> str:
     poster = movie_app.poster_url_for(item)
     metadata = movie_app.metadata_for(item)
     title = metadata.get("title") or item.title
     year = metadata.get("year") or ""
     poster_class = "" if poster else " missing"
+    watched = bool(watched_keys and f"movie:{item.id}" in watched_keys)
+    card_class = "card watched" if watched else "card"
     return (
-        f"<a class='card' href='/movie/{item.id}'>"
-        f"<div class='poster{poster_class}'>{home_poster_html(poster)}</div>"
+        f"<a class='{card_class}' href='/movie/{item.id}'>"
+        f"<div class='poster{poster_class}'>{watched_badge_html(watched)}{home_poster_html(poster)}</div>"
         f"<div class='card-title'>{html.escape(title)}</div>"
         f"<div class='card-meta'>{html.escape(str(year) or movie_app.human_size(item.size))}</div>"
         f"</a>"
     )
 
 
-def home_show_card(show) -> str:
+def show_watched(show, watched_keys: set[str] | None = None) -> bool:
+    if not watched_keys:
+        return False
+    episodes = [episode for season in show.seasons.values() for episode in season.episodes]
+    return bool(episodes) and all(f"tv:{episode.id}" in watched_keys for episode in episodes)
+
+
+def home_show_card(show, watched_keys: set[str] | None = None) -> str:
     poster = tv_app.poster_url_for(show)
     metadata = tv_app.metadata_for(show)
     title = metadata.get("title") or show.title
     latest = latest_episode_for_show(show)
     subtitle = latest_episode_label(latest) if latest else f"{show.count} episodes"
     poster_class = "" if poster else " missing"
+    watched = show_watched(show, watched_keys)
+    card_class = "card watched" if watched else "card"
     return (
-        f"<a class='card' href='/tv/show/{show.id}'>"
-        f"<div class='poster{poster_class}'>{home_poster_html(poster)}</div>"
+        f"<a class='{card_class}' href='/tv/show/{show.id}'>"
+        f"<div class='poster{poster_class}'>{watched_badge_html(watched)}{home_poster_html(poster)}</div>"
         f"<div class='card-title'>{html.escape(title)}</div>"
         f"<div class='card-meta'>{html.escape(subtitle)}</div>"
         f"</a>"
@@ -2035,11 +2294,62 @@ def metadata_search_blob(metadata: dict) -> str:
     )
 
 
-def unified_search_results(query: str, limit: int = 100) -> list[dict]:
+def actor_names_for(metadata: dict) -> list[str]:
+    values = metadata.get("actors") or metadata.get("cast") or []
+    names: list[str] = []; seen: set[str] = set()
+    for value in values:
+        if isinstance(value, dict): value = value.get("name") or value.get("original_name") or ""
+        name = re.sub(r"\s+", " ", str(value or "")).strip(); key = name.casefold()
+        if name and key not in seen: seen.add(key); names.append(name)
+    return names
+
+
+def actor_name_norm(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(name or "").casefold()).strip()
+
+
+def rebuild_actor_index() -> dict:
+    rows = []
+    for item in movie_app.movie_index.items:
+        metadata = movie_app.metadata_for(item); title = str(metadata.get("title") or item.title)
+        for name in actor_names_for(metadata): rows.append((name,actor_name_norm(name),"movie",int(item.id),title,str(metadata.get("year") or movie_app.human_size(item.size)),str(movie_app.poster_url_for(item) or ""),f"/movie/{item.id}"))
+    for show in tv_app.tv_index.shows:
+        metadata = tv_app.metadata_for(show); title = str(metadata.get("title") or show.title)
+        for name in actor_names_for(metadata): rows.append((name,actor_name_norm(name),"tv",int(show.id),title,f"{show.count} episodes",str(tv_app.poster_url_for(show) or ""),f"/tv/show/{show.id}"))
+    conn = db_connect()
+    try:
+        conn.execute("DELETE FROM actor_media"); conn.execute("DELETE FROM actors")
+        for name,norm,media_type,media_id,title,subtitle,poster,href in rows:
+            if not norm: continue
+            conn.execute("INSERT OR IGNORE INTO actors(name,name_norm) VALUES(?,?)",(name,norm)); actor_id=conn.execute("SELECT id FROM actors WHERE name_norm=?",(norm,)).fetchone()["id"]
+            conn.execute("INSERT OR REPLACE INTO actor_media(actor_id,media_type,media_id,title,subtitle,poster,href) VALUES(?,?,?,?,?,?,?)",(actor_id,media_type,media_id,title,subtitle,poster,href))
+        conn.commit(); return {"actors":conn.execute("SELECT COUNT(*) FROM actors").fetchone()[0],"links":conn.execute("SELECT COUNT(*) FROM actor_media").fetchone()[0]}
+    finally: conn.close()
+
+
+def actor_search_results(query: str, limit: int = 20) -> list[dict]:
+    norm=actor_name_norm(query)
+    if not norm: return []
+    conn=db_connect()
+    try:
+        rows=conn.execute("SELECT a.name,COUNT(*) media_count,COALESCE(MAX(NULLIF(am.poster,'')),'') poster FROM actors a JOIN actor_media am ON am.actor_id=a.id WHERE a.name_norm LIKE ? GROUP BY a.id ORDER BY a.name LIMIT ?",(f"%{norm}%",limit)).fetchall()
+        return [{"kind":"Actor","title":r["name"],"subtitle":f"{r['media_count']} library title(s)","poster":r["poster"],"href":f"/actor?name={urllib.parse.quote(r['name'])}"} for r in rows]
+    finally: conn.close()
+
+
+def actor_media_results(name: str) -> list[dict]:
+    conn=db_connect()
+    try:
+        rows=conn.execute("SELECT am.media_type,am.title,am.subtitle,am.poster,am.href FROM actors a JOIN actor_media am ON am.actor_id=a.id WHERE a.name_norm=? ORDER BY am.media_type,am.title",(actor_name_norm(name),)).fetchall()
+        return [{"kind":"Movie" if r["media_type"]=="movie" else "TV Show","title":r["title"],"subtitle":r["subtitle"],"poster":r["poster"],"href":r["href"]} for r in rows]
+    finally: conn.close()
+
+
+def unified_search_results(query: str, limit: int = 100, watched_keys: set[str] | None = None) -> list[dict]:
     terms = [term.lower() for term in re.findall(r"\w+", query or "")]
     if not terms:
         return []
-    results: list[dict] = []
+    results: list[dict] = actor_search_results(query)
     for item in movie_app.movie_index.items:
         metadata = movie_app.metadata_for(item)
         title = metadata.get("title") or item.title
@@ -2048,6 +2358,7 @@ def unified_search_results(query: str, limit: int = 100) -> list[dict]:
         if all(term in blob for term in terms):
             results.append({
                 "kind": "Movie",
+                "key": f"movie:{item.id}",
                 "title": title,
                 "subtitle": str(year) if year else movie_app.human_size(item.size),
                 "poster": movie_app.poster_url_for(item),
@@ -2072,20 +2383,23 @@ def unified_search_results(query: str, limit: int = 100) -> list[dict]:
         if all(term in blob for term in terms) or episode_hit:
             results.append({
                 "kind": "TV Show",
+                "key": f"show:{show.id}",
                 "title": title,
                 "subtitle": subtitle,
                 "poster": tv_app.poster_url_for(show),
                 "href": f"/tv/show/{show.id}",
+                "watched": show_watched(show, watched_keys),
             })
     return results[:limit]
 
 
-def search_result_card(item: dict) -> str:
+def search_result_card(item: dict, watched_keys: set[str] | None = None) -> str:
     poster = str(item.get("poster") or "")
     poster_class = "" if poster else " missing"
+    watched = bool(item.get("watched") or (watched_keys and item.get("key") in watched_keys))
     return (
-        f"<a class='card' href='{html.escape(str(item.get('href') or '#'))}'>"
-        f"<div class='poster{poster_class}'>{home_poster_html(poster)}</div>"
+        f"<a class='card{' watched' if watched else ''}' href='{html.escape(str(item.get('href') or '#'))}'>"
+        f"<div class='poster{poster_class}'>{watched_badge_html(watched)}{home_poster_html(poster)}</div>"
         f"<div class='card-title'>{html.escape(str(item.get('title') or 'Untitled'))}</div>"
         f"<div class='card-meta'>{html.escape(str(item.get('kind') or ''))} &bull; {html.escape(str(item.get('subtitle') or ''))}</div>"
         f"</a>"
@@ -2124,13 +2438,13 @@ def recently_released_items(limit: int = 15) -> list[tuple[str, object, float]]:
     return sorted(items, key=lambda entry: entry[2], reverse=True)[:limit]
 
 
-def recently_released_section(items: list[tuple[str, object, float]]) -> str:
+def recently_released_section(items: list[tuple[str, object, float]], watched_keys: set[str] | None = None) -> str:
     if not items:
         return ""
     month_label = time.strftime("%B %Y", time.localtime())
     cards = []
     for kind, item, _modified in items:
-        cards.append(home_movie_card(item) if kind == "movie" else home_show_card(item))
+        cards.append(home_movie_card(item, watched_keys) if kind == "movie" else home_show_card(item, watched_keys))
     return (
         "<section class='section'>"
         f"<div class='section-head'><div><h2>Recently Released This Month</h2><div class='sub'>Added in {html.escape(month_label)} and released in {time.localtime().tm_year}</div></div></div>"
@@ -2374,6 +2688,143 @@ def library_stats() -> dict:
     }
 
 
+def count_files(root: Path, extensions: set[str] | None = None, max_seconds: float = 2.0, max_files: int = 25000) -> tuple[int, int]:
+    count = 0
+    size = 0
+    deadline = time.monotonic() + max_seconds
+    try:
+        if not root.exists():
+            return 0, 0
+        for path in root.rglob("*"):
+            if count >= max_files or time.monotonic() > deadline:
+                break
+            try:
+                if not path.is_file():
+                    continue
+                if extensions and path.suffix.lower() not in extensions:
+                    continue
+                count += 1
+                size += path.stat().st_size
+            except OSError:
+                continue
+    except OSError:
+        return count, size
+    return count, size
+
+
+def count_dirs(root: Path) -> int:
+    try:
+        if not root.exists():
+            return 0
+        return sum(1 for path in root.iterdir() if path.is_dir())
+    except OSError:
+        return 0
+
+
+def comic_collection_count() -> int:
+    collections_root = COMIC_LIBRARY_ROOT / "collections"
+    count = count_dirs(collections_root)
+    return count if count else count_dirs(COMIC_LIBRARY_ROOT)
+
+
+def bookvault_stats() -> tuple[int, int]:
+    try:
+        data = json.loads(BOOKVAULT_INDEX_CACHE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            items = data.get("books") or data.get("items") or data.get("entries") or []
+        elif isinstance(data, list):
+            items = data
+        else:
+            items = []
+        if isinstance(items, list):
+            size = 0
+            for item in items:
+                if isinstance(item, dict):
+                    size += int(item.get("size_bytes") or item.get("bytes") or 0)
+            return len(items), size
+    except Exception:
+        pass
+    return count_files(BOOK_ROOT, {".epub", ".pdf", ".mobi", ".azw", ".azw3"}, max_seconds=1.0, max_files=10000)
+
+
+def game_library_stats() -> dict:
+    stats = {}
+    total = 0
+    for key, (root, extensions) in MODULE_GAME_ROOTS.items():
+        count, size = count_files(root, extensions, max_seconds=0.7, max_files=10000)
+        stats[key] = {"games": count, "size": size}
+        total += count
+    stats["total_games"] = total
+    return stats
+
+
+def homepage_status_payload(handler=None) -> dict:
+    stats = library_stats()
+    comics_count = comic_collection_count()
+    comic_files, comic_size = 0, 0
+    books_count, books_size = bookvault_stats()
+    modules = load_modules()
+    module_rows = []
+    for module in modules:
+        enabled = bool(module.get("enabled"))
+        running = module_running(module)
+        module_rows.append({
+            "id": str(module.get("id") or ""),
+            "name": str(module.get("name") or module.get("id") or ""),
+            "enabled": enabled,
+            "running": running,
+            "url": module_public_url(module, handler.request_hostname() if handler else None),
+        })
+    hls_items = handler.hls_cache_items() if handler else []
+    direct_items = handler.direct_stream_items() if handler else []
+    mobile_items = handler.mobile_download_cache_items() if handler and hasattr(handler, "mobile_download_cache_items") else []
+    hls_size = sum(int(item.get("size") or 0) for item in hls_items)
+    mobile_size = sum(int(item.get("size") or 0) for item in mobile_items)
+    games = game_library_stats()
+    movie_assets = int(stats["movies"]["assets"])
+    tv_episodes = int(stats["tv"]["assets"])
+    tv_shows = int(stats["tv"]["shows"])
+    return {
+        "ok": True,
+        "name": "CineMediaVault",
+        "url": "https://192.168.1.20:5000",
+        "movies": movie_assets,
+        "movie_size": stats["movies"]["size"],
+        "movie_size_label": movie_app.human_size(stats["movies"]["size"]),
+        "tv_shows": tv_shows,
+        "tv_episodes": tv_episodes,
+        "tv_size": stats["tv"]["size"],
+        "tv_size_label": movie_app.human_size(stats["tv"]["size"]),
+        "comics": comics_count,
+        "comic_files": comic_files,
+        "comic_size": comic_size,
+        "comic_size_label": movie_app.human_size(comic_size),
+        "books": books_count,
+        "book_size": books_size,
+        "book_size_label": movie_app.human_size(books_size),
+        "games": games["total_games"],
+        "game_libraries": games,
+        "nes_games": games.get("nes", {}).get("games", 0),
+        "sega_games": games.get("sega", {}).get("games", 0),
+        "dos_games": games.get("dos", {}).get("games", 0),
+        "mame_games": games.get("mame", {}).get("games", 0) + games.get("arcade", {}).get("games", 0),
+        "atari_games": games.get("atari2600", {}).get("games", 0) + games.get("atari5200", {}).get("games", 0) + games.get("atari7800", {}).get("games", 0),
+        "handheld_games": games.get("gameboy", {}).get("games", 0) + games.get("gba", {}).get("games", 0),
+        "active_streams": len(hls_items) + len(direct_items),
+        "hls_streams": len([item for item in hls_items if item.get("running")]),
+        "direct_streams": len(direct_items),
+        "hls_cache_size": hls_size,
+        "hls_cache_size_label": movie_app.human_size(hls_size),
+        "mobile_download_jobs": len(mobile_items),
+        "mobile_download_cache_size": mobile_size,
+        "mobile_download_cache_size_label": movie_app.human_size(mobile_size),
+        "modules": module_rows,
+        "modules_enabled": len([item for item in module_rows if item["enabled"]]),
+        "modules_running": len([item for item in module_rows if item["running"]]),
+        "updated_at": auth_now(),
+    }
+
+
 def pending_user_count() -> int:
     conn = db_connect()
     try:
@@ -2412,8 +2863,8 @@ def player_nav_link(label: str, href: str) -> str:
 
 
 def actor_items_for(metadata: dict) -> str:
-    actors = metadata.get("actors") or []
-    return "".join(f"<li>{html.escape(actor)}</li>" for actor in actors) or "<li>No actor data available yet.</li>"
+    actors = actor_names_for(metadata)
+    return "".join(f"<li><a href='/actor?name={urllib.parse.quote(actor)}'>{html.escape(actor)}</a></li>" for actor in actors) or "<li>No actor data available yet.</li>"
 
 
 def direct_player_context(kind: str, item_id: str, is_admin: bool = False, playback_mode: str | None = None) -> dict:
@@ -2455,8 +2906,10 @@ def direct_player_context(kind: str, item_id: str, is_admin: bool = False, playb
             "meta": meta,
             "summary": summary,
             "video_label": video_label,
+            "source_size": item.size,
+            "source_size_label": movie_app.human_size(item.size),
             "actions": "".join([
-                action_link("&#8595;", "Download", f"/download/{item.id}"),
+                action_link("&#8595;", "Download", f"/download/{item.id}", " data-mobile-download='1' data-mobile-scope='movie' data-mobile-id='" + html.escape(str(item.id)) + "'"),
                 action_link("&#10003;", "Mark Watched", f"/movie/{item.id}", " data-mark-watched='1'"),
                 action_link("&#8943;", "More", "#more", " data-more-toggle='1'"),
             ]),
@@ -2506,7 +2959,7 @@ def direct_player_context(kind: str, item_id: str, is_admin: bool = False, playb
         actions = [
             action_link("&#9635;", "Show", show_href),
             action_link("&#9776;", "Season", season_href),
-            action_link("&#8595;", "Download", f"/download/episode/{episode.id}"),
+            action_link("&#8595;", "Download", f"/download/episode/{episode.id}", " data-mobile-download='1' data-mobile-scope='episode' data-mobile-id='" + html.escape(str(episode.id)) + "'"),
             action_link("&#10003;", "Mark Watched", show_href, " data-mark-watched='1'"),
             action_link("&#10003;", "Mark Season", season_href, " data-mark-bulk='season'"),
             action_link("&#10003;", "Mark Show", show_href, " data-mark-bulk='show'"),
@@ -2537,11 +2990,415 @@ def direct_player_context(kind: str, item_id: str, is_admin: bool = False, playb
             "summary": summary,
             "actors": actor_items,
             "video_label": video_label,
+            "source_size": episode.size,
+            "source_size_label": movie_app.human_size(episode.size),
             "actions": "".join(actions),
             "player_nav": "".join(player_nav),
             "playback_mode": playback_mode,
         }
     raise FileNotFoundError("Unknown media kind")
+
+
+def mobile_safe_name(value: str, default: str = "download") -> str:
+    cleaned = re.sub(r"[\\/:*?\"<>|]+", " ", value or "").strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned[:140] or default
+
+
+def mobile_normalize_target_ratio(target_ratio: float | str | None = None) -> float:
+    try:
+        ratio = float(target_ratio) if target_ratio is not None else MOBILE_DOWNLOAD_TARGET_SOURCE_RATIO
+    except (TypeError, ValueError):
+        ratio = MOBILE_DOWNLOAD_TARGET_SOURCE_RATIO
+    return min(max(ratio, 0.20), MOBILE_DOWNLOAD_MAX_OUTPUT_RATIO)
+
+
+def mobile_target_key(target_ratio: float | str | None = None) -> str:
+    # Lab compressed downloads use a fixed phone/tablet H.265 budget instead of
+    # the old source-ratio slider. Keep the key policy-specific so stale H.264
+    # cached files are not reused after encoder changes.
+    codec_key = re.sub(r"[^a-z0-9]+", "", MOBILE_DOWNLOAD_VIDEO_CODEC.lower()) or "h265"
+    return f"{codec_key}-{int(round(MOBILE_DOWNLOAD_TARGET_MB_PER_HOUR))}mbph"
+
+
+def mobile_job_id(scope: str, item_id: str, target_ratio: float | str | None = None) -> str:
+    raw = f"{scope}:{item_id}:{mobile_target_key(target_ratio)}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:20]
+
+
+def mobile_cache_paths(scope: str, item_id: str, target_ratio: float | str | None = None) -> tuple[str, Path, Path]:
+    job_id = mobile_job_id(scope, item_id, target_ratio)
+    job_dir = MOBILE_DOWNLOAD_CACHE_DIR / job_id
+    return job_id, job_dir, job_dir / "status.json"
+
+
+def mobile_status_payload(job: dict) -> dict:
+    payload = {key: value for key, value in job.items() if key != "thread"}
+    if payload.get("ready") and payload.get("download_url"):
+        payload["ready"] = True
+    return payload
+
+
+def mobile_load_ready_status(scope: str, item_id: str, target_ratio: float | str | None = None) -> dict | None:
+    job_id, job_dir, status_file = mobile_cache_paths(scope, item_id, target_ratio)
+    if not status_file.is_file():
+        return None
+    try:
+        status = json.loads(status_file.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    output = job_dir / status.get("filename", "")
+    if status.get("status") == "ready" and output.is_file():
+        status["job_id"] = job_id
+        status["ready"] = True
+        status["download_url"] = f"/mobile-download/file/{job_id}"
+        return status
+    return None
+
+
+def mobile_load_cached_status(scope: str, item_id: str, target_ratio: float | str | None = None) -> dict | None:
+    job_id, job_dir, status_file = mobile_cache_paths(scope, item_id, target_ratio)
+    if not status_file.is_file():
+        return None
+    try:
+        status = json.loads(status_file.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    status["job_id"] = job_id
+    status["ready"] = False
+    if status.get("status") == "ready":
+        output = job_dir / status.get("filename", "")
+        if output.is_file():
+            status["ready"] = True
+            status["download_url"] = f"/mobile-download/file/{job_id}"
+    return status
+
+
+def mobile_episode_records_for_scope(scope: str, item_id: str) -> tuple[str, list[dict], dict]:
+    if scope == "movie":
+        item = movie_app.safe_item(item_id)
+        metadata = movie_app.metadata_for(item)
+        title = metadata.get("title") or item.title
+        return title, [{
+            "path": item.path,
+            "title": title,
+            "filename": f"{mobile_safe_name(title)}.mp4",
+            "summary": metadata.get("overview") or "",
+            "poster": movie_app.poster_url_for(item),
+            "kind": "movie",
+        }], {"kind": "movie", "title": title, "poster": movie_app.poster_url_for(item), "summary": metadata.get("overview") or ""}
+    if scope == "episode":
+        episode = tv_app.safe_episode(item_id)
+        show = show_for_episode(episode)
+        metadata = tv_app.metadata_for(show) if show else {}
+        title = tv_app.display_episode_title(metadata, episode) if hasattr(tv_app, "display_episode_title") else episode.title
+        label = episode_label(episode)
+        show_title = (metadata.get("title") or episode.show)
+        return f"{show_title} - {label}", [{
+            "path": episode.path,
+            "title": title,
+            "filename": f"{mobile_safe_name(show_title)} - {mobile_safe_name(label)} - {mobile_safe_name(title)}.mp4",
+            "summary": tv_app.episode_summary(metadata, episode) if hasattr(tv_app, "episode_summary") else "",
+            "poster": tv_app.poster_url_for(show) if show else "",
+            "still": tv_app.episode_still_url(metadata, episode) if hasattr(tv_app, "episode_still_url") else "",
+            "kind": "tv",
+            "show": show_title,
+            "season": episode.season,
+            "episode": label,
+        }], {"kind": "tv", "title": show_title, "season": episode.season, "poster": tv_app.poster_url_for(show) if show else "", "summary": metadata.get("overview") or ""}
+    if scope == "season":
+        season = tv_app.safe_season(item_id)
+        show = next((candidate for candidate in tv_app.tv_index.shows if any(existing is season for existing in candidate.seasons.values())), None)
+        metadata = tv_app.metadata_for(show) if show else {}
+        show_title = metadata.get("title") or (show.title if show else "TV Show")
+        records = []
+        for episode in season.episodes:
+            title = tv_app.display_episode_title(metadata, episode) if hasattr(tv_app, "display_episode_title") else episode.title
+            label = episode_label(episode)
+            records.append({
+                "path": episode.path,
+                "title": title,
+                "filename": f"{mobile_safe_name(show_title)} - {mobile_safe_name(label)} - {mobile_safe_name(title)}.mp4",
+                "summary": tv_app.episode_summary(metadata, episode) if hasattr(tv_app, "episode_summary") else "",
+                "poster": tv_app.poster_url_for(show) if show else "",
+                "still": tv_app.episode_still_url(metadata, episode) if hasattr(tv_app, "episode_still_url") else "",
+                "kind": "tv",
+                "show": show_title,
+                "season": season.label,
+                "episode": label,
+            })
+        return f"{show_title} - {season.label}", records, {"kind": "season", "title": show_title, "season": season.label, "poster": tv_app.poster_url_for(show) if show else "", "summary": metadata.get("overview") or ""}
+    raise FileNotFoundError("Unknown mobile download scope")
+
+
+def mobile_estimate_seconds(records: list[dict]) -> int:
+    total_size = sum((record["path"].stat().st_size if record["path"].is_file() else 0) for record in records)
+    total_duration = sum(ffprobe_duration(record["path"]) for record in records if record["path"].is_file())
+    return max(30, int((total_size / (14 * 1024 * 1024)) + (total_duration * 0.16)))
+
+
+def mobile_target_budget_bytes(path: Path, scale: float = 1.0) -> int:
+    duration = max(1.0, ffprobe_duration(path))
+    source_size = max(1, path.stat().st_size)
+    duration_hours = duration / 3600.0
+    target_bytes = int(MOBILE_DOWNLOAD_TARGET_MB_PER_HOUR * 1024 * 1024 * duration_hours * max(0.05, scale))
+    absolute_budget = int(source_size * MOBILE_DOWNLOAD_ABSOLUTE_MAX_OUTPUT_RATIO)
+    # Never allow a prepared mobile download to be larger than the source.
+    return max(1, min(target_bytes, absolute_budget))
+
+
+def mobile_target_video_kbps(path: Path, target_ratio: float | str | None = None, scale: float = 1.0) -> int:
+    duration = max(1.0, ffprobe_duration(path))
+    target_bytes = mobile_target_budget_bytes(path, scale)
+    audio_k = MOBILE_DOWNLOAD_AUDIO_KBPS
+    container_overhead_k = MOBILE_DOWNLOAD_CONTAINER_OVERHEAD_KBPS
+    video_k = int(((target_bytes * 8) / duration / 1000) - audio_k - container_overhead_k)
+    return max(80, video_k)
+
+
+def mobile_output_budget_bytes(path: Path, target_ratio: float | str | None = None, scale: float = 1.0) -> int:
+    return int(mobile_target_budget_bytes(path, scale) * MOBILE_DOWNLOAD_TARGET_TOLERANCE)
+
+
+def mobile_package_mime(path: Path) -> str:
+    if path.suffix.lower() == ".zip":
+        return "application/zip"
+    if path.suffix.lower() == ".mp4":
+        return "video/mp4"
+    return mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+
+
+def mobile_ffmpeg_transcode(src: Path, dst: Path, target_ratio: float | str | None = None, scale: float = 1.0) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    vb = mobile_target_video_kbps(src, target_ratio, scale)
+    command = [
+        ffmpeg_bin(), "-hide_banner", "-nostdin", "-y", "-i", str(src),
+        "-map", "0:v:0", "-map", "0:a:0?",
+        "-vf", "scale=w=1280:h=720:force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuv420p",
+        "-c:v", MOBILE_DOWNLOAD_VIDEO_CODEC, "-preset", MOBILE_DOWNLOAD_VIDEO_PRESET,
+        "-tag:v", "hvc1",
+        "-b:v", f"{vb}k", "-maxrate", f"{int(vb * 1.35)}k", "-bufsize", f"{max(vb * 2, 256)}k",
+        "-c:a", "aac", "-b:a", f"{MOBILE_DOWNLOAD_AUDIO_KBPS}k", "-ac", "2",
+        "-movflags", "+faststart", str(dst),
+    ]
+    subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+
+
+def mobile_write_status(status_file: Path, job: dict) -> None:
+    status_file.parent.mkdir(parents=True, exist_ok=True)
+    data = {key: value for key, value in job.items() if key not in {"thread"}}
+    status_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def mobile_worker(scope: str, item_id: str, job_id: str) -> None:
+    job = MOBILE_DOWNLOAD_JOBS[job_id]
+    job_dir = Path(job["dir"])
+    status_file = job_dir / "status.json"
+    source_dir = job_dir / "source"
+    output_dir = job_dir / "output"
+    try:
+        target_ratio = mobile_normalize_target_ratio(job.get("target_ratio"))
+        title, records, manifest = mobile_episode_records_for_scope(scope, item_id)
+        manifest["target_ratio"] = target_ratio
+        source_dir.mkdir(parents=True, exist_ok=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        job.update({"status": "running", "message": "Preparing local source copy", "progress": 2, "title": title})
+        mobile_write_status(status_file, job)
+        outputs = []
+        total = max(1, len(records))
+        for index, record in enumerate(records, 1):
+            src = record["path"]
+            local_src = source_dir / f"{index:03d}{src.suffix.lower()}"
+            out = output_dir / record["filename"]
+            job.update({"message": f"Copying {index} of {total}", "progress": int(((index - 1) / total) * 70)})
+            mobile_write_status(status_file, job)
+            shutil.copy2(src, local_src)
+            job.update({"message": f"Compressing {index} of {total}", "progress": int(((index - 1) / total) * 70) + 8})
+            mobile_write_status(status_file, job)
+            mobile_ffmpeg_transcode(local_src, out, target_ratio)
+            budget = mobile_output_budget_bytes(local_src, target_ratio)
+            if out.is_file() and out.stat().st_size > budget:
+                accepted = False
+                for scale in (0.72, 0.55, 0.42, 0.32):
+                    retry = out.with_suffix(f".retry-{int(scale * 100)}.mp4")
+                    if retry.exists():
+                        retry.unlink()
+                    job.update({"message": f"Retrying {index} of {total} at lower bitrate", "progress": int(((index - 1) / total) * 70) + 12})
+                    mobile_write_status(status_file, job)
+                    mobile_ffmpeg_transcode(local_src, retry, target_ratio, scale=scale)
+                    if retry.is_file() and retry.stat().st_size <= budget:
+                        retry.replace(out)
+                        accepted = True
+                        break
+                    if retry.exists():
+                        retry.unlink()
+                if not accepted:
+                    if out.exists():
+                        out.unlink()
+                    target_percent = int(round(mobile_normalize_target_ratio(target_ratio) * 100))
+                    raise RuntimeError(
+                        f"Compressed output exceeded {target_percent}% target budget for {src.name}; "
+                        f"refusing oversized mobile download"
+                    )
+            outputs.append((record, out))
+            job.update({"progress": int((index / total) * 85), "message": f"Finished {index} of {total}"})
+            mobile_write_status(status_file, job)
+        manifest["schema"] = "cinemediavault-mobile-download-v1"
+        manifest["generated_at"] = time.time()
+        manifest["episodes"] = [
+            {key: value for key, value in record.items() if key != "path"} | {"file": out.name, "size": out.stat().st_size}
+            for record, out in outputs
+        ]
+        manifest_path = output_dir / "cinemediavault-mobile.json"
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        if scope == "season":
+            filename = f"{mobile_safe_name(title)} - Mobile.zip"
+            package = job_dir / filename
+            job.update({"progress": 92, "message": "Building mobile season ZIP"})
+            mobile_write_status(status_file, job)
+            with zipfile.ZipFile(package, "w", compression=zipfile.ZIP_STORED) as archive:
+                archive.write(manifest_path, arcname="cinemediavault-mobile.json")
+                for _, out in outputs:
+                    archive.write(out, arcname=out.name)
+        else:
+            package = outputs[0][1]
+            filename = str(package.relative_to(job_dir))
+        shutil.rmtree(source_dir, ignore_errors=True)
+        job.update({
+            "status": "ready", "ready": True, "progress": 100, "message": "Ready",
+            "filename": filename, "content_type": mobile_package_mime(package),
+            "size": package.stat().st_size, "download_url": f"/mobile-download/file/{job_id}",
+            "completed_at": time.time(), "expires_at": time.time() + mobile_download_cache_max_age_hours() * 3600,
+        })
+        mobile_write_status(status_file, job)
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr or ""
+        tail = "\n".join(stderr.splitlines()[-30:])
+        err_file = job_dir / "ffmpeg-error.log"
+        err_file.write_text(tail, encoding="utf-8", errors="replace")
+        concise = next((line.strip() for line in reversed(stderr.splitlines()) if line.strip()), "")
+        if not concise or concise == "Conversion failed!":
+            concise = f"ffmpeg failed with exit status {exc.returncode}"
+        job.update({
+            "status": "error", "ready": False, "message": concise[:240], "error": concise[:240],
+            "ffmpeg_error_tail": tail, "ffmpeg_error_log": str(err_file), "completed_at": time.time(),
+        })
+        mobile_write_status(status_file, job)
+    except Exception as exc:
+        message = str(exc)
+        job.update({"status": "error", "ready": False, "message": message[:240], "error": message[:240], "completed_at": time.time()})
+        mobile_write_status(status_file, job)
+
+
+def mobile_enqueue(scope: str, item_id: str, target_ratio: float | str | None = None) -> dict:
+    target_ratio = mobile_normalize_target_ratio(target_ratio)
+    job_id, job_dir, status_file = mobile_cache_paths(scope, item_id, target_ratio)
+    ready = mobile_load_ready_status(scope, item_id)
+    if ready:
+        return ready
+    with MOBILE_DOWNLOAD_LOCK:
+        existing = MOBILE_DOWNLOAD_JOBS.get(job_id)
+        if existing and existing.get("status") in {"queued", "running"}:
+            payload = mobile_status_payload(existing)
+            payload["message"] = payload.get("message") or "Already in progress"
+            return payload
+        cached = mobile_load_cached_status(scope, item_id)
+        if cached and cached.get("status") in {"queued", "running"}:
+            cached["message"] = cached.get("message") or "Already in progress"
+            return cached
+        if cached and cached.get("status") == "error":
+            shutil.rmtree(job_dir, ignore_errors=True)
+        title, records, _ = mobile_episode_records_for_scope(scope, item_id)
+        job_dir.mkdir(parents=True, exist_ok=True)
+        job = {
+            "job_id": job_id, "scope": scope, "item_id": item_id, "target_ratio": target_ratio, "target_percent": int(round(target_ratio * 100)), "target_mb_per_hour": MOBILE_DOWNLOAD_TARGET_MB_PER_HOUR, "video_codec": MOBILE_DOWNLOAD_VIDEO_CODEC, "title": title, "dir": str(job_dir),
+            "status": "queued", "ready": False, "progress": 0, "message": f"Added to H.265 mobile download queue ({int(MOBILE_DOWNLOAD_TARGET_MB_PER_HOUR)} MB/hour)",
+            "estimate_seconds": mobile_estimate_seconds(records), "created_at": time.time(),
+        }
+        thread = threading.Thread(target=mobile_worker, args=(scope, item_id, job_id), daemon=True)
+        job["thread"] = thread
+        MOBILE_DOWNLOAD_JOBS[job_id] = job
+        mobile_write_status(status_file, job)
+        thread.start()
+        return mobile_status_payload(job)
+
+
+def mobile_download_cache_max_age_hours() -> float:
+    try:
+        if MOBILE_DOWNLOAD_SETTINGS_FILE.is_file():
+            data = json.loads(MOBILE_DOWNLOAD_SETTINGS_FILE.read_text(encoding="utf-8"))
+            hours = int(data.get("cache_max_age_hours") or MOBILE_DOWNLOAD_CACHE_MAX_AGE_HOURS)
+            if hours in MOBILE_DOWNLOAD_CACHE_MAX_AGE_OPTIONS:
+                return float(hours)
+    except Exception:
+        pass
+    env_hours = int(MOBILE_DOWNLOAD_CACHE_MAX_AGE_HOURS)
+    return float(env_hours if env_hours in MOBILE_DOWNLOAD_CACHE_MAX_AGE_OPTIONS else 24)
+
+
+def save_mobile_download_cache_max_age(hours: int) -> int:
+    if hours not in MOBILE_DOWNLOAD_CACHE_MAX_AGE_OPTIONS:
+        raise ValueError("Download cache retention must be 6, 12, or 24 hours")
+    MOBILE_DOWNLOAD_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    MOBILE_DOWNLOAD_SETTINGS_FILE.write_text(
+        json.dumps({"cache_max_age_hours": hours, "updated_at": auth_now()}, indent=2),
+        encoding="utf-8",
+    )
+    return hours
+
+
+def cleanup_mobile_download_cache_once() -> None:
+    cutoff = time.time() - (mobile_download_cache_max_age_hours() * 3600)
+    MOBILE_DOWNLOAD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    for child in MOBILE_DOWNLOAD_CACHE_DIR.iterdir():
+        if not child.is_dir():
+            continue
+        status_file = child / "status.json"
+        try:
+            status = json.loads(status_file.read_text(encoding="utf-8")) if status_file.is_file() else {}
+            completed = float(status.get("completed_at") or child.stat().st_mtime)
+            if status.get("status") in {"queued", "running"}:
+                continue
+            if completed < cutoff:
+                shutil.rmtree(child, ignore_errors=True)
+        except Exception:
+            if child.stat().st_mtime < cutoff:
+                shutil.rmtree(child, ignore_errors=True)
+
+
+VIDEO_WALL_PAGE = r"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CineMediaVault Video Wall</title><style>
+:root{color-scheme:dark;--bg:#07090d;--panel:#11161f;--line:#2b3442;--text:#f7f9fc;--muted:#9ca8b8;--gold:#f5b73f;--green:#36dc78}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,Segoe UI,sans-serif;overflow-x:hidden}
+header{position:sticky;top:0;z-index:5;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 18px;background:rgba(7,9,13,.94);border-bottom:1px solid var(--line);backdrop-filter:blur(14px)}
+.brand{font-size:24px;font-weight:950}.brand b{color:var(--gold)}.controls{display:flex;gap:8px;flex-wrap:wrap}button,.button{min-height:38px;border:1px solid var(--line);border-radius:8px;padding:0 13px;background:#171d27;color:#fff;font-weight:850;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}.primary{background:var(--gold);color:#111;border-color:var(--gold)}
+main{padding:14px}.wall{height:calc(100vh - 92px);min-height:520px;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:10px}.tile{position:relative;min-width:0;min-height:0;overflow:hidden;background:#000;border:2px solid transparent;border-radius:8px}.tile.active{border-color:var(--green)}.tile.expanded{position:fixed;inset:0;z-index:30;border:0;border-radius:0}.tile video{width:100%;height:100%;object-fit:contain;background:#000}.empty{height:100%;display:grid;place-items:center;text-align:center;color:var(--muted);border:1px dashed var(--line);padding:18px}.tile-bar{position:absolute;left:0;right:0;bottom:0;display:grid;grid-template-columns:auto auto minmax(90px,1fr) auto auto auto auto;align-items:center;gap:7px;padding:26px 9px 9px;background:linear-gradient(transparent,rgba(0,0,0,.94));opacity:0;transition:opacity .18s}.tile:hover .tile-bar,.tile.active .tile-bar,.tile.expanded .tile-bar{opacity:1}.tile-title{position:absolute;left:10px;right:10px;bottom:50px;min-width:0;font-weight:850;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 3px #000}.icon{width:34px;height:34px;padding:0;border-radius:50%}.seek{width:100%;accent-color:var(--gold)}.time{font-size:12px;color:#fff;white-space:nowrap;font-variant-numeric:tabular-nums}.bandwidth{display:none;align-items:center;gap:14px;padding:9px 14px;border-bottom:1px solid var(--line);background:#101620}.bandwidth.open{display:flex}.bandwidth strong{font-size:18px;color:var(--green);font-variant-numeric:tabular-nums}.bandwidth span{color:var(--muted);font-size:13px}
+.drawer{position:fixed;inset:0 0 0 auto;z-index:10;width:min(440px,100%);padding:18px;background:#0c1017;border-left:1px solid var(--line);transform:translateX(105%);transition:transform .2s;overflow:auto}.drawer.open{transform:none}.drawer-head{display:flex;justify-content:space-between;align-items:center}.search{width:100%;min-height:48px;margin:16px 0;border:1px solid var(--line);border-radius:8px;background:#171d27;color:#fff;padding:0 14px;font-size:16px}.results{display:grid;gap:9px}.result{display:grid;grid-template-columns:52px 1fr auto;align-items:center;gap:10px;border:1px solid var(--line);border-radius:8px;padding:8px;background:var(--panel)}.result img{width:52px;aspect-ratio:2/3;object-fit:cover;background:#06080c}.result small{display:block;color:var(--muted);margin-top:3px}.slot-picker{display:flex;gap:5px}.slot-picker button{width:34px;height:34px;min-height:34px;padding:0}.hint{color:var(--muted);font-size:13px}
+@media(max-width:720px){header{align-items:flex-start;flex-direction:column}.wall{height:auto;min-height:0;grid-template-columns:1fr;grid-template-rows:none}.tile{aspect-ratio:16/9}.tile-bar{opacity:1}.brand{font-size:20px}}
+</style></head><body><header><div class="brand">CineMedia<b>Vault</b> Wall</div><div class="controls"><a class="button" href="/">Home</a><button id="playAll" class="primary">Play all</button><button id="pauseAll">Pause all</button><button id="syncAll">Sync</button><button id="toggleBandwidth">Bandwidth</button><button id="addMedia">Add media</button></div></header><div class="bandwidth" id="bandwidthPanel"><strong id="bandwidthValue">0.00 Mbps</strong><span id="bandwidthBytes">0 B/s</span><span id="playingCount">0 playing</span></div>
+<main><div class="wall" id="wall"></div></main>
+<aside class="drawer" id="drawer"><div class="drawer-head"><div><h2>Add to wall</h2><div class="hint">Search any movie or individual TV episode, then choose a slot.</div></div><button class="icon" id="closeDrawer" aria-label="Close">&#10005;</button></div><input class="search" id="wallSearch" type="search" placeholder="Search movies or episodes"><div class="results" id="results"></div></aside>
+<script src="/assets/hls.min.js"></script><script>
+const wall=document.getElementById('wall'),drawer=document.getElementById('drawer'),search=document.getElementById('wallSearch'),results=document.getElementById('results');let slots=[],active=1,timer,hlsControllers=[];
+const esc=s=>String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function load(){const r=await fetch('/api/video-wall');const d=await r.json();slots=d.slots||[];render()}
+function fmt(t){if(!Number.isFinite(t))return '0:00';t=Math.max(0,Math.floor(t));return `${Math.floor(t/60)}:${String(t%60).padStart(2,'0')}`}
+function render(){hlsControllers.forEach(h=>h.destroy());hlsControllers=[];wall.innerHTML='';for(let n=1;n<=4;n++){const item=slots.find(x=>x.slot===n),el=document.createElement('section');el.className='tile'+(n===active?' active':'');el.dataset.slot=n;if(!item){el.innerHTML=`<button class="empty" data-add="${n}">Slot ${n}<br>Add a movie or episode</button>`}else{const source=item.requires_hls?item.hls_url:item.stream_url;el.innerHTML=`<video playsinline preload="metadata" muted data-source="${esc(source)}" data-hls="${item.requires_hls?'1':'0'}" data-slot="${n}"></video><div class="tile-bar"><span class="tile-title">${esc(item.title)} <small>${esc(item.subtitle)}${item.requires_hls?' - HLS':''}</small></span><button class="icon" data-back title="Rewind 10 seconds">-10</button><button class="icon" data-toggle title="Play or pause">&#9654;</button><input class="seek" data-seek type="range" min="0" max="1000" value="0" aria-label="Seek"><span class="time">0:00 / 0:00</span><button class="icon" data-forward title="Forward 10 seconds">+10</button><button class="icon" data-fullscreen title="Full screen">&#9974;</button><button class="icon" data-remove="${n}" title="Remove">&#10005;</button></div>`}wall.appendChild(el)}bindVideos();applyAudio();updateBandwidth()}
+function wallUrl(url,slot){const join=url.includes('?')?'&':'?';return `${url}${join}wall=1&slot=${slot}`}
+function bindVideos(){document.querySelectorAll('.tile video').forEach(v=>{const tile=v.closest('.tile'),seek=tile.querySelector('[data-seek]'),label=tile.querySelector('.time'),toggle=tile.querySelector('[data-toggle]'),source=v.dataset.source,slot=v.dataset.slot;if(v.dataset.hls==='1'){if(v.canPlayType('application/vnd.apple.mpegurl'))v.src=wallUrl(source,slot);else if(window.Hls&&Hls.isSupported()){const h=new Hls({lowLatencyMode:false,backBufferLength:90,xhrSetup:(xhr,url)=>xhr.open('GET',wallUrl(url,slot),true)});h.loadSource(wallUrl(source,slot));h.attachMedia(v);hlsControllers.push(h)}else v.src=wallUrl(source,slot)}else v.src=wallUrl(source,slot);const update=()=>{if(seek&&Number.isFinite(v.duration)&&v.duration>0)seek.value=Math.round(v.currentTime/v.duration*1000);if(label)label.textContent=`${fmt(v.currentTime)} / ${fmt(v.duration)}`;if(toggle)toggle.innerHTML=v.paused?'&#9654;':'&#10074;&#10074;'};v.addEventListener('timeupdate',update);v.addEventListener('durationchange',update);v.addEventListener('play',update);v.addEventListener('pause',update);update()})}
+function applyAudio(){document.querySelectorAll('.tile').forEach(t=>{t.classList.toggle('active',+t.dataset.slot===active);const v=t.querySelector('video');if(v)v.muted=+t.dataset.slot!==active})}
+wall.addEventListener('click',async e=>{const tile=e.target.closest('.tile');if(tile){active=+tile.dataset.slot;applyAudio()}const v=tile&&tile.querySelector('video');if(e.target.closest('[data-add]'))openDrawer(+e.target.closest('[data-add]').dataset.add);if(e.target.closest('[data-remove]')){await updateSlot(+e.target.closest('[data-remove]').dataset.remove,null);load()}if(v&&e.target.closest('[data-back]'))v.currentTime=Math.max(0,v.currentTime-10);if(v&&e.target.closest('[data-forward]'))v.currentTime=Math.min(Number.isFinite(v.duration)?v.duration:v.currentTime+10,v.currentTime+10);if(v&&e.target.closest('[data-toggle]'))v.paused?v.play().catch(()=>{}):v.pause();if(tile&&e.target.closest('[data-fullscreen]')){if(document.fullscreenElement)document.exitFullscreen().catch(()=>{});else if(tile.requestFullscreen)tile.requestFullscreen().catch(()=>tile.classList.toggle('expanded'));else if(tile.webkitRequestFullscreen)tile.webkitRequestFullscreen();else tile.classList.toggle('expanded')}});
+wall.addEventListener('input',e=>{const seek=e.target.closest('[data-seek]');if(!seek)return;const v=seek.closest('.tile').querySelector('video');if(v&&Number.isFinite(v.duration))v.currentTime=(+seek.value/1000)*v.duration});
+function openDrawer(slot){active=slot||active;drawer.classList.add('open');search.focus()}
+document.getElementById('addMedia').onclick=()=>openDrawer(active);document.getElementById('closeDrawer').onclick=()=>drawer.classList.remove('open');
+document.getElementById('playAll').onclick=()=>document.querySelectorAll('video').forEach(v=>v.play().catch(()=>{}));document.getElementById('pauseAll').onclick=()=>document.querySelectorAll('video').forEach(v=>v.pause());document.getElementById('syncAll').onclick=()=>{const vs=[...document.querySelectorAll('video')];if(!vs.length)return;const t=Math.min(...vs.map(v=>v.currentTime||0));vs.forEach(v=>v.currentTime=t)};
+const bandwidthPanel=document.getElementById('bandwidthPanel');document.getElementById('toggleBandwidth').onclick=()=>{bandwidthPanel.classList.toggle('open');localStorage.setItem('cmv-wall-bandwidth',bandwidthPanel.classList.contains('open')?'1':'0');updateBandwidth()};if(localStorage.getItem('cmv-wall-bandwidth')==='1')bandwidthPanel.classList.add('open');
+function humanRate(n){if(n>=1048576)return (n/1048576).toFixed(2)+' MB/s';if(n>=1024)return (n/1024).toFixed(1)+' KB/s';return Math.round(n)+' B/s'}async function updateBandwidth(){const playing=[...document.querySelectorAll('video')].filter(v=>!v.paused&&!v.ended).length;document.getElementById('playingCount').textContent=`${playing} playing`;if(!bandwidthPanel.classList.contains('open'))return;try{const r=await fetch('/api/video-wall/bandwidth',{cache:'no-store'}),d=await r.json();document.getElementById('bandwidthValue').textContent=`${Number(d.mbps||0).toFixed(2)} Mbps`;document.getElementById('bandwidthBytes').textContent=humanRate(Number(d.bytes_per_second||0))}catch(_){document.getElementById('bandwidthValue').textContent='Unavailable'}}setInterval(updateBandwidth,1000);
+async function updateSlot(slot,item){await fetch('/api/video-wall/slot',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({slot,media_type:item&&item.media_type,media_id:item&&item.media_id})})}
+search.addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(runSearch,250)});async function runSearch(){const q=search.value.trim();if(q.length<2){results.innerHTML='';return}const r=await fetch('/api/video-wall/search?q='+encodeURIComponent(q));const d=await r.json();results.innerHTML=(d.items||[]).map(i=>`<article class="result">${i.poster?`<img src="${esc(i.poster)}" alt="">`:'<span></span>'}<div><strong>${esc(i.title)}</strong><small>${esc(i.subtitle)}</small></div><div class="slot-picker">${[1,2,3,4].map(n=>`<button data-pick="${n}" data-kind="${i.media_type}" data-id="${i.media_id}">${n}</button>`).join('')}</div></article>`).join('')||'<p class="hint">No matches.</p>'}
+results.addEventListener('click',async e=>{const b=e.target.closest('[data-pick]');if(!b)return;await updateSlot(+b.dataset.pick,{media_type:b.dataset.kind,media_id:+b.dataset.id});active=+b.dataset.pick;drawer.classList.remove('open');load()});load();
+</script></body></html>"""
 
 
 class CombinedHandler(BaseHTTPRequestHandler):
@@ -2607,6 +3464,16 @@ class CombinedHandler(BaseHTTPRequestHandler):
             if not user:
                 return self.require_auth(path)
             return self.api_playback_mode_set(user)
+        if path == "/api/mobile-download/enqueue":
+            user = self.current_user()
+            if not user:
+                return self.require_auth(path)
+            return self.api_mobile_download_enqueue(user)
+        if path == "/api/video-wall/slot":
+            user = self.current_user()
+            if not user:
+                return self.require_auth(path)
+            return self.api_video_wall_slot(user)
         if path.startswith("/movie/upload-art/"):
             if not self.require_auth(path):
                 return
@@ -2634,6 +3501,72 @@ class CombinedHandler(BaseHTTPRequestHandler):
             return json.loads(self.rfile.read(length).decode("utf-8", errors="replace"))
         except Exception:
             return {}
+
+    def api_mobile_download_enqueue(self, user):
+        item = self.read_json()
+        scope = str(item.get("scope") or "").strip().lower()
+        item_id = urllib.parse.unquote(str(item.get("item_id") or "").strip())
+        target_ratio = item.get("target_ratio")
+        if scope not in {"movie", "episode", "season"} or not item_id:
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            return self.wfile.write(json.dumps({"ok": False, "error": "scope and item_id are required"}).encode("utf-8"))
+        try:
+            status = mobile_enqueue(scope, item_id, target_ratio)
+            status["ok"] = True
+            return self.json_response(status)
+        except Exception as exc:
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            return self.wfile.write(json.dumps({"ok": False, "error": str(exc)}).encode("utf-8"))
+
+    def api_mobile_download_status(self, user):
+        parsed = urllib.parse.urlparse(self.path)
+        params = urllib.parse.parse_qs(parsed.query)
+        scope = (params.get("scope", [""])[0] or "").strip().lower()
+        item_id = urllib.parse.unquote((params.get("item_id", [""])[0] or "").strip())
+        if scope not in {"movie", "episode", "season"} or not item_id:
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            return self.wfile.write(json.dumps({"ok": False, "error": "scope and item_id are required"}).encode("utf-8"))
+        target_ratio = params.get("target_ratio", [None])[0]
+        job_id, _, _ = mobile_cache_paths(scope, item_id, target_ratio)
+        with MOBILE_DOWNLOAD_LOCK:
+            existing = MOBILE_DOWNLOAD_JOBS.get(job_id)
+            if existing:
+                payload = mobile_status_payload(existing)
+                payload["ok"] = True
+                return self.json_response(payload)
+        ready = mobile_load_ready_status(scope, item_id, target_ratio)
+        if ready:
+            ready["ok"] = True
+            return self.json_response(ready)
+        cached = mobile_load_cached_status(scope, item_id, target_ratio)
+        if cached:
+            cached["ok"] = True
+            return self.json_response(cached)
+        return self.json_response({"ok": True, "job_id": job_id, "scope": scope, "item_id": item_id, "status": "missing", "ready": False})
+
+    def mobile_download_file(self, user, job_id: str):
+        if not re.fullmatch(r"[a-f0-9]{20}", job_id or ""):
+            return self.send_error(404)
+        job_dir = MOBILE_DOWNLOAD_CACHE_DIR / job_id
+        status_file = job_dir / "status.json"
+        if not status_file.is_file():
+            return self.send_error(404)
+        try:
+            status = json.loads(status_file.read_text(encoding="utf-8"))
+        except Exception:
+            return self.send_error(404)
+        if status.get("status") != "ready":
+            return self.send_error(409, "Mobile download is not ready yet")
+        package = (job_dir / status.get("filename", "")).resolve()
+        if not str(package).startswith(str(job_dir.resolve()) + os.sep) or not package.is_file():
+            return self.send_error(404)
+        return self.serve_download_package(package)
 
     def cookie_value(self, name: str) -> str:
         cookie = self.headers.get("Cookie", "")
@@ -3539,6 +4472,8 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
             return self.login_page()
         if path == "/logout":
             return self.logout()
+        if path == "/api/homepage/status":
+            return self.json_response(homepage_status_payload(self))
         user = self.current_user()
         if not user:
             return self.require_auth(path)
@@ -3546,6 +4481,8 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
             if not user["is_admin"]:
                 return self.send_error(403)
             return self.admin_users_page(user)
+        if path == "/downloads":
+            return self.downloads_page(user)
         if path == "/admin/activity":
             if not user["is_admin"]:
                 return self.send_error(403)
@@ -3569,6 +4506,10 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
             return self.landing()
         if path == "/search":
             return self.search_page()
+        if path == "/wall":
+            return self.video_wall_page()
+        if path == "/actor":
+            return self.actor_page()
         if path == "/movies":
             return movie_app.Handler.page(self)
         if path == "/tv":
@@ -3586,7 +4527,11 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
         if path == "/api/refresh":
             movie_app.movie_index.refresh_background()
             tv_app.tv_index.refresh_background()
-            return self.json_response({"ok": True, "movies": len(movie_app.movie_index.items), "shows": len(tv_app.tv_index.shows), "episodes": len(tv_app.tv_index.episode_by_id)})
+            movie_app.load_poster_map()
+            movie_app.load_metadata_map()
+            tv_app.load_poster_map()
+            tv_app.load_metadata_map()
+            return self.json_response({"ok": True, "movies": len(movie_app.movie_index.items), "shows": len(tv_app.tv_index.shows), "episodes": len(tv_app.tv_index.episode_by_id), "movie_posters": len(movie_app.poster_map), "tv_posters": len(tv_app.poster_map)})
         if path == "/api/full-scan":
             return self.start_full_scan()
         if path == "/api/full-scan-status":
@@ -3605,6 +4550,16 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
             return self.api_watch_continue(user)
         if path == "/api/playback-mode":
             return self.api_playback_mode_get(user)
+        if path == "/api/mobile-download/status":
+            return self.api_mobile_download_status(user)
+        if path == "/api/video-wall":
+            return self.api_video_wall(user)
+        if path == "/api/video-wall/search":
+            return self.api_video_wall_search(user)
+        if path == "/api/video-wall/bandwidth":
+            return self.api_video_wall_bandwidth(user)
+        if path.startswith("/mobile-download/file/"):
+            return self.mobile_download_file(user, path.rsplit("/", 1)[-1])
         if path == "/api/continue-metadata":
             parsed = urllib.parse.urlparse(self.path)
             keys = urllib.parse.parse_qs(parsed.query).get("keys", [""])[0]
@@ -3643,11 +4598,12 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
     def landing(self):
         user = self.current_user()
         initial = (user["username"][:1].upper() if user and user["username"] else "U")
-        account_links = ['<a href="/logout">Logout</a>']
+        account_links = ['<a href="/downloads">Downloads</a>', '<a href="/logout">Logout</a>']
         if user and user["is_admin"]:
             pending_count = pending_user_count()
             badge = f"<span class='badge'>{pending_count}</span>" if pending_count else ""
             account_links = [
+                '<a href="/downloads">Downloads</a>',
                 '<a href="/admin/users">Users</a>',
                 '<a href="/admin/modules">Modules</a>',
                 '<a href="/admin/hls">Live Streams</a>',
@@ -3672,6 +4628,7 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
         )[:15]
         recent_released = recently_released_items(15)
         playback_mode = read_global_playback_mode()
+        watched_keys = watched_keys_for_user(user)
         body = (
             HOME_PAGE
             .replace("{{MOVIE_COUNT}}", str(len(movie_app.movie_index.items)))
@@ -3679,9 +4636,9 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
             .replace("{{EPISODE_COUNT}}", str(len(tv_app.tv_index.episode_by_id)))
             .replace("{{SERVER_NAME}}", html.escape(SERVER_DISPLAY_NAME))
             .replace("{{HOME_BACKDROP}}", home_backdrop_html())
-            .replace("{{RECENT_MOVIES}}", "".join(home_movie_card(item) for item in recent_movies))
-            .replace("{{RECENT_TV}}", "".join(home_show_card(show) for show in recent_shows))
-            .replace("{{RECENT_RELEASED_SECTION}}", recently_released_section(recent_released))
+            .replace("{{RECENT_MOVIES}}", "".join(home_movie_card(item, watched_keys) for item in recent_movies))
+            .replace("{{RECENT_TV}}", "".join(home_show_card(show, watched_keys) for show in recent_shows))
+            .replace("{{RECENT_RELEASED_SECTION}}", recently_released_section(recent_released, watched_keys))
             .replace("{{MODULE_TABS}}", home_module_tabs(self.request_hostname()))
             .replace("{{GLOBAL_PLAYBACK_MODE}}", playback_mode)
             .replace("{{GLOBAL_PLAYBACK_MODE_LABEL}}", "HLS" if playback_mode == "hls" else "Direct")
@@ -3699,8 +4656,9 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
     def search_page(self):
         parsed = urllib.parse.urlparse(self.path)
         query = urllib.parse.parse_qs(parsed.query).get("q", [""])[0].strip()
-        results = unified_search_results(query)
-        cards = "".join(search_result_card(item) for item in results)
+        watched_keys = watched_keys_for_user(self.current_user())
+        results = unified_search_results(query, watched_keys=watched_keys)
+        cards = "".join(search_result_card(item, watched_keys) for item in results)
         if not query:
             title = "Search CineMediaVault"
             subtitle = "Search across movies, TV shows, actors, genres, and episode titles."
@@ -3724,6 +4682,18 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
         self.end_headers()
         self.wfile.write(data)
 
+    def actor_page(self):
+        parsed = urllib.parse.urlparse(self.path)
+        name = urllib.parse.parse_qs(parsed.query).get("name", [""])[0].strip()
+        results = actor_media_results(name)
+        watched_keys = watched_keys_for_user(self.current_user())
+        cards = "".join(search_result_card(item, watched_keys) for item in results) or "<p class='muted'>No matching library titles found.</p>"
+        body = (SEARCH_PAGE.replace("{{QUERY}}", html.escape(name)).replace("{{TITLE}}", html.escape(name or "Actor"))
+                .replace("{{SUBTITLE}}", html.escape(f"{len(results)} movie and TV title(s) in your library."))
+                .replace("{{RESULTS}}", cards))
+        data = body.encode("utf-8")
+        self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
+
     def json_response(self, payload):
         return movie_app.Handler.json_response(self, payload)
 
@@ -3732,6 +4702,7 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
         with MEDIA_SCAN_LOCK:
             running = MEDIA_SCAN_PROCESS is not None and MEDIA_SCAN_PROCESS.poll() is None
             payload = dict(MEDIA_SCAN_LAST_RESULT)
+            payload.update(load_scan_progress())
             payload.update({
                 "ok": True,
                 "running": running,
@@ -3757,6 +4728,7 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
             err_handle = err_path.open("ab")
             env = os.environ.copy()
             env["RESTART_SERVICES"] = "0"
+            env["SCAN_PROGRESS_FILE"] = str(SCAN_PROGRESS_FILE)
             try:
                 MEDIA_SCAN_PROCESS = subprocess.Popen(
                     ["bash", str(MEDIA_REFRESH_SCRIPT)],
@@ -3776,6 +4748,7 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
                 "stderr": str(err_path),
                 "started_at": time.time(),
             }
+            save_scan_progress({**MEDIA_SCAN_LAST_RESULT, "percent": 1, "phase": "Starting", "message": "Starting full library scan"})
             threading.Thread(target=watch_full_scan, args=(MEDIA_SCAN_PROCESS, out_path, err_path), daemon=True).start()
             return self.json_response({
                 "ok": True,
@@ -3848,6 +4821,25 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
             conn.close()
 
     def hls_user_progress(self, kind: str, item_id: str) -> list[dict]:
+        now = time.time()
+        active = []
+        with HLS_VIEWER_LOCK:
+            for key, viewer in list(HLS_VIEWERS.items()):
+                if now - float(viewer.get("updated_at") or 0) > 45:
+                    HLS_VIEWERS.pop(key, None)
+                    continue
+                if viewer.get("kind") == kind and str(viewer.get("item_id")) == str(item_id):
+                    duration = float(viewer.get("duration") or 0)
+                    position = float(viewer.get("position") or 0)
+                    active.append({
+                        "user": viewer.get("user") or "Signed-in user",
+                        "position": position,
+                        "duration": duration,
+                        "progress": (position / duration * 100.0) if duration > 0 else 0.0,
+                        "updated": viewer.get("updated_at") or 0,
+                    })
+        if active:
+            return sorted(active, key=lambda row: float(row["updated"] or 0), reverse=True)[:6]
         conn = db_connect()
         try:
             rows = conn.execute(
@@ -4011,6 +5003,136 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
             TRANSCODES.clear()
         return removed
 
+    def downloads_page(self, user):
+        mobile_items = self.mobile_download_cache_items()
+        mobile_cache_size = sum(item["size"] for item in mobile_items)
+
+        def mobile_card(item: dict) -> str:
+            ready_link = ""
+            if item["ready"] and item["download_url"]:
+                ready_link = f"<a class='download-link' href='{html.escape(item['download_url'])}'>Download Prepared File</a>"
+            eta = f" &middot; estimate {format_seconds(item['estimate_seconds'])}" if item["estimate_seconds"] else ""
+            message = html.escape(item["message"][:260])
+            return f"""
+            <article class="download-card">
+              <div class="download-head">
+                <a href="{html.escape(item['href'])}"><h2>{html.escape(item['title'])}</h2></a>
+                <span class="state {html.escape(item['status'])}">{html.escape(item['status'].title())}</span>
+              </div>
+              <div class="meta">{html.escape(item['scope'])} {html.escape(item['item_id'])} &middot; {movie_app.human_size(item['size'])}{eta}</div>
+              <div class="bar"><i style="width:{item['progress']:.1f}%"></i></div>
+              <div class="meta">{item['progress']:.0f}% &middot; {message}</div>
+              {ready_link}
+            </article>"""
+
+        rows = "".join(mobile_card(item) for item in mobile_items) or "<p class='empty'>No compressed mobile downloads are queued or ready.</p>"
+        return self.render_html(f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CineMediaVault Downloads</title><style>
+:root {{ color-scheme:dark; --bg:#080a0f; --panel:#11151d; --line:#263041; --gold:#f5b73f; --muted:#aab4c3; }}
+* {{ box-sizing:border-box; }} body {{ margin:0; background:var(--bg); color:#fff; font-family:Inter,system-ui,Segoe UI,sans-serif; }}
+header {{ position:sticky; top:0; z-index:3; display:flex; justify-content:space-between; align-items:center; gap:12px; padding:18px 22px; background:rgba(8,10,15,.94); border-bottom:1px solid var(--line); }}
+a {{ color:#fff; }} main {{ padding:22px; max-width:920px; margin:0 auto; }} h1,h2,p {{ margin-top:0; }}
+.summary {{ display:flex; flex-wrap:wrap; gap:10px; margin-bottom:18px; }}
+.pill {{ min-height:34px; display:inline-flex; align-items:center; padding:0 12px; border-radius:999px; background:#151b25; border:1px solid var(--line); color:#dbe3ef; font-weight:850; }}
+.grid {{ display:grid; gap:14px; }}
+.download-card {{ border:1px solid var(--line); border-radius:18px; background:var(--panel); padding:15px; }}
+.download-head {{ display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }}
+.download-head a {{ color:#fff; text-decoration:none; min-width:0; }}
+.download-head h2 {{ margin:0 0 6px; font-size:20px; line-height:1.14; }}
+.meta {{ color:var(--muted); font-size:13px; margin:7px 0; overflow-wrap:anywhere; }}
+.bar {{ width:100%; height:8px; border-radius:999px; background:#030507; overflow:hidden; margin:7px 0; }}
+.bar i {{ display:block; height:100%; border-radius:999px; background:var(--gold); }}
+.state {{ flex:0 0 auto; border-radius:999px; padding:5px 9px; background:#202836; color:#dbe3ef; font-size:12px; font-weight:900; }}
+.state.ready {{ background:#15351f; color:#baffc4; }} .state.error {{ background:#411924; color:#ffd9df; }} .state.running,.state.queued {{ background:#3a2b0c; color:#ffdc8a; }}
+.download-link {{ display:inline-flex; min-height:36px; align-items:center; margin-top:10px; padding:0 13px; border-radius:999px; background:#1d7f3a; color:#fff; text-decoration:none; font-weight:900; }}
+.empty {{ color:var(--muted); padding:14px; border:1px dashed var(--line); border-radius:14px; }}
+@media (max-width:650px) {{ main {{ padding:16px; }} header {{ padding:14px 16px; align-items:flex-start; flex-direction:column; }} .download-head h2 {{ font-size:17px; }} }}
+</style></head><body><header><strong>CineMediaVault Downloads</strong><nav><a href="/">Home</a> &middot; <a href="/movies">Movies</a> &middot; <a href="/tv">TV Shows</a> &middot; <a href="/logout">Logout</a></nav></header>
+<main><h1>Downloads</h1><div class="summary"><span class="pill">{len(mobile_items)} mobile download job(s)</span><span class="pill">{movie_app.human_size(mobile_cache_size)} prepared cache</span></div><div class="grid">{rows}</div></main></body></html>""")
+
+    def clear_mobile_download_cache(self) -> int:
+        removed = 0
+        MOBILE_DOWNLOAD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        with MOBILE_DOWNLOAD_LOCK:
+            MOBILE_DOWNLOAD_JOBS.clear()
+        try:
+            directories = [path for path in MOBILE_DOWNLOAD_CACHE_DIR.iterdir() if path.is_dir()]
+        except OSError:
+            return 0
+        for directory in directories:
+            try:
+                shutil.rmtree(directory)
+                removed += 1
+            except OSError:
+                pass
+        return removed
+
+    def remove_mobile_download_cache_job(self, job_id: str) -> bool:
+        if not re.fullmatch(r"[a-f0-9]{20}", job_id or ""):
+            return False
+        job_dir = MOBILE_DOWNLOAD_CACHE_DIR / job_id
+        removed = False
+        with MOBILE_DOWNLOAD_LOCK:
+            MOBILE_DOWNLOAD_JOBS.pop(job_id, None)
+        if job_dir.is_dir():
+            shutil.rmtree(job_dir, ignore_errors=True)
+            removed = True
+        return removed
+
+    def mobile_download_cache_items(self) -> list[dict]:
+        MOBILE_DOWNLOAD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        records: list[dict] = []
+        with MOBILE_DOWNLOAD_LOCK:
+            live = {key: mobile_status_payload(value) for key, value in MOBILE_DOWNLOAD_JOBS.items()}
+        seen: set[str] = set()
+        for job_id, job in live.items():
+            seen.add(job_id)
+            job_dir = Path(job.get("dir") or (MOBILE_DOWNLOAD_CACHE_DIR / job_id))
+            records.append(self.mobile_download_admin_record(job_id, job, job_dir))
+        try:
+            status_files = sorted(MOBILE_DOWNLOAD_CACHE_DIR.glob("*/status.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+        except OSError:
+            status_files = []
+        for status_file in status_files:
+            job_id = status_file.parent.name
+            if job_id in seen:
+                continue
+            try:
+                job = json.loads(status_file.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            records.append(self.mobile_download_admin_record(job_id, job, status_file.parent))
+        records.sort(key=lambda item: item["updated_at"], reverse=True)
+        return records
+
+    def mobile_download_admin_record(self, job_id: str, job: dict, job_dir: Path) -> dict:
+        size = 0
+        try:
+            for path in job_dir.rglob("*"):
+                if path.is_file():
+                    size += path.stat().st_size
+        except OSError:
+            pass
+        progress = float(job.get("progress") or 0)
+        updated_at = float(job.get("completed_at") or job.get("created_at") or 0)
+        status = str(job.get("status") or "unknown")
+        title = str(job.get("title") or f"{job.get('scope', 'job')} {job.get('item_id', job_id)}")
+        message = str(job.get("message") or job.get("error") or "")
+        href = "#"
+        if job.get("scope") == "movie":
+            href = f"/player/movie/{job.get('item_id')}"
+        elif job.get("scope") in {"tv", "episode"}:
+            href = f"/player/tv/{job.get('item_id')}"
+        elif job.get("scope") == "season":
+            href = f"/tv"
+        return {
+            "job_id": job_id, "title": title, "scope": str(job.get("scope") or ""), "item_id": str(job.get("item_id") or ""),
+            "status": status, "ready": bool(job.get("ready")), "progress": max(0.0, min(100.0, progress)),
+            "message": message, "size": size, "updated_at": updated_at, "download_url": str(job.get("download_url") or ""),
+            "filename": str(job.get("filename") or ""), "estimate_seconds": int(job.get("estimate_seconds") or 0),
+            "href": href,
+        }
+
     def direct_stream(self, kind: str, item_id: str, head_only: bool = False):
         if kind == "movie":
             item = movie_app.safe_item(item_id)
@@ -4052,6 +5174,9 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
             return
 
         user = self.current_user()
+        request_query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        is_video_wall = request_query.get("wall", [""])[0] == "1"
+        wall_user_id = int(user["id"]) if user and is_video_wall else 0
         user_label = "Unknown user"
         if user:
             user_label = user["full_name"] or user["username"] or user_label
@@ -4103,6 +5228,8 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
                             current["bytes_sent"] = sent
                             current["position"] = position
                             current["updated_at"] = time.time()
+                        if wall_user_id:
+                            DIRECT_BANDWIDTH_SAMPLES.append((time.monotonic(), wall_user_id, len(chunk)))
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
         finally:
@@ -4116,7 +5243,10 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
         items = self.hls_cache_items()
         active = [item for item in items if item["running"]]
         direct_items = self.direct_stream_items()
+        mobile_items = self.mobile_download_cache_items()
         cache_size = sum(item["size"] for item in items)
+        mobile_cache_size = sum(item["size"] for item in mobile_items)
+        mobile_retention_hours = int(mobile_download_cache_max_age_hours())
 
         def card(item: dict, active_view: bool) -> str:
             poster = f"<img src='{html.escape(item['poster'])}' alt=''>" if item["poster"] else "<div class='poster missing'>No Poster</div>"
@@ -4163,8 +5293,27 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
               </div>
             </article>"""
 
+        def mobile_card(item: dict) -> str:
+            ready_link = ""
+            if item["ready"] and item["download_url"]:
+                ready_link = f"<a class='download-link' href='{html.escape(item['download_url'])}'>Download Prepared File</a>"
+            eta = f" &middot; estimate {format_seconds(item['estimate_seconds'])}" if item["estimate_seconds"] else ""
+            message = html.escape(item["message"][:260])
+            return f"""
+            <article class="mobile-card">
+              <div class="mobile-head">
+                <a href="{html.escape(item['href'])}"><h3>{html.escape(item['title'])}</h3></a>
+                <span class="state {html.escape(item['status'])}">{html.escape(item['status'].title())}</span>
+              </div>
+              <div class="meta">{html.escape(item['scope'])} {html.escape(item['item_id'])} &middot; {movie_app.human_size(item['size'])}{eta}</div>
+              <div class="bar"><i style="width:{item['progress']:.1f}%"></i></div>
+              <div class="meta">{item['progress']:.0f}% &middot; {message}</div>
+              <div class="job-actions">{ready_link}<form method="post" action="/admin/hls" onsubmit="return confirm('Delete this prepared mobile download?')"><input type="hidden" name="action" value="clear_mobile_job"><input type="hidden" name="job_id" value="{html.escape(item['job_id'])}"><button class="danger-btn small-btn" type="submit">Delete</button></form></div>
+            </article>"""
+
         active_rows = "".join(card(item, True) for item in active) or "<p class='empty'>No active HLS ffmpeg streams.</p>"
         direct_rows = "".join(direct_card(item) for item in direct_items) or "<p class='empty'>No active direct HTTP streams.</p>"
+        mobile_rows = "".join(mobile_card(item) for item in mobile_items) or "<p class='empty'>No compressed mobile download jobs.</p>"
         cache_rows = "".join(card(item, False) for item in items) or "<p class='empty'>No HLS cache folders.</p>"
         note = f"<div class='note'>{html.escape(message)}</div>" if message else ""
         return self.render_html(f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -4181,13 +5330,22 @@ a {{ color:#fff; }} main {{ padding:22px; max-width:1180px; margin:0 auto; }} h1
 h3 {{ margin:0 0 4px; font-size:20px; }} p {{ color:#dbe2ec; margin:0 0 8px; }} .meta {{ color:var(--muted); font-size:13px; margin:6px 0; }}
 .bar {{ width:100%; height:8px; border-radius:999px; background:#030507; overflow:hidden; margin:5px 0; }} .bar i {{ display:block; height:100%; border-radius:999px; background:var(--gold); }}
 .users {{ display:grid; gap:9px; margin:12px 0; }} .user-row {{ border:1px solid rgba(255,255,255,.10); border-radius:12px; padding:9px; background:rgba(255,255,255,.04); }} .user-row span {{ display:block; color:var(--muted); font-size:12px; margin-top:3px; }}
+.mobile-card,.settings-card {{ border:1px solid var(--line); border-radius:18px; background:var(--panel); padding:14px; margin-bottom:18px; }}
+.mobile-head {{ display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }}
+.mobile-head a {{ color:#fff; text-decoration:none; }}
+.state {{ flex:0 0 auto; border-radius:999px; padding:5px 9px; background:#202836; color:#dbe3ef; font-size:12px; font-weight:900; }}
+.state.ready {{ background:#15351f; color:#baffc4; }} .state.error {{ background:#411924; color:#ffd9df; }} .state.running,.state.queued {{ background:#3a2b0c; color:#ffdc8a; }}
+.download-link {{ display:inline-flex; min-height:34px; align-items:center; margin-top:10px; padding:0 12px; border-radius:999px; background:#1d7f3a; color:#fff; text-decoration:none; font-weight:900; }} .job-actions {{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; }} .small-btn {{ min-height:34px; padding:0 12px; margin-top:10px; }} label {{ display:inline-flex; gap:7px; align-items:center; min-height:38px; padding:0 12px; border:1px solid var(--line); border-radius:999px; background:#151b25; font-weight:850; }}
 .empty {{ color:var(--muted); padding:14px; border:1px dashed var(--line); border-radius:14px; }}
 @media (max-width:650px) {{ main {{ padding:16px; }} header {{ padding:14px 16px; align-items:flex-start; flex-direction:column; }} .stream-card {{ grid-template-columns:82px minmax(0,1fr); gap:12px; padding:12px; }} .poster-link img,.poster {{ width:82px; }} h3 {{ font-size:17px; }} }}
 </style></head><body><header><strong>CineMediaVault HLS Admin</strong><nav><a href="/admin/activity">Activity</a> | <a href="/admin/users">Users</a> &middot; <a href="/">Home</a></nav></header>
 <main>{note}<div class="summary"><span class="pill">{len(active)} active HLS stream(s)</span><span class="pill">{len(direct_items)} active direct stream(s)</span><span class="pill">{len(items)} cache folder(s)</span><span class="pill">{movie_app.human_size(cache_size)} cache used</span></div>
-<form class="controls" method="post" action="/admin/hls"><button class="danger-btn" name="action" value="stop_all" type="submit">Stop All ffmpeg HLS</button><button class="danger-btn" name="action" value="clear_cache" type="submit" onclick="return confirm('Stop all HLS streams and clear the HLS cache')">Clear HLS Cache</button></form>
+<div class="summary"><span class="pill">{len(mobile_items)} mobile download job(s)</span><span class="pill">{movie_app.human_size(mobile_cache_size)} mobile cache used</span></div>
+<form class="controls" method="post" action="/admin/hls"><button class="danger-btn" name="action" value="stop_all" type="submit">Stop All ffmpeg HLS</button><button class="danger-btn" name="action" value="clear_cache" type="submit" onclick="return confirm('Stop all HLS streams and clear the HLS cache')">Clear HLS Cache</button><button class="danger-btn" name="action" value="clear_mobile_cache" type="submit" onclick="return confirm('Clear prepared compressed mobile downloads')">Clear Mobile Download Cache</button></form>
+<section class="settings-card"><h2>Download Cache Retention</h2><p>Prepared compressed downloads are kept for this long before automatic cleanup. Default is 24 hours.</p><form class="controls" method="post" action="/admin/hls"><input type="hidden" name="action" value="set_mobile_cache_age"><label><input type="radio" name="hours" value="6" {'checked' if mobile_retention_hours == 6 else ''}> 6 hours</label><label><input type="radio" name="hours" value="12" {'checked' if mobile_retention_hours == 12 else ''}> 12 hours</label><label><input type="radio" name="hours" value="24" {'checked' if mobile_retention_hours == 24 else ''}> 24 hours</label><button type="submit">Save</button></form></section>
 <section class="section"><h2>Live Streams</h2><div class="grid">{active_rows}</div></section>
 <section class="section"><h2>Direct Streams</h2><div class="grid">{direct_rows}</div></section>
+<section class="section"><h2>Mobile Download Jobs</h2><div class="grid">{mobile_rows}</div></section>
 <section class="section"><h2>HLS Cache</h2><div class="grid">{cache_rows}</div></section>
 </main></body></html>""")
 
@@ -4208,6 +5366,20 @@ h3 {{ margin:0 0 4px; font-size:20px; }} p {{ color:#dbe2ec; margin:0 0 8px; }} 
         if action == "clear_cache":
             count = self.clear_hls_cache()
             return self.admin_hls_page(user, f"Removed {count} HLS cache folder(s).")
+        if action == "clear_mobile_cache":
+            count = self.clear_mobile_download_cache()
+            return self.admin_hls_page(user, f"Removed {count} mobile download cache folder(s).")
+        if action == "clear_mobile_job":
+            job_id = form.get("job_id") or ""
+            removed = self.remove_mobile_download_cache_job(job_id)
+            return self.admin_hls_page(user, f"{'Removed' if removed else 'Could not remove'} mobile download job {job_id}.")
+        if action == "set_mobile_cache_age":
+            try:
+                hours = save_mobile_download_cache_max_age(int(form.get("hours") or 24))
+                cleanup_mobile_download_cache_once()
+                return self.admin_hls_page(user, f"Mobile download cache retention set to {hours} hours.")
+            except Exception as exc:
+                return self.admin_hls_page(user, f"Could not save mobile download cache retention: {exc}")
         return self.admin_hls_page(user, "No action selected.")
 
     def admin_media_context(self, kind: str, item_id: str) -> dict:
@@ -4217,7 +5389,7 @@ h3 {{ margin:0 0 4px; font-size:20px; }} p {{ color:#dbe2ec; margin:0 0 8px; }} 
             title = metadata.get("title") or item.title
             path = item.path
             size = int(getattr(item, "size", 0) or (path.stat().st_size if path.exists() else 0))
-            return {"kind": "movie", "id": str(item.id), "title": title, "subtitle": "Movie", "path": path, "size": size, "back": f"/player/movie/{item.id}"}
+            return {"kind": "movie", "id": str(item.id), "match_id": str(item.id), "title": title, "subtitle": "Movie", "path": path, "size": size, "back": f"/player/movie/{item.id}"}
         if kind == "tv":
             episode = tv_app.safe_episode(item_id)
             show = show_for_episode(episode)
@@ -4226,7 +5398,8 @@ h3 {{ margin:0 0 4px; font-size:20px; }} p {{ color:#dbe2ec; margin:0 0 8px; }} 
             title = f"{episode.show} - {episode_label(episode)} - {episode_meta['title']}"
             path = episode.path
             size = int(getattr(episode, "size", 0) or (path.stat().st_size if path.exists() else 0))
-            return {"kind": "tv", "id": str(episode.id), "title": title, "subtitle": "TV Episode", "path": path, "size": size, "back": f"/player/tv/{episode.id}"}
+            match_id = str(show.id) if show else str(episode.id)
+            return {"kind": "tv", "id": str(episode.id), "match_id": match_id, "title": title, "subtitle": "TV Episode", "path": path, "size": size, "back": f"/player/tv/{episode.id}"}
         raise FileNotFoundError("Unknown media kind")
 
     def delete_path_allowed(self, path: Path, root: Path) -> bool:
@@ -4267,8 +5440,8 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
 <header><a class="back" href="{html.escape(item['back'])}">&lsaquo;</a><h1>{html.escape(item['title'])}</h1></header>
 <main>{note}
 <section class="menu">
-<a href="/{html.escape(kind)}/fix-match/{html.escape(item['id'])}">Fix Match</a>
-<a href="/{html.escape(kind)}/fix-match/{html.escape(item['id'])}">Update Poster</a>
+<a href="/{html.escape(kind)}/fix-match/{html.escape(item['match_id'])}">Fix Match</a>
+<a href="/{html.escape(kind)}/fix-match/{html.escape(item['match_id'])}">Update Poster</a>
 <a href="#delete">Delete</a>
 </section>
 <section class="panel"><h2>File Info</h2><div class="kv">
@@ -4333,6 +5506,124 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
 <title>CineMediaVault Deleted</title><style>:root{{color-scheme:dark}}body{{margin:0;background:#080a0f;color:#fff;font-family:Inter,system-ui,Segoe UI,sans-serif;padding:24px}}a{{color:#fff}}.panel{{max-width:760px;border:1px solid #242b36;border-radius:18px;background:#10141d;padding:20px}}p{{overflow-wrap:anywhere;color:#cfd6e2}}</style></head>
 <body><section class="panel"><h1>Deleted</h1><p>{html.escape(deleted_path)}</p><p><a href="/{'movies' if kind == 'movie' else 'tv'}">Back to library</a></p></section></body></html>""")
 
+    def video_wall_item(self, media_type: str, media_id: int, media_path: str = "", include_compatibility: bool = True) -> dict | None:
+        try:
+            if media_type == "movie":
+                item = next((value for value in movie_app.movie_index.items if media_path and str(value.path) == media_path), None)
+                item = item or movie_app.safe_item(str(media_id))
+                meta = movie_app.metadata_for(item)
+                compatibility = browser_media_compatibility(item.path) if include_compatibility else {"requires_hls": False}
+                return {"media_type": "movie", "media_id": int(item.id),
+                        "title": meta.get("title") or item.title,
+                        "subtitle": str(meta.get("year") or "Movie"),
+                        "poster": movie_app.poster_url_for(item) or "",
+                        "stream_url": f"/play/{item.id}", "hls_url": f"/hls/movie/{item.id}/index.m3u8",
+                        "requires_hls": compatibility["requires_hls"], "media_path": str(item.path)}
+            episode = next((value for value in tv_app.tv_index.episode_by_id.values() if media_path and str(value.path) == media_path), None)
+            episode = episode or tv_app.safe_episode(str(media_id))
+            show = show_for_episode(episode)
+            meta = tv_app.metadata_for(show) if show else {}
+            episode_meta = tv_episode_display_metadata(meta, episode)
+            compatibility = browser_media_compatibility(episode.path) if include_compatibility else {"requires_hls": False}
+            return {"media_type": "tv", "media_id": int(episode.id),
+                    "title": episode.show,
+                    "subtitle": f"{episode_label(episode)} - {episode_meta.get('title') or episode.title}",
+                    "poster": (tv_app.poster_url_for(show) if show else "") or "",
+                    "stream_url": f"/play/episode/{episode.id}", "hls_url": f"/hls/tv/{episode.id}/index.m3u8",
+                    "requires_hls": compatibility["requires_hls"], "media_path": str(episode.path)}
+        except Exception:
+            return None
+
+    def video_wall_page(self):
+        return self.render_html(VIDEO_WALL_PAGE)
+
+    def api_video_wall(self, user):
+        conn = db_connect()
+        try:
+            rows = conn.execute("SELECT slot, media_type, media_id, media_path FROM user_video_wall WHERE user_id=? ORDER BY slot", (int(user["id"]),)).fetchall()
+        finally:
+            conn.close()
+        slots = []
+        for row in rows:
+            item = self.video_wall_item(row["media_type"], int(row["media_id"]), row["media_path"])
+            if item:
+                item["slot"] = int(row["slot"])
+                item.pop("media_path", None)
+                slots.append(item)
+        return self.json_response({"ok": True, "slots": slots})
+
+    def api_video_wall_slot(self, user):
+        payload = self.read_json()
+        try:
+            slot = int(payload.get("slot"))
+        except Exception:
+            slot = 0
+        if slot not in {1, 2, 3, 4}:
+            return self.json_response({"ok": False, "error": "slot must be 1 through 4"})
+        conn = db_connect()
+        try:
+            media_type = str(payload.get("media_type") or "")
+            media_id = payload.get("media_id")
+            if not media_id:
+                conn.execute("DELETE FROM user_video_wall WHERE user_id=? AND slot=?", (int(user["id"]), slot))
+            elif media_type in {"movie", "tv"} and (wall_item := self.video_wall_item(media_type, int(media_id))):
+                conn.execute("""INSERT INTO user_video_wall(user_id,slot,media_type,media_id,media_path,updated_at)
+                    VALUES(?,?,?,?,?,?) ON CONFLICT(user_id,slot) DO UPDATE SET
+                    media_type=excluded.media_type,media_id=excluded.media_id,media_path=excluded.media_path,updated_at=excluded.updated_at""",
+                    (int(user["id"]), slot, media_type, int(wall_item["media_id"]), wall_item["media_path"], auth_now()))
+            else:
+                return self.json_response({"ok": False, "error": "media item not found"})
+            conn.commit()
+        finally:
+            conn.close()
+        return self.json_response({"ok": True, "slot": slot})
+
+    def api_video_wall_search(self, user):
+        parsed = urllib.parse.urlparse(self.path)
+        query = urllib.parse.parse_qs(parsed.query).get("q", [""])[0].strip().casefold()
+        found = []
+        if len(query) >= 2:
+            for item in list(movie_app.movie_index.items):
+                meta = movie_app.metadata_for(item)
+                title = str(meta.get("title") or item.title)
+                haystack = f"{title} {meta.get('year') or ''} {item.path.name}".casefold()
+                if query in haystack:
+                    found.append(self.video_wall_item("movie", int(item.id), include_compatibility=False))
+                    if len(found) >= 30:
+                        break
+            if len(found) < 30:
+                for episode in list(tv_app.tv_index.episode_by_id.values()):
+                    haystack = f"{episode.show} {episode.title} {episode_label(episode)} {episode.path.name}".casefold()
+                    if query in haystack:
+                        found.append(self.video_wall_item("tv", int(episode.id), include_compatibility=False))
+                        if len(found) >= 30:
+                            break
+        public_items = []
+        for item in found:
+            if item:
+                item.pop("media_path", None)
+                public_items.append(item)
+        return self.json_response({"ok": True, "items": public_items})
+
+    def api_video_wall_bandwidth(self, user):
+        now = time.monotonic()
+        window_seconds = 3.0
+        user_id = int(user["id"])
+        with DIRECT_STREAM_LOCK:
+            while DIRECT_BANDWIDTH_SAMPLES and DIRECT_BANDWIDTH_SAMPLES[0][0] < now - 10.0:
+                DIRECT_BANDWIDTH_SAMPLES.popleft()
+            byte_count = sum(
+                sample_bytes for sample_time, sample_user, sample_bytes in DIRECT_BANDWIDTH_SAMPLES
+                if sample_time >= now - window_seconds and sample_user == user_id
+            )
+        bytes_per_second = byte_count / window_seconds
+        return self.json_response({
+            "ok": True,
+            "window_seconds": window_seconds,
+            "bytes_per_second": round(bytes_per_second, 2),
+            "mbps": round(bytes_per_second * 8 / 1_000_000, 3),
+        })
+
     def watch_media(self, kind: str, item_id: str):
         item = media_for_kind(kind, item_id)
         stream = ensure_hls_stream(kind, item_id, item["path"])
@@ -4382,6 +5673,12 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
             .replace("{{HLS_MODE_CLASS}}", "active" if playback_mode == "hls" else "")
             .replace("{{DIRECT_MODE_HREF}}", html.escape(direct_href))
             .replace("{{HLS_MODE_HREF}}", html.escape(hls_href))
+            .replace("{{DOWNLOAD_SIZE_OPEN_CLASS}}", "")
+            .replace("{{SOURCE_BYTES}}", str(int(context.get("source_size") or 0)))
+            .replace("{{SOURCE_SIZE_LABEL}}", html.escape(context.get("source_size_label") or ""))
+            .replace("{{DOWNLOAD_DEFAULT_RATIO}}", f"{MOBILE_DOWNLOAD_TARGET_SOURCE_RATIO:.2f}")
+            .replace("{{DOWNLOAD_DEFAULT_PERCENT}}", str(int(round(MOBILE_DOWNLOAD_TARGET_SOURCE_RATIO * 100))))
+            .replace("{{DOWNLOAD_DEFAULT_LABEL}}", html.escape(movie_app.human_size(int((context.get("source_size") or 0) * MOBILE_DOWNLOAD_TARGET_SOURCE_RATIO))))
             .replace("{{ACTIONS}}", context["actions"])
             .replace("{{PLAYER_NAV}}", context["player_nav"])
             .replace("{{HERO_ATTRS}}", " style=\"display:none\"" if direct_play else "")
@@ -4411,6 +5708,27 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
             return
         item = media_for_kind(kind, item_id)
         stream = ensure_hls_stream(kind, item_id, item["path"])
+        user = self.current_user()
+        if user:
+            user_id = int(user["id"])
+            remote = self.client_address[0] if self.client_address else ""
+            viewer_key = f"{stream['key']}:{user_id}:{remote}"
+            segment_match = re.search(r"(\d+)(?=\.[^.]+$)", filename)
+            with HLS_VIEWER_LOCK:
+                previous = HLS_VIEWERS.get(viewer_key, {})
+                position = float(previous.get("position") or 0)
+                if segment_match:
+                    position = (int(segment_match.group(1)) + 1) * max(1.0, float(HLS_SEGMENT_SECONDS))
+                HLS_VIEWERS[viewer_key] = {
+                    "kind": kind,
+                    "item_id": str(item_id),
+                    "user_id": user_id,
+                    "user": user["full_name"] or user["username"] or "Signed-in user",
+                    "remote": remote,
+                    "position": position,
+                    "duration": float(item.get("duration") or ffprobe_duration(item["path"]) or 0),
+                    "updated_at": time.time(),
+                }
         if filename.endswith(".m3u8") and HLS_VIRTUAL_VOD:
             data = virtual_vod_playlist(item["path"])
             if data:
@@ -4448,6 +5766,11 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
         self.send_header("Cache-Control", "no-store" if filename.endswith(".m3u8") else "public, max-age=300")
         self.end_headers()
         self.wfile.write(data)
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        if query.get("wall", [""])[0] == "1":
+            if user:
+                with DIRECT_STREAM_LOCK:
+                    DIRECT_BANDWIDTH_SAMPLES.append((time.monotonic(), int(user["id"]), len(data)))
 
     def serve_asset(self, request_path: str):
         name = request_path.rsplit("/", 1)[-1]
@@ -4495,6 +5818,18 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
     def serve_file(self, path: Path, disposition: str = "attachment"):
         return tv_app.Handler.serve_file(self, path, disposition=disposition)
 
+    def serve_download_package(self, path: Path):
+        encoded_name = urllib.parse.quote(path.name)
+        data_size = path.stat().st_size
+        self.send_response(200)
+        self.send_header("Content-Type", mobile_package_mime(path))
+        self.send_header("Content-Length", str(data_size))
+        self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{encoded_name}")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        with path.open("rb") as handle:
+            shutil.copyfileobj(handle, self.wfile)
+
 
 def media_for_kind(kind: str, item_id: str) -> dict:
     if kind == "movie":
@@ -4520,6 +5855,40 @@ def hls_mime_type(filename: str) -> str:
     if filename.endswith(".ts"):
         return "video/mp2t"
     return mimetypes.guess_type(filename)[0] or "application/octet-stream"
+
+
+def browser_media_compatibility(path: Path) -> dict:
+    """Return a conservative direct-play decision, cached by file identity."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return {"requires_hls": True, "video_codec": "", "audio_codec": ""}
+    key = str(path)
+    cached = MEDIA_CODEC_CACHE.get(key)
+    if cached and cached[0] == stat.st_mtime and cached[1] == stat.st_size:
+        return dict(cached[2])
+    video_codec = ""
+    audio_codec = ""
+    try:
+        result = subprocess.run([
+            "ffprobe", "-v", "error", "-show_entries", "stream=codec_type,codec_name",
+            "-of", "json", str(path),
+        ], capture_output=True, text=True, timeout=20, check=False)
+        for stream in json.loads(result.stdout or "{}").get("streams", []):
+            codec_type = str(stream.get("codec_type") or "")
+            codec_name = str(stream.get("codec_name") or "").lower()
+            if codec_type == "video" and not video_codec:
+                video_codec = codec_name
+            elif codec_type == "audio" and not audio_codec:
+                audio_codec = codec_name
+    except Exception:
+        pass
+    direct_video = {"h264", "vp8", "vp9", "av1"}
+    direct_audio = {"aac", "mp3", "opus", "vorbis"}
+    requires_hls = not video_codec or video_codec not in direct_video or (audio_codec and audio_codec not in direct_audio)
+    value = {"requires_hls": requires_hls, "video_codec": video_codec, "audio_codec": audio_codec}
+    MEDIA_CODEC_CACHE[key] = (stat.st_mtime, stat.st_size, value)
+    return dict(value)
 
 
 def ffprobe_duration(path: Path) -> float:
@@ -4853,8 +6222,9 @@ def start_hls_cleanup_thread() -> None:
         while True:
             try:
                 cleanup_hls_cache_once()
+                cleanup_mobile_download_cache_once()
             except Exception as exc:
-                print(f"HLS cleanup error: {exc}", flush=True)
+                print(f"HLS/mobile cleanup error: {exc}", flush=True)
             time.sleep(interval)
 
     threading.Thread(target=worker, daemon=True, name="hls-cache-cleanup").start()
@@ -4887,12 +6257,14 @@ def main():
     movie_app.load_metadata_map()
     tv_app.load_poster_map()
     tv_app.load_metadata_map()
+    actor_stats = rebuild_actor_index()
     movie_app.movie_index.refresh_background()
     tv_app.tv_index.refresh_background()
     start_hls_cleanup_thread()
 
     print(f"Loaded {len(movie_app.movie_index.items)} movies", flush=True)
     print(f"Loaded {len(tv_app.tv_index.shows)} shows and {len(tv_app.tv_index.episode_by_id)} episodes", flush=True)
+    print(f"Indexed {actor_stats['actors']} actors across {actor_stats['links']} library links", flush=True)
     print(
         f"HLS cache cleanup: {HLS_CACHE_DIR} older than {HLS_CACHE_MAX_AGE_HOURS:g} hour(s), every {HLS_CLEANUP_INTERVAL_MINUTES:g} minute(s)",
         flush=True,
@@ -4916,4 +6288,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
