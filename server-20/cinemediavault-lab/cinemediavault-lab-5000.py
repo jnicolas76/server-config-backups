@@ -25,6 +25,7 @@ import threading
 import time
 import urllib.parse
 import zipfile
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -93,6 +94,7 @@ MOBILE_DOWNLOAD_CONTAINER_OVERHEAD_KBPS = int(os.environ.get("MOBILE_DOWNLOAD_CO
 SERVER_DISPLAY_NAME = os.environ.get("CINEVAULT_SERVER_NAME") or socket.gethostname()
 TRANSCODES: dict[str, dict] = {}
 DIRECT_STREAMS: dict[str, dict] = {}
+DIRECT_BANDWIDTH_SAMPLES = deque(maxlen=50000)
 MOBILE_DOWNLOAD_JOBS: dict[str, dict] = {}
 MEDIA_DURATION_CACHE: dict[str, float] = {}
 TRANSCODE_LOCK = threading.Lock()
@@ -380,6 +382,15 @@ CREATE TABLE IF NOT EXISTS actor_media (
 );
 CREATE INDEX IF NOT EXISTS idx_actors_name_norm ON actors(name_norm);
 CREATE INDEX IF NOT EXISTS idx_actor_media_actor ON actor_media(actor_id, media_type, title);
+CREATE TABLE IF NOT EXISTS user_video_wall (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  slot INTEGER NOT NULL CHECK(slot BETWEEN 1 AND 4),
+  media_type TEXT NOT NULL CHECK(media_type IN ('movie', 'tv')),
+  media_id INTEGER NOT NULL,
+  media_path TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(user_id, slot)
+);
 """
 
 
@@ -423,6 +434,9 @@ def ensure_auth_schema() -> None:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
         if "is_super_admin" not in columns:
             conn.execute("ALTER TABLE users ADD COLUMN is_super_admin INTEGER NOT NULL DEFAULT 0")
+        wall_columns = {row["name"] for row in conn.execute("PRAGMA table_info(user_video_wall)").fetchall()}
+        if "media_path" not in wall_columns:
+            conn.execute("ALTER TABLE user_video_wall ADD COLUMN media_path TEXT NOT NULL DEFAULT ''")
         now = auth_now()
         admin_hash = password_hash("admin1")
         conn.execute(
@@ -983,7 +997,7 @@ HOME_PAGE = """<!doctype html>
   <div class="scan-progress" id="scanProgress"><div class="scan-progress-row"><span id="scanProgressMessage">Preparing scan</span><strong id="scanProgressPercent">0%</strong></div><div class="scan-progress-track"><div class="scan-progress-fill" id="scanProgressFill"></div></div></div>
   <div class="home-search-panel" id="homeSearchPanel"><input id="homeSearch" type="search" placeholder="Search movies, shows, actors, or genres"></div>
   <main>
-    <nav class="tabs"><a class="tab active" href="/">Home</a><a class="tab" href="/movies">Movies</a><a class="tab" href="/tv">TV Shows</a>{{MODULE_TABS}}</nav>
+    <nav class="tabs"><a class="tab active" href="/">Home</a><a class="tab" href="/movies">Movies</a><a class="tab" href="/tv">TV Shows</a><a class="tab" href="/wall">Video Wall</a>{{MODULE_TABS}}</nav>
     <section class="section" id="continueSection">
       <div class="section-head"><div><h2>Continue Watching</h2></div></div>
       <div class="rail" id="continueRail"></div>
@@ -3349,6 +3363,40 @@ def cleanup_mobile_download_cache_once() -> None:
                 shutil.rmtree(child, ignore_errors=True)
 
 
+VIDEO_WALL_PAGE = r"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CineMediaVault Video Wall</title><style>
+:root{color-scheme:dark;--bg:#07090d;--panel:#11161f;--line:#2b3442;--text:#f7f9fc;--muted:#9ca8b8;--gold:#f5b73f;--green:#36dc78}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,Segoe UI,sans-serif;overflow-x:hidden}
+header{position:sticky;top:0;z-index:5;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 18px;background:rgba(7,9,13,.94);border-bottom:1px solid var(--line);backdrop-filter:blur(14px)}
+.brand{font-size:24px;font-weight:950}.brand b{color:var(--gold)}.controls{display:flex;gap:8px;flex-wrap:wrap}button,.button{min-height:38px;border:1px solid var(--line);border-radius:8px;padding:0 13px;background:#171d27;color:#fff;font-weight:850;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}.primary{background:var(--gold);color:#111;border-color:var(--gold)}
+main{padding:14px}.wall{height:calc(100vh - 92px);min-height:520px;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:10px}.tile{position:relative;min-width:0;min-height:0;overflow:hidden;background:#000;border:2px solid transparent;border-radius:8px}.tile.active{border-color:var(--green)}.tile video{width:100%;height:100%;object-fit:contain;background:#000}.empty{height:100%;display:grid;place-items:center;text-align:center;color:var(--muted);border:1px dashed var(--line);padding:18px}.tile-bar{position:absolute;left:0;right:0;bottom:0;display:grid;grid-template-columns:auto auto minmax(90px,1fr) auto auto auto;align-items:center;gap:7px;padding:26px 9px 9px;background:linear-gradient(transparent,rgba(0,0,0,.94));opacity:0;transition:opacity .18s}.tile:hover .tile-bar,.tile.active .tile-bar{opacity:1}.tile-title{position:absolute;left:10px;right:10px;bottom:50px;min-width:0;font-weight:850;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 3px #000}.icon{width:34px;height:34px;padding:0;border-radius:50%}.seek{width:100%;accent-color:var(--gold)}.time{font-size:12px;color:#fff;white-space:nowrap;font-variant-numeric:tabular-nums}.bandwidth{display:none;align-items:center;gap:14px;padding:9px 14px;border-bottom:1px solid var(--line);background:#101620}.bandwidth.open{display:flex}.bandwidth strong{font-size:18px;color:var(--green);font-variant-numeric:tabular-nums}.bandwidth span{color:var(--muted);font-size:13px}
+.drawer{position:fixed;inset:0 0 0 auto;z-index:10;width:min(440px,100%);padding:18px;background:#0c1017;border-left:1px solid var(--line);transform:translateX(105%);transition:transform .2s;overflow:auto}.drawer.open{transform:none}.drawer-head{display:flex;justify-content:space-between;align-items:center}.search{width:100%;min-height:48px;margin:16px 0;border:1px solid var(--line);border-radius:8px;background:#171d27;color:#fff;padding:0 14px;font-size:16px}.results{display:grid;gap:9px}.result{display:grid;grid-template-columns:52px 1fr auto;align-items:center;gap:10px;border:1px solid var(--line);border-radius:8px;padding:8px;background:var(--panel)}.result img{width:52px;aspect-ratio:2/3;object-fit:cover;background:#06080c}.result small{display:block;color:var(--muted);margin-top:3px}.slot-picker{display:flex;gap:5px}.slot-picker button{width:34px;height:34px;min-height:34px;padding:0}.hint{color:var(--muted);font-size:13px}
+@media(max-width:720px){header{align-items:flex-start;flex-direction:column}.wall{height:auto;min-height:0;grid-template-columns:1fr;grid-template-rows:none}.tile{aspect-ratio:16/9}.tile-bar{opacity:1}.brand{font-size:20px}}
+</style></head><body><header><div class="brand">CineMedia<b>Vault</b> Wall</div><div class="controls"><a class="button" href="/">Home</a><button id="playAll" class="primary">Play all</button><button id="pauseAll">Pause all</button><button id="syncAll">Sync</button><button id="toggleBandwidth">Bandwidth</button><button id="addMedia">Add media</button></div></header><div class="bandwidth" id="bandwidthPanel"><strong id="bandwidthValue">0.00 Mbps</strong><span id="bandwidthBytes">0 B/s</span><span id="playingCount">0 playing</span></div>
+<main><div class="wall" id="wall"></div></main>
+<aside class="drawer" id="drawer"><div class="drawer-head"><div><h2>Add to wall</h2><div class="hint">Search any movie or individual TV episode, then choose a slot.</div></div><button class="icon" id="closeDrawer" aria-label="Close">&#10005;</button></div><input class="search" id="wallSearch" type="search" placeholder="Search movies or episodes"><div class="results" id="results"></div></aside>
+<script>
+const wall=document.getElementById('wall'),drawer=document.getElementById('drawer'),search=document.getElementById('wallSearch'),results=document.getElementById('results');let slots=[],active=1,timer;
+const esc=s=>String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function load(){const r=await fetch('/api/video-wall');const d=await r.json();slots=d.slots||[];render()}
+function fmt(t){if(!Number.isFinite(t))return '0:00';t=Math.max(0,Math.floor(t));return `${Math.floor(t/60)}:${String(t%60).padStart(2,'0')}`}
+function render(){wall.innerHTML='';for(let n=1;n<=4;n++){const item=slots.find(x=>x.slot===n),el=document.createElement('section');el.className='tile'+(n===active?' active':'');el.dataset.slot=n;if(!item){el.innerHTML=`<button class="empty" data-add="${n}">Slot ${n}<br>Add a movie or episode</button>`}else{const join=item.stream_url.includes('?')?'&':'?';el.innerHTML=`<video playsinline preload="metadata" muted src="${esc(item.stream_url)}${join}wall=1&slot=${n}"></video><div class="tile-bar"><span class="tile-title">${esc(item.title)} <small>${esc(item.subtitle)}</small></span><button class="icon" data-back title="Rewind 10 seconds">-10</button><button class="icon" data-toggle title="Play or pause">&#9654;</button><input class="seek" data-seek type="range" min="0" max="1000" value="0" aria-label="Seek"><span class="time">0:00 / 0:00</span><button class="icon" data-forward title="Forward 10 seconds">+10</button><button class="icon" data-remove="${n}" title="Remove">&#10005;</button></div>`}wall.appendChild(el)}bindVideos();applyAudio();updateBandwidth()}
+function bindVideos(){document.querySelectorAll('.tile video').forEach(v=>{const tile=v.closest('.tile'),seek=tile.querySelector('[data-seek]'),label=tile.querySelector('.time'),toggle=tile.querySelector('[data-toggle]');const update=()=>{if(seek&&Number.isFinite(v.duration)&&v.duration>0)seek.value=Math.round(v.currentTime/v.duration*1000);if(label)label.textContent=`${fmt(v.currentTime)} / ${fmt(v.duration)}`;if(toggle)toggle.innerHTML=v.paused?'&#9654;':'&#10074;&#10074;'};v.addEventListener('timeupdate',update);v.addEventListener('durationchange',update);v.addEventListener('play',update);v.addEventListener('pause',update);update()})}
+function applyAudio(){document.querySelectorAll('.tile').forEach(t=>{t.classList.toggle('active',+t.dataset.slot===active);const v=t.querySelector('video');if(v)v.muted=+t.dataset.slot!==active})}
+wall.addEventListener('click',async e=>{const tile=e.target.closest('.tile');if(tile){active=+tile.dataset.slot;applyAudio()}const v=tile&&tile.querySelector('video');if(e.target.closest('[data-add]'))openDrawer(+e.target.closest('[data-add]').dataset.add);if(e.target.closest('[data-remove]')){await updateSlot(+e.target.closest('[data-remove]').dataset.remove,null);load()}if(v&&e.target.closest('[data-back]'))v.currentTime=Math.max(0,v.currentTime-10);if(v&&e.target.closest('[data-forward]'))v.currentTime=Math.min(Number.isFinite(v.duration)?v.duration:v.currentTime+10,v.currentTime+10);if(v&&e.target.closest('[data-toggle]'))v.paused?v.play().catch(()=>{}):v.pause()});
+wall.addEventListener('input',e=>{const seek=e.target.closest('[data-seek]');if(!seek)return;const v=seek.closest('.tile').querySelector('video');if(v&&Number.isFinite(v.duration))v.currentTime=(+seek.value/1000)*v.duration});
+function openDrawer(slot){active=slot||active;drawer.classList.add('open');search.focus()}
+document.getElementById('addMedia').onclick=()=>openDrawer(active);document.getElementById('closeDrawer').onclick=()=>drawer.classList.remove('open');
+document.getElementById('playAll').onclick=()=>document.querySelectorAll('video').forEach(v=>v.play().catch(()=>{}));document.getElementById('pauseAll').onclick=()=>document.querySelectorAll('video').forEach(v=>v.pause());document.getElementById('syncAll').onclick=()=>{const vs=[...document.querySelectorAll('video')];if(!vs.length)return;const t=Math.min(...vs.map(v=>v.currentTime||0));vs.forEach(v=>v.currentTime=t)};
+const bandwidthPanel=document.getElementById('bandwidthPanel');document.getElementById('toggleBandwidth').onclick=()=>{bandwidthPanel.classList.toggle('open');localStorage.setItem('cmv-wall-bandwidth',bandwidthPanel.classList.contains('open')?'1':'0');updateBandwidth()};if(localStorage.getItem('cmv-wall-bandwidth')==='1')bandwidthPanel.classList.add('open');
+function humanRate(n){if(n>=1048576)return (n/1048576).toFixed(2)+' MB/s';if(n>=1024)return (n/1024).toFixed(1)+' KB/s';return Math.round(n)+' B/s'}async function updateBandwidth(){const playing=[...document.querySelectorAll('video')].filter(v=>!v.paused&&!v.ended).length;document.getElementById('playingCount').textContent=`${playing} playing`;if(!bandwidthPanel.classList.contains('open'))return;try{const r=await fetch('/api/video-wall/bandwidth',{cache:'no-store'}),d=await r.json();document.getElementById('bandwidthValue').textContent=`${Number(d.mbps||0).toFixed(2)} Mbps`;document.getElementById('bandwidthBytes').textContent=humanRate(Number(d.bytes_per_second||0))}catch(_){document.getElementById('bandwidthValue').textContent='Unavailable'}}setInterval(updateBandwidth,1000);
+async function updateSlot(slot,item){await fetch('/api/video-wall/slot',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({slot,media_type:item&&item.media_type,media_id:item&&item.media_id})})}
+search.addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(runSearch,250)});async function runSearch(){const q=search.value.trim();if(q.length<2){results.innerHTML='';return}const r=await fetch('/api/video-wall/search?q='+encodeURIComponent(q));const d=await r.json();results.innerHTML=(d.items||[]).map(i=>`<article class="result">${i.poster?`<img src="${esc(i.poster)}" alt="">`:'<span></span>'}<div><strong>${esc(i.title)}</strong><small>${esc(i.subtitle)}</small></div><div class="slot-picker">${[1,2,3,4].map(n=>`<button data-pick="${n}" data-kind="${i.media_type}" data-id="${i.media_id}">${n}</button>`).join('')}</div></article>`).join('')||'<p class="hint">No matches.</p>'}
+results.addEventListener('click',async e=>{const b=e.target.closest('[data-pick]');if(!b)return;await updateSlot(+b.dataset.pick,{media_type:b.dataset.kind,media_id:+b.dataset.id});active=+b.dataset.pick;drawer.classList.remove('open');load()});load();
+</script></body></html>"""
+
+
 class CombinedHandler(BaseHTTPRequestHandler):
     server_version = "CombinedMediaLibrary/1.0"
 
@@ -3417,6 +3465,11 @@ class CombinedHandler(BaseHTTPRequestHandler):
             if not user:
                 return self.require_auth(path)
             return self.api_mobile_download_enqueue(user)
+        if path == "/api/video-wall/slot":
+            user = self.current_user()
+            if not user:
+                return self.require_auth(path)
+            return self.api_video_wall_slot(user)
         if path.startswith("/movie/upload-art/"):
             if not self.require_auth(path):
                 return
@@ -4449,6 +4502,8 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
             return self.landing()
         if path == "/search":
             return self.search_page()
+        if path == "/wall":
+            return self.video_wall_page()
         if path == "/actor":
             return self.actor_page()
         if path == "/movies":
@@ -4493,6 +4548,12 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
             return self.api_playback_mode_get(user)
         if path == "/api/mobile-download/status":
             return self.api_mobile_download_status(user)
+        if path == "/api/video-wall":
+            return self.api_video_wall(user)
+        if path == "/api/video-wall/search":
+            return self.api_video_wall_search(user)
+        if path == "/api/video-wall/bandwidth":
+            return self.api_video_wall_bandwidth(user)
         if path.startswith("/mobile-download/file/"):
             return self.mobile_download_file(user, path.rsplit("/", 1)[-1])
         if path == "/api/continue-metadata":
@@ -5090,6 +5151,9 @@ a {{ color:#fff; }} main {{ padding:22px; max-width:920px; margin:0 auto; }} h1,
             return
 
         user = self.current_user()
+        request_query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        is_video_wall = request_query.get("wall", [""])[0] == "1"
+        wall_user_id = int(user["id"]) if user and is_video_wall else 0
         user_label = "Unknown user"
         if user:
             user_label = user["full_name"] or user["username"] or user_label
@@ -5141,6 +5205,8 @@ a {{ color:#fff; }} main {{ padding:22px; max-width:920px; margin:0 auto; }} h1,
                             current["bytes_sent"] = sent
                             current["position"] = position
                             current["updated_at"] = time.time()
+                        if wall_user_id:
+                            DIRECT_BANDWIDTH_SAMPLES.append((time.monotonic(), wall_user_id, len(chunk)))
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
         finally:
@@ -5416,6 +5482,120 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
         return self.render_html(f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>CineMediaVault Deleted</title><style>:root{{color-scheme:dark}}body{{margin:0;background:#080a0f;color:#fff;font-family:Inter,system-ui,Segoe UI,sans-serif;padding:24px}}a{{color:#fff}}.panel{{max-width:760px;border:1px solid #242b36;border-radius:18px;background:#10141d;padding:20px}}p{{overflow-wrap:anywhere;color:#cfd6e2}}</style></head>
 <body><section class="panel"><h1>Deleted</h1><p>{html.escape(deleted_path)}</p><p><a href="/{'movies' if kind == 'movie' else 'tv'}">Back to library</a></p></section></body></html>""")
+
+    def video_wall_item(self, media_type: str, media_id: int, media_path: str = "") -> dict | None:
+        try:
+            if media_type == "movie":
+                item = next((value for value in movie_app.movie_index.items if media_path and str(value.path) == media_path), None)
+                item = item or movie_app.safe_item(str(media_id))
+                meta = movie_app.metadata_for(item)
+                return {"media_type": "movie", "media_id": int(item.id),
+                        "title": meta.get("title") or item.title,
+                        "subtitle": str(meta.get("year") or "Movie"),
+                        "poster": movie_app.poster_url_for(item) or "",
+                        "stream_url": f"/play/{item.id}", "media_path": str(item.path)}
+            episode = next((value for value in tv_app.tv_index.episode_by_id.values() if media_path and str(value.path) == media_path), None)
+            episode = episode or tv_app.safe_episode(str(media_id))
+            show = show_for_episode(episode)
+            meta = tv_app.metadata_for(show) if show else {}
+            episode_meta = tv_episode_display_metadata(meta, episode)
+            return {"media_type": "tv", "media_id": int(episode.id),
+                    "title": episode.show,
+                    "subtitle": f"{episode_label(episode)} - {episode_meta.get('title') or episode.title}",
+                    "poster": (tv_app.poster_url_for(show) if show else "") or "",
+                    "stream_url": f"/play/episode/{episode.id}", "media_path": str(episode.path)}
+        except Exception:
+            return None
+
+    def video_wall_page(self):
+        return self.render_html(VIDEO_WALL_PAGE)
+
+    def api_video_wall(self, user):
+        conn = db_connect()
+        try:
+            rows = conn.execute("SELECT slot, media_type, media_id, media_path FROM user_video_wall WHERE user_id=? ORDER BY slot", (int(user["id"]),)).fetchall()
+        finally:
+            conn.close()
+        slots = []
+        for row in rows:
+            item = self.video_wall_item(row["media_type"], int(row["media_id"]), row["media_path"])
+            if item:
+                item["slot"] = int(row["slot"])
+                item.pop("media_path", None)
+                slots.append(item)
+        return self.json_response({"ok": True, "slots": slots})
+
+    def api_video_wall_slot(self, user):
+        payload = self.read_json()
+        try:
+            slot = int(payload.get("slot"))
+        except Exception:
+            slot = 0
+        if slot not in {1, 2, 3, 4}:
+            return self.json_response({"ok": False, "error": "slot must be 1 through 4"})
+        conn = db_connect()
+        try:
+            media_type = str(payload.get("media_type") or "")
+            media_id = payload.get("media_id")
+            if not media_id:
+                conn.execute("DELETE FROM user_video_wall WHERE user_id=? AND slot=?", (int(user["id"]), slot))
+            elif media_type in {"movie", "tv"} and (wall_item := self.video_wall_item(media_type, int(media_id))):
+                conn.execute("""INSERT INTO user_video_wall(user_id,slot,media_type,media_id,media_path,updated_at)
+                    VALUES(?,?,?,?,?,?) ON CONFLICT(user_id,slot) DO UPDATE SET
+                    media_type=excluded.media_type,media_id=excluded.media_id,media_path=excluded.media_path,updated_at=excluded.updated_at""",
+                    (int(user["id"]), slot, media_type, int(wall_item["media_id"]), wall_item["media_path"], auth_now()))
+            else:
+                return self.json_response({"ok": False, "error": "media item not found"})
+            conn.commit()
+        finally:
+            conn.close()
+        return self.json_response({"ok": True, "slot": slot})
+
+    def api_video_wall_search(self, user):
+        parsed = urllib.parse.urlparse(self.path)
+        query = urllib.parse.parse_qs(parsed.query).get("q", [""])[0].strip().casefold()
+        found = []
+        if len(query) >= 2:
+            for item in list(movie_app.movie_index.items):
+                meta = movie_app.metadata_for(item)
+                title = str(meta.get("title") or item.title)
+                haystack = f"{title} {meta.get('year') or ''} {item.path.name}".casefold()
+                if query in haystack:
+                    found.append(self.video_wall_item("movie", int(item.id)))
+                    if len(found) >= 30:
+                        break
+            if len(found) < 30:
+                for episode in list(tv_app.tv_index.episode_by_id.values()):
+                    haystack = f"{episode.show} {episode.title} {episode_label(episode)} {episode.path.name}".casefold()
+                    if query in haystack:
+                        found.append(self.video_wall_item("tv", int(episode.id)))
+                        if len(found) >= 30:
+                            break
+        public_items = []
+        for item in found:
+            if item:
+                item.pop("media_path", None)
+                public_items.append(item)
+        return self.json_response({"ok": True, "items": public_items})
+
+    def api_video_wall_bandwidth(self, user):
+        now = time.monotonic()
+        window_seconds = 3.0
+        user_id = int(user["id"])
+        with DIRECT_STREAM_LOCK:
+            while DIRECT_BANDWIDTH_SAMPLES and DIRECT_BANDWIDTH_SAMPLES[0][0] < now - 10.0:
+                DIRECT_BANDWIDTH_SAMPLES.popleft()
+            byte_count = sum(
+                sample_bytes for sample_time, sample_user, sample_bytes in DIRECT_BANDWIDTH_SAMPLES
+                if sample_time >= now - window_seconds and sample_user == user_id
+            )
+        bytes_per_second = byte_count / window_seconds
+        return self.json_response({
+            "ok": True,
+            "window_seconds": window_seconds,
+            "bytes_per_second": round(bytes_per_second, 2),
+            "mbps": round(bytes_per_second * 8 / 1_000_000, 3),
+        })
 
     def watch_media(self, kind: str, item_id: str):
         item = media_for_kind(kind, item_id)

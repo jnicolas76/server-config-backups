@@ -2,6 +2,10 @@
 
 This is the isolated lab copy of production `8093`.
 
+## Four-Video Wall
+
+Open `/wall` after signing in, or use the **Video Wall** tab on the home page. Each user has four SQLite-backed slots that can mix movies and individual TV episodes. Search the library, assign an item to any slot, and remove or replace it later. Selecting a tile makes it the only audible source while the other videos keep playing at their current positions. Play-all, pause-all, restart, and sync controls are included.
+
 ## Paths
 
 - Runtime: `/home/jnicolas/cinemediavault-lab`
@@ -99,3 +103,15 @@ ROMs under `/home/jnicolas/roms/arcade`.
 ## Lab mobile download size rule
 
 Compressed mobile downloads in the lab target `MOBILE_DOWNLOAD_TARGET_SOURCE_RATIO=0.40`, meaning the HLS/compressed download path aims for about 40% of the original source size. Direct downloads remain original-size. `MOBILE_DOWNLOAD_MAX_OUTPUT_RATIO=0.98` prevents oversized compressed output from being offered.
+
+## Four-video wall
+
+Open `/wall` after signing in. Each user has four saved slots that can mix
+movies and individual TV episodes. Every occupied tile includes independent
+play/pause, 10-second rewind/forward, and timeline seeking controls. Selecting
+a tile makes it the only audible source.
+
+The `Bandwidth` button shows or hides a live meter. It reports actual bytes
+served to that user's wall over a rolling three-second window, in Mbps and
+bytes per second, plus the number of videos currently playing. The reading
+falls automatically when playback is paused or a tile is removed.
