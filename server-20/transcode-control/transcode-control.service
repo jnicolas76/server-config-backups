@@ -1,0 +1,15 @@
+[Unit]
+Description=Transcode Control dashboard
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/jnicolas/transcode-control
+EnvironmentFile=/home/jnicolas/transcode-control/server.env
+ExecStart=/usr/bin/python3 /home/jnicolas/transcode-control/server.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+

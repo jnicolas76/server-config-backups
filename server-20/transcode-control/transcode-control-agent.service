@@ -1,0 +1,15 @@
+[Unit]
+Description=Transcode Control WSL agent
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/mnt/c/DATA/transcode-control-agent
+EnvironmentFile=/mnt/c/DATA/transcode-control-agent/agent.env
+ExecStart=/usr/bin/python3 /mnt/c/DATA/transcode-control-agent/agent.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+
