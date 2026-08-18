@@ -11,6 +11,7 @@ existing worker scripts so replacement semantics stay consistent.
 
 import argparse
 import csv
+import json
 import subprocess
 import sys
 import time
@@ -54,6 +55,8 @@ TV_QUEUES = [
 STATE_FILE = Path("/mnt/c/DATA/combined-transcode-orchestrator.state")
 LOG_FILE = Path("/mnt/c/DATA/combined-transcode-orchestrator.log")
 COMPLETED_LEDGER = Path("/mnt/c/DATA/transcode-completed-ledger.csv")
+JOB_PROFILES = Path("/mnt/c/DATA/transcode-job-profiles.json")
+CONTROL_CONFIG = Path("/mnt/c/DATA/transcode-control-config.json")
 AVI_TARGET_HEADROOM = 1.05
 MOVIE_GB_PER_HOUR = 0.5
 
@@ -108,6 +111,39 @@ def movie_duration_target_gb(source: Path, fallback_target_gb: float) -> float:
     if duration <= 0:
         return fallback_target_gb
     return max(0.05, (duration / 3600.0) * MOVIE_GB_PER_HOUR)
+
+
+def job_profile(source: Path) -> dict:
+    """Return dashboard-managed settings for a queued source, if present."""
+    try:
+        profiles = json.loads(JOB_PROFILES.read_text(encoding="utf-8"))
+        value = profiles.get(str(source), {})
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def control_config() -> dict:
+    try:
+        value = json.loads(CONTROL_CONFIG.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def effective_profile(media_type: str, source: Path) -> dict:
+    defaults = control_config().get("profiles", {}).get(f"{media_type}_default", {})
+    return {**defaults, **job_profile(source)}
+
+
+def profile_target_gb(media_type: str, source: Path, fallback: float, profile: dict) -> float:
+    if profile.get("target_gb"):
+        return float(profile["target_gb"])
+    if profile.get("size_mode") == "gb_per_hour" and profile.get("gb_per_hour"):
+        duration = media_duration_seconds(source)
+        if duration > 0:
+            return max(0.05, duration / 3600 * float(profile["gb_per_hour"]))
+    return movie_duration_target_gb(source, fallback) if media_type == "movie" else effective_target_gb(source, fallback)
 
 
 def log(message: str) -> None:
@@ -294,7 +330,12 @@ def run_copa(source: Path, target_gb: float) -> None:
 
 def run_movie(source: Path, target_gb: float) -> None:
     original_bytes = source.stat().st_size
-    target_gb = movie_duration_target_gb(source, target_gb)
+    profile = effective_profile("movie", source)
+    target_gb = profile_target_gb("movie", source, target_gb, profile)
+    preset = str(profile.get("preset") or "slow")
+    encoder = str(profile.get("encoder") or "x265")
+    container = str(profile.get("container") or "mp4")
+    audio_kbps = int(profile.get("audio_kbps") or 160)
     log(f"Effective movie target for {source.name}: {target_gb:.3g} GB ({MOVIE_GB_PER_HOUR:g} GB/hour)")
     base = [
         sys.executable,
@@ -306,9 +347,13 @@ def run_movie(source: Path, target_gb: float) -> None:
         "--target-gb",
         f"{target_gb:g}",
         "--encoder",
-        "x265",
+        encoder,
         "--preset",
-        "slow",
+        preset,
+        "--container",
+        container,
+        "--audio-kbps",
+        str(audio_kbps),
         "--movie-root",
         str(MOVIE_ROOT),
         "--completed-dir",
@@ -323,13 +368,28 @@ def run_movie(source: Path, target_gb: float) -> None:
         str(MOVIE_LOG),
     ]
     run(base)
-    run(base + ["--replace-completed"])
+    try:
+        run(base + ["--replace-completed"])
+    except subprocess.CalledProcessError:
+        # CIFS can report a late move error even though the MP4 reached the
+        # library and the original was archived. Preserve that successful
+        # outcome in the ledger so watchdog reports do not queue it again.
+        if source_done(source):
+            log(f"Replacement exists after worker error; treating as completed: {source}")
+            record_completed("movie", source, original_bytes)
+            return
+        raise
     record_completed("movie", source, original_bytes)
 
 
 def run_tv(source: Path, target_gb: float) -> None:
     original_bytes = source.stat().st_size
-    target_gb = effective_target_gb(source, target_gb)
+    profile = effective_profile("tv", source)
+    target_gb = profile_target_gb("tv", source, target_gb, profile)
+    preset = str(profile.get("preset") or "slow")
+    encoder = str(profile.get("encoder") or "x265")
+    container = str(profile.get("container") or "mp4")
+    audio_kbps = int(profile.get("audio_kbps") or 128)
     log(f"Effective TV target for {source.name}: {target_gb:g} GB")
     base = [
         sys.executable,
@@ -341,9 +401,13 @@ def run_tv(source: Path, target_gb: float) -> None:
         "--target-gb",
         f"{target_gb:g}",
         "--encoder",
-        "x265",
+        encoder,
         "--preset",
-        "slow",
+        preset,
+        "--container",
+        container,
+        "--audio-kbps",
+        str(audio_kbps),
         "--movie-root",
         str(TV_ROOT),
         "--completed-dir",
@@ -358,7 +422,14 @@ def run_tv(source: Path, target_gb: float) -> None:
         str(TV_LOG),
     ]
     run(base)
-    run(base + ["--replace-completed"])
+    try:
+        run(base + ["--replace-completed"])
+    except subprocess.CalledProcessError:
+        if source_done(source):
+            log(f"Replacement exists after worker error; treating as completed: {source}")
+            record_completed("tv", source, original_bytes)
+            return
+        raise
     record_completed("tv", source, original_bytes)
 
 

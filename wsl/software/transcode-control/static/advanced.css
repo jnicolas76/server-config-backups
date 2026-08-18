@@ -1,0 +1,12 @@
+.config-grid{display:grid;grid-template-columns:repeat(2,minmax(260px,1fr));gap:12px;margin-bottom:18px}
+.config-grid label{display:grid;gap:6px;padding:14px;border:1px solid var(--line);background:var(--surface);border-radius:6px;text-transform:capitalize;color:var(--muted);font-weight:700}
+.config-grid input,.config-grid select{padding:10px;background:#0b0f14;color:white;border:1px solid var(--line);border-radius:4px}
+.config-grid input[type=checkbox]{width:22px;height:22px}
+.config-grid fieldset{border:1px solid var(--line);border-radius:6px;display:grid;gap:8px}
+.config-grid legend{font-weight:800;text-transform:capitalize;padding:0 8px}
+.notice{margin-top:14px;padding:13px;border-left:3px solid var(--accent);background:var(--surface);color:var(--muted)}
+.media-tags{display:flex;gap:5px;margin-top:5px;flex-wrap:wrap}
+.media-tags span{font-size:11px;padding:2px 5px;background:#242c35;color:#b9c4cf;border-radius:3px}
+pre{white-space:pre-wrap;color:#b9c4cf;max-height:360px;overflow:auto}
+.job{grid-template-columns:54px minmax(260px,1fr) 105px 90px 85px 110px 210px}
+@media(max-width:850px){.config-grid{grid-template-columns:1fr}}
