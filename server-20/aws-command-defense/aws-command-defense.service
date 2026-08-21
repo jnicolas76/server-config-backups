@@ -1,0 +1,15 @@
+[Unit]
+Description=AWS Command Defense training game
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jnicolas
+WorkingDirectory=/home/jnicolas/aws-command-defense
+ExecStart=/usr/bin/python3 -m http.server 8131 --bind 0.0.0.0
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
