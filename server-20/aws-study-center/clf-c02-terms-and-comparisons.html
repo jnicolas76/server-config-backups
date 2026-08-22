@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CLF-C02 Terms, Definitions &amp; Comparisons</title>
+<style>
+  :root{
+    --bg:#0e1116; --bg2:#151a21; --card:#1a2028; --line:#2a323d;
+    --tx:#e6eaf0; --tx2:#9aa5b4; --tx3:#6b7686;
+    --acc:#5b9dff; --acc2:#3b7de0;
+    --ok:#4cc48c; --okbg:rgba(63,178,127,.15); --okln:rgba(63,178,127,.5);
+    --no:#ef7f7f; --nobg:rgba(224,106,106,.14); --noln:rgba(224,106,106,.5);
+    --warn:#e3a44b; --warnbg:rgba(227,164,75,.13); --warnln:rgba(227,164,75,.45);
+    --r:10px;
+  }
+  @media (prefers-color-scheme: light){
+    :root{
+      --bg:#f5f7fa; --bg2:#ffffff; --card:#ffffff; --line:#dfe4ec;
+      --tx:#1a2028; --tx2:#55616f; --tx3:#8b95a5;
+      --acc:#2563c9; --acc2:#1d4ea8;
+      --ok:#177a4f; --okbg:rgba(31,138,92,.12); --okln:rgba(31,138,92,.45);
+      --no:#b32d20; --nobg:rgba(192,57,43,.1); --noln:rgba(192,57,43,.42);
+      --warn:#9a6212; --warnbg:rgba(181,115,32,.11); --warnln:rgba(181,115,32,.38);
+    }
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{background:var(--bg);color:var(--tx);
+    font:15.5px/1.62 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased}
+  .wrap{max-width:920px;margin:0 auto;padding:0 20px 90px}
+  h1{font-size:25px;margin:0 0 6px;letter-spacing:-.02em;line-height:1.25}
+  h2{font-size:20px;margin:0 0 6px;letter-spacing:-.015em}
+  h3{font-size:12.5px;margin:0 0 10px;text-transform:uppercase;letter-spacing:.09em;color:var(--tx2);font-weight:700}
+  p{margin:0 0 12px}
+  b,strong{font-weight:650}
+  .sub{color:var(--tx2);font-size:14.5px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:20px 22px;margin-bottom:16px}
+  .hide{display:none !important}
+
+  header{padding:26px 0 18px}
+  .stats{display:flex;gap:18px;flex-wrap:wrap;margin-top:12px;font-size:13.5px;color:var(--tx2)}
+  .stats b{color:var(--tx);font-variant-numeric:tabular-nums}
+
+  /* ---- sticky control bar ---- */
+  .bar{position:sticky;top:0;z-index:30;background:var(--bg);
+    border-bottom:1px solid var(--line);margin:0 -20px;padding:11px 20px}
+  .bar-in{max-width:920px;margin:0 auto;display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+  .tabs{display:flex;gap:4px;background:var(--bg2);border:1px solid var(--line);border-radius:9px;padding:3px;
+    overflow-x:auto;scrollbar-width:none;max-width:100%}
+  .tabs::-webkit-scrollbar{display:none}
+  .tabs button{border:0;background:transparent;color:var(--tx2);padding:7px 13px;border-radius:7px;
+    font-size:13.5px;font-weight:600;cursor:pointer;transition:.13s;white-space:nowrap}
+  .tabs button:hover{color:var(--tx)}
+  .tabs button[aria-selected="true"]{background:var(--acc);color:#fff}
+  @media(max-width:700px){
+    .bar-in{flex-direction:column;align-items:stretch;gap:8px}
+    .tabs{width:100%;overflow-x:visible}
+    .tabs button{flex:1 1 0;min-width:0;padding:7px 4px;font-size:12px;letter-spacing:-.01em}
+    .search{width:100%}
+  }
+  .search{flex:1;min-width:160px;position:relative}
+  .search input{width:100%;padding:9px 32px 9px 34px;border-radius:9px;border:1px solid var(--line);
+    background:var(--bg2);color:var(--tx);font:inherit;font-size:14.5px}
+  .search input:focus{outline:none;border-color:var(--acc)}
+  .search svg{position:absolute;left:11px;top:50%;transform:translateY(-50%);opacity:.5}
+  .search .clr{position:absolute;right:6px;top:50%;transform:translateY(-50%);border:0;background:transparent;
+    color:var(--tx3);cursor:pointer;font-size:17px;padding:2px 6px;line-height:1}
+
+  button{font:inherit;cursor:pointer;border-radius:8px;border:1px solid var(--line);
+    background:var(--bg2);color:var(--tx);padding:8px 15px;transition:.13s}
+  button:hover:not(:disabled){border-color:var(--tx3)}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  button:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+  .btn-primary{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}
+  .btn-primary:hover:not(:disabled){background:var(--acc2);border-color:var(--acc2)}
+  .row{display:flex;gap:9px;flex-wrap:wrap;align-items:center}
+
+  .chips{display:flex;gap:7px;flex-wrap:wrap}
+  @media(max-width:700px){
+    #filters .chips{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;
+      padding-bottom:4px;-webkit-overflow-scrolling:touch;margin:0 -20px;padding-left:20px;padding-right:20px}
+    #filters .chips::-webkit-scrollbar{display:none}
+    #deckChips{flex-wrap:wrap}
+  }
+  .chip{padding:6px 12px;border-radius:999px;border:1px solid var(--line);background:var(--bg2);
+    color:var(--tx2);font-size:13px;cursor:pointer;transition:.13s;white-space:nowrap}
+  .chip:hover{border-color:var(--tx3);color:var(--tx)}
+  .chip[aria-pressed="true"]{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}
+  .chip.warn[aria-pressed="true"]{background:var(--no);border-color:var(--no)}
+  .chip .n{opacity:.65;font-variant-numeric:tabular-nums;margin-left:3px}
+
+  /* ---- badges ---- */
+  .badge{display:inline-block;font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;
+    padding:2.5px 7px;border-radius:5px;vertical-align:2px;margin-left:7px;white-space:nowrap}
+  .badge.m{background:var(--nobg);color:var(--no);border:1px solid var(--noln)}
+  .badge.p{background:var(--warnbg);color:var(--warn);border:1px solid var(--warnln)}
+  .free{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;
+    background:var(--okbg);color:var(--ok);border:1px solid var(--okln);padding:1.5px 6px;border-radius:5px}
+
+  /* ---- glossary ---- */
+  .catblk{margin-bottom:26px}
+  .catblk > h3{position:sticky;top:57px;background:var(--bg);padding:8px 0 8px;z-index:5;margin:0 0 4px;
+    border-bottom:1px solid var(--line)}
+  .term{border-bottom:1px solid var(--line);padding:15px 0}
+  .term:last-child{border-bottom:0}
+  .term .t{font-size:16px;font-weight:650;letter-spacing:-.01em;margin-bottom:5px}
+  .term .d{color:var(--tx);font-size:14.8px}
+  @media(max-width:700px){.catblk > h3{position:static}}
+  .term .tip{margin-top:9px;padding:10px 13px;border-radius:8px;background:var(--bg2);
+    border-left:3px solid var(--acc);font-size:14px;color:var(--tx2);line-height:1.6}
+  .term .tip b{color:var(--tx)}
+  .term.mi .tip{border-left-color:var(--no)}
+  .term.pi .tip{border-left-color:var(--warn)}
+  mark{background:rgba(91,157,255,.3);color:inherit;border-radius:2px;padding:0 1px}
+  @media(prefers-color-scheme:light){mark{background:rgba(37,99,201,.18)}}
+
+  /* ---- comparison tables ---- */
+  .cmp{margin-bottom:18px}
+  .cmp h2 .badge{vertical-align:4px}
+  .cmp .intro{color:var(--tx2);font-size:14.5px;margin:0 0 14px}
+  .tw{overflow-x:auto;border:1px solid var(--line);border-radius:9px;-webkit-overflow-scrolling:touch}
+  table{border-collapse:collapse;width:100%;font-size:14px;min-width:520px}
+  th{text-align:left;padding:10px 13px;background:var(--bg2);color:var(--tx2);font-size:11.5px;
+    text-transform:uppercase;letter-spacing:.06em;font-weight:700;border-bottom:1px solid var(--line);white-space:nowrap}
+  td{padding:11px 13px;border-bottom:1px solid var(--line);vertical-align:top;line-height:1.55}
+  tr:last-child td{border-bottom:0}
+  tbody tr:hover{background:var(--bg2)}
+  td:first-child{white-space:nowrap}
+  @media(max-width:640px){td:first-child{white-space:normal}}
+  .note{margin-top:13px;padding:13px 15px;border-radius:9px;background:var(--nobg);
+    border:1px solid var(--noln);font-size:14px;line-height:1.62}
+  .note b{color:var(--tx)}
+
+  /* ---- triggers ---- */
+  .trig{display:grid;grid-template-columns:1fr auto;gap:0}
+  .trig > div{padding:10px 0;border-bottom:1px solid var(--line);font-size:14.5px}
+  .trig > div:nth-child(2n){text-align:right;font-weight:650;padding-left:16px}
+  .trig > div:nth-last-child(-n+2){border-bottom:0}
+  @media(max-width:600px){
+    .trig{grid-template-columns:1fr}
+    .trig > div:nth-child(2n-1){border-bottom:0;padding-bottom:2px;color:var(--tx2)}
+    .trig > div:nth-child(2n){text-align:left;padding-left:0;padding-top:0}
+  }
+
+  /* ---- flashcards ---- */
+  .fc{min-height:260px;display:flex;flex-direction:column;justify-content:center;align-items:center;
+    text-align:center;padding:34px 26px;cursor:pointer;user-select:none}
+  .fc .side{font-size:12px;text-transform:uppercase;letter-spacing:.09em;color:var(--tx3);
+    font-weight:700;margin-bottom:14px}
+  .fc .front{font-size:25px;font-weight:650;letter-spacing:-.02em;line-height:1.3;max-width:640px}
+  .fc .back{font-size:16px;line-height:1.65;max-width:660px;text-align:left}
+  .fc .back .tip{margin-top:13px;padding:11px 14px;border-radius:8px;background:var(--bg2);
+    border-left:3px solid var(--acc);font-size:14.5px;color:var(--tx2);text-align:left}
+  .fc .hintline{margin-top:20px;font-size:12.5px;color:var(--tx3)}
+  .fcprog{margin-top:18px;height:5px;background:var(--line);border-radius:3px;overflow:hidden;margin-bottom:14px}
+  .fcprog i{display:block;height:100%;min-width:4px;background:var(--acc);border-radius:3px;transition:width .3s}
+  .fcdone{text-align:center;padding:36px 20px}
+  .fcdone .big{font-size:46px;font-weight:700;letter-spacing:-.03em;line-height:1}
+
+  .empty{text-align:center;color:var(--tx2);padding:44px 20px;font-size:15px}
+  .foot{margin-top:30px;font-size:12.5px;color:var(--tx3);line-height:1.65}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>CLF-C02 — Terms, Definitions &amp; Comparisons</h1>
+  <p class="sub">Built from the 15 questions you missed: every correct answer, every option you picked instead, and the neighbouring services that show up in the same questions.</p>
+  <div class="stats">
+    <span><b id="sTerms">0</b> terms</span>
+    <span><b id="sCmp">0</b> comparison tables</span>
+    <span><b id="sTrig">0</b> trigger phrases</span>
+    <span><b style="color:var(--no)" id="sMiss">0</b> tied to a miss</span>
+  </div>
+</header>
+
+<div class="bar">
+  <div class="bar-in">
+    <div class="tabs" role="tablist">
+      <button role="tab" data-tab="cmp"   aria-selected="true">Comparisons</button>
+      <button role="tab" data-tab="gloss" aria-selected="false">Glossary</button>
+      <button role="tab" data-tab="trig"  aria-selected="false">Trigger words</button>
+      <button role="tab" data-tab="cards" aria-selected="false">Flashcards</button>
+    </div>
+    <div class="search" id="searchWrap">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+      <input id="q" type="search" placeholder="Search — try “macie”, “rotate”, “FIPS”, “interrupted”…" autocomplete="off">
+      <button class="clr hide" id="clr" title="Clear">×</button>
+    </div>
+  </div>
+</div>
+
+<div id="filters" style="padding:14px 0 4px">
+  <div class="chips" id="catChips"></div>
+</div>
+
+<!-- ============ COMPARISONS ============ -->
+<section id="tab-cmp"></section>
+
+<!-- ============ GLOSSARY ============ -->
+<section id="tab-gloss" class="hide"></section>
+
+<!-- ============ TRIGGERS ============ -->
+<section id="tab-trig" class="hide">
+  <div class="card">
+    <h3>If the question says … pick this</h3>
+    <p class="sub" style="font-size:14px;margin-bottom:4px">Cloud Practitioner questions are largely keyword matching. This is the lookup table — read the left column, recall the right.</p>
+  </div>
+  <div class="card"><div class="trig" id="trigGrid"></div></div>
+</section>
+
+<!-- ============ FLASHCARDS ============ -->
+<section id="tab-cards" class="hide">
+  <div class="card" id="fcSetup">
+    <h3>Deck</h3>
+    <div class="chips" id="deckChips" style="margin-bottom:18px"></div>
+    <h3>Direction</h3>
+    <div class="chips" id="dirChips" style="margin-bottom:20px">
+      <button class="chip" data-dir="t2d" aria-pressed="true">Service → what it does</button>
+      <button class="chip" data-dir="d2t" aria-pressed="false">Description → name the service</button>
+    </div>
+    <div class="row">
+      <button class="btn-primary" id="fcStart">Start drill</button>
+      <span class="sub" id="fcCount"></span>
+    </div>
+  </div>
+
+  <div id="fcRun" class="hide">
+    <div class="fcprog"><i id="fcBar"></i></div>
+    <div class="row" style="justify-content:space-between;margin-bottom:12px">
+      <span class="sub" id="fcPos" style="font-variant-numeric:tabular-nums"></span>
+      <button id="fcQuit" style="padding:5px 12px;font-size:13px">End drill</button>
+    </div>
+    <div class="card fc" id="fcCard"></div>
+    <div class="row" id="fcActions" style="margin-top:14px;justify-content:center"></div>
+  </div>
+
+  <div id="fcDone" class="hide"></div>
+</section>
+
+<p class="foot">Companion to your 100-question practice test. Definitions reflect the CLF-C02 exam guide; where AWS has since changed something in the real world (support plan tiers, Trusted Advisor categories, SageMaker naming), the exam answer is given first and the current state is flagged.</p>
+</div>
+
+<script>
+const DATA = {"terms":[{"t":"AWS Well-Architected Tool","c":"advice","s":"missed","q":14,"d":"A free console tool that walks you through a questionnaire about one specific workload, scores it against the six Well-Architected pillars, and produces an improvement plan listing identified risks.","tip":"The tell is <b>“review a workload against best practices”</b> plus <b>“report of risks.”</b> It asks you questions; it does not look at your live resources.","i":0},{"t":"AWS Trusted Advisor","c":"advice","s":"","q":null,"d":"An automated inspector that scans the live resources in your account and flags issues in five exam-level categories: cost optimization, performance, security, fault tolerance, and service limits.","tip":"Trusted Advisor <b>looks at what you actually have running</b>. Well-Architected Tool <b>asks you about your design</b>. That's the whole distinction. Note: the current console has expanded to six categories (splitting out resilience and operational excellence), but CLF-C02 tests the classic five.","i":1},{"t":"AWS Trusted Advisor Priority","c":"advice","s":"picked","q":14,"d":"An Enterprise Support add-on where your Technical Account Manager curates and prioritizes the Trusted Advisor findings that matter most for your account.","tip":"Still Trusted Advisor — still resource scanning, not architectural review. The word “Priority” only signals <b>Enterprise Support tier</b>, it doesn't change what the tool does.","i":2},{"t":"AWS Compute Optimizer","c":"advice","s":"","q":14,"d":"Uses machine learning on CloudWatch utilization metrics to recommend optimal instance types and sizes for EC2, Auto Scaling groups, EBS volumes, and Lambda functions.","tip":"Narrow and numeric: it answers <b>“is this resource the right size?”</b> and nothing else. If the question mentions right-sizing or over-provisioning, this is a candidate.","i":3},{"t":"AWS Service Catalog","c":"advice","s":"","q":14,"d":"Lets an organization publish a curated list of pre-approved IT services (as CloudFormation templates) that users can self-serve deploy without going off-script.","tip":"The tell is <b>“approved”</b> or <b>“standardized”</b> products for users to launch. It's a governance guardrail, not an advisor.","i":4},{"t":"AWS Well-Architected Framework","c":"advice","s":"","q":null,"d":"AWS's six-pillar model for evaluating architecture: Operational Excellence, Security, Reliability, Performance Efficiency, Cost Optimization, and Sustainability.","tip":"Six pillars, and Sustainability is the newest. Don't confuse it with the <b>Cloud Adoption Framework (CAF)</b>, which has six <i>perspectives</i> and is about organizational readiness, not individual workloads.","i":5},{"t":"AWS Cloud Adoption Framework (CAF)","c":"advice","s":"","q":null,"d":"Guidance for planning an organization-wide cloud transformation, organized into six perspectives: Business, People, Governance, Platform, Security, and Operations.","tip":"CAF = <b>the whole company's readiness</b>. Well-Architected = <b>one workload's design</b>. If the question mentions people, culture, or org change, it's CAF.","i":6},{"t":"Rehost","c":"migration","s":"","q":16,"d":"“Lift and shift” — move the application to AWS as-is, with no code changes. A VM becomes an EC2 instance.","tip":"Tell: <b>“no changes”</b> or <b>“as-is”</b> or <b>“fastest.”</b> Often the first step in a large migration, optimized later.","i":7},{"t":"Replatform","c":"migration","s":"picked","q":16,"d":"“Lift, tinker, and shift” — a few cloud optimizations without changing the core architecture. Classic example: move a self-managed MySQL database onto Amazon RDS.","tip":"You still have <b>the same application</b>, just running on better plumbing. If the company keeps its software but changes what it runs on, it's replatform.","i":8},{"t":"Repurchase","c":"migration","s":"missed","q":16,"d":"“Drop and shop” — abandon the current product entirely and buy a different one, usually a SaaS subscription. Retiring a self-hosted email server for a SaaS email product.","tip":"The word to hunt for is <b>“subscribe,” “SaaS,” “license,”</b> or <b>“different product.”</b> You are no longer running the old software at all — that's what separates it from replatform, where you keep the software.","i":9},{"t":"Refactor / Re-architect","c":"migration","s":"","q":null,"d":"Significantly rewrite the application to take advantage of cloud-native features — breaking a monolith into microservices, or moving to serverless.","tip":"Highest effort, highest long-term payoff. Tell: <b>“microservices,” “serverless,” “re-architect,” “add features not possible today.”</b>","i":10},{"t":"Retire","c":"migration","s":"","q":null,"d":"Decommission applications that are no longer needed and simply switch them off.","tip":"Tell: <b>“no longer used,” “turn off,” “decommission”</b> with nothing moving anywhere.","i":11},{"t":"Retain","c":"migration","s":"","q":16,"d":"Deliberately leave an application where it is for now — perhaps it was recently upgraded, or there's no business case to move it yet.","tip":"Tell: <b>“revisit later,” “not ready,” “keep on premises for now.”</b> A conscious decision, not inaction.","i":12},{"t":"Relocate","c":"migration","s":"","q":16,"d":"Move infrastructure to the cloud without changing hypervisor, application, or operations — typically transferring VMware workloads to VMware Cloud on AWS.","tip":"Tell: <b>“VMware”</b>. Relocate is the one R that's basically always signalled by that single word.","i":13},{"t":"AWS Database Migration Service (DMS)","c":"migration","s":"missed","q":19,"d":"Migrates databases to AWS while the source database stays up and serving traffic, with continuous replication to keep source and target in sync during cutover.","tip":"Two tells: <b>“database”</b> and <b>“minimal downtime” / “stays available.”</b> DMS moves the <i>data</i>.","i":14},{"t":"AWS Schema Conversion Tool (SCT)","c":"migration","s":"missed","q":19,"d":"Converts database schema, stored procedures, and application code from one engine to a different one — for example Oracle to PostgreSQL.","tip":"SCT is the partner to DMS. If the source and target engines <b>differ</b> (Oracle → Aurora PostgreSQL), you need both: <b>SCT converts the schema, DMS moves the rows.</b> Same engine both sides? DMS alone.","i":15},{"t":"AWS DataSync","c":"migration","s":"picked","q":19,"d":"Automates and accelerates moving large volumes of <i>files and objects</i> between on-premises storage and AWS storage services, or between AWS storage services.","tip":"DataSync moves <b>files</b>. DMS moves <b>databases</b>. If you see a schema, tables, or a database engine name, DataSync is wrong.","i":16},{"t":"AWS Application Migration Service (MGN)","c":"migration","s":"","q":null,"d":"Automatically replicates entire servers (on-premises or from another cloud) into AWS and launches them as EC2 instances — the primary lift-and-shift/rehost tool.","tip":"Tell: <b>rehost a whole server with minimal effort.</b> Formerly known as CloudEndure Migration.","i":17},{"t":"AWS Snowball Edge","c":"migration","s":"","q":83,"d":"A ruggedized physical device AWS ships to your site. You copy data onto it locally and ship it back for upload — for datasets too large to move over a network in reasonable time.","tip":"Tell: <b>“terabytes/petabytes”</b> plus <b>“limited bandwidth”</b> or <b>“would take months.”</b> One-time bulk transfer, not an ongoing connection.","i":18},{"t":"AWS Snow Family","c":"migration","s":"","q":null,"d":"The family of physical data-transfer and edge-compute devices: Snowball Edge (large transfers, edge compute) and Snowmobile (exabyte-scale, a shipping container on a truck).","tip":"Any question where the answer is “put it on a truck” is Snow Family.","i":19},{"t":"AWS Transfer Family","c":"migration","s":"","q":null,"d":"Fully managed SFTP, FTPS, FTP, and AS2 endpoints that write directly into Amazon S3 or Amazon EFS.","tip":"Tell: the protocol acronym <b>SFTP/FTPS/FTP</b> appears in the question and partners are uploading files to you.","i":20},{"t":"AWS Migration Hub","c":"migration","s":"","q":null,"d":"A single dashboard that tracks the progress of application migrations across multiple AWS and partner migration tools.","tip":"Tell: <b>“track,” “single view,” “progress”</b> of a migration — it's the console, not the mover.","i":21},{"t":"AWS Backup","c":"migration","s":"","q":19,"d":"Centrally configures, automates, and audits backup policies across AWS services (EBS, RDS, DynamoDB, EFS, and more) from one place.","tip":"Backup is about <b>restore points for what you already run on AWS</b>. It is never the answer to “migrate from on premises.”","i":22},{"t":"Amazon S3 Cross-Region Replication (CRR)","c":"migration","s":"","q":19,"d":"Automatically copies newly uploaded S3 objects from a bucket in one Region into a bucket in another Region.","tip":"Object-to-object copying for resilience or latency. Not a migration tool and not a database tool.","i":23},{"t":"AWS WAF (Web Application Firewall)","c":"protect","s":"missed","q":48,"d":"Inspects HTTP and HTTPS requests at Layer 7 and blocks common web exploits — SQL injection, cross-site scripting, bad bots — using managed or custom rule sets. Attaches to CloudFront, Application Load Balancer, API Gateway, AppSync, and Cognito.","tip":"Tell: the named attacks. <b>“SQL injection” or “cross-site scripting” → AWS WAF, every time.</b> WAF <i>blocks</i>; GuardDuty only <i>tells you</i>.","i":24},{"t":"Amazon GuardDuty","c":"protect","s":"picked","q":48,"d":"Continuous threat <i>detection</i>. Analyzes CloudTrail events, VPC Flow Logs, and DNS logs with machine learning and threat intelligence to surface findings like crypto-mining, compromised credentials, or traffic to known-bad IPs.","tip":"GuardDuty <b>detects and reports — it does not block anything</b>. If the question wants the traffic stopped, it's WAF, Shield, or Network Firewall. If it wants you notified of suspicious behavior, it's GuardDuty.","i":25},{"t":"Amazon Inspector","c":"protect","s":"missed","q":51,"d":"Automatically and continuously scans EC2 instances, container images in Amazon ECR, and Lambda functions for known software vulnerabilities (CVEs) and unintended network exposure, scoring findings by risk.","tip":"Tell: <b>“vulnerabilities,” “CVE,” “patch level,” “scan my workloads.”</b> Inspector finds <i>weaknesses in your software</i>; GuardDuty finds <i>active bad behavior</i>.","i":26},{"t":"Amazon Macie","c":"protect","s":"picked","q":34,"d":"Uses machine learning to discover and classify sensitive data — PII, financial records, credentials — stored in Amazon S3, and flags buckets that are public or unencrypted.","tip":"Macie is <b>S3-only and content-only</b>. It reads what's <i>inside your objects</i>. It cannot see EBS volumes, EC2 configuration, or anything outside S3.","i":27},{"t":"AWS Shield Standard","c":"protect","s":"","q":48,"d":"Automatic, always-on, no-cost protection for every AWS customer against common network and transport layer (Layer 3/4) DDoS attacks.","tip":"Free and automatic — you don't turn it on. If a question says a customer wants DDoS protection <b>at no extra cost</b>, they already have it.","i":28},{"t":"AWS Shield Advanced","c":"protect","s":"","q":37,"d":"Paid subscription adding protection against larger and more sophisticated DDoS attacks, plus 24/7 access to the AWS Shield Response Team and cost protection for scaling charges incurred during an attack.","tip":"Tells: <b>“DDoS Response Team,” “cost protection,”</b> or <b>“sophisticated/large-scale attacks.”</b>","i":29},{"t":"AWS Network Firewall","c":"protect","s":"","q":48,"d":"A managed stateful network firewall and intrusion prevention system for traffic entering and leaving your VPC, with rules based on domains, protocols, and packet inspection.","tip":"Operates at the <b>VPC network layer</b>, not the web-request layer. Web exploits are WAF's job, not this.","i":30},{"t":"AWS Firewall Manager","c":"protect","s":"","q":51,"d":"Centrally configures and enforces WAF rules, Shield Advanced protections, security groups, and Network Firewall policies across every account in an AWS Organization.","tip":"Tell: <b>“centrally,” “across all accounts,” “consistently.”</b> It manages the other firewalls; it isn't one itself.","i":31},{"t":"AWS Security Hub","c":"protect","s":"","q":null,"d":"Aggregates and normalizes security findings from GuardDuty, Inspector, Macie, and partner tools into one prioritized dashboard, and runs automated checks against standards like the CIS AWS Foundations Benchmark.","tip":"Tell: <b>“single place,” “aggregate findings,” “across security services.”</b> It doesn't generate its own findings from scratch — the other services must still be enabled.","i":32},{"t":"Amazon Detective","c":"protect","s":"","q":null,"d":"Automatically builds a visual graph of log data so you can investigate the <i>root cause</i> of a security finding after it surfaces.","tip":"Sequence to memorize: <b>GuardDuty finds it → Security Hub collects it → Detective explains it.</b>","i":33},{"t":"Security group","c":"protect","s":"","q":null,"d":"A virtual firewall at the instance / network-interface level. <b>Stateful</b> (return traffic is automatically allowed) and <b>allow rules only</b>.","tip":"Stateful + instance level + allow-only. Memorize the contrast with NACLs — it's a near-guaranteed exam question.","i":34},{"t":"Network ACL (NACL)","c":"protect","s":"","q":null,"d":"A firewall at the subnet level. <b>Stateless</b> (you must explicitly allow both inbound and outbound) and supports both <b>allow and deny</b> rules.","tip":"If the question needs to <b>explicitly block a specific IP address</b>, it's a NACL — security groups have no deny rules.","i":35},{"t":"AWS Config","c":"govern","s":"missed","q":34,"d":"Continuously records the configuration of your AWS resources, keeps a change history, and evaluates them against rules — flagging and alerting on non-compliant resources as they appear.","tip":"Tell: <b>“continuously verify,” “compliant/non-compliant,” “configuration.”</b> Config answers <b>“what does this resource look like right now, and is that allowed?”</b>","i":36},{"t":"AWS CloudTrail","c":"govern","s":"","q":34,"d":"Records every API call made in your account — who made it, from what IP address, when, and against which resource.","tip":"The one-word split: <b>CloudTrail = who. Config = what.</b> “Who deleted the bucket?” → CloudTrail. “Are all my volumes encrypted?” → Config.","i":37},{"t":"AWS Artifact","c":"govern","s":"","q":34,"d":"A self-service portal for downloading <i>AWS's own</i> compliance reports and agreements — SOC 1/2/3, ISO certifications, PCI DSS documentation, and the HIPAA BAA.","tip":"Artifact hands you <b>paperwork about AWS</b>. It never looks at your resources. Tell: <b>“auditor requests,” “compliance report,” “download.”</b>","i":38},{"t":"AWS Audit Manager","c":"govern","s":"picked","q":51,"d":"Continuously collects evidence from your AWS usage and maps it to control frameworks (SOC 2, PCI DSS, GDPR, HIPAA) to automate the paperwork of preparing for <i>your</i> audit.","tip":"Easy pair to mix up: <b>Artifact = AWS's audit reports, handed to you. Audit Manager = evidence about your own environment, assembled for your auditor.</b> Neither scans for vulnerabilities — that's Inspector.","i":39},{"t":"AWS Control Tower","c":"govern","s":"","q":null,"d":"Automates setting up a secure, well-architected multi-account environment (a “landing zone”), with Account Factory for provisioning and preventive/detective guardrails built on Organizations, Config, and CloudTrail.","tip":"Tell: <b>“multi-account,” “landing zone,” “set up and govern,” “best-practice guardrails.”</b>","i":40},{"t":"AWS Organizations","c":"govern","s":"","q":null,"d":"Centrally manages multiple AWS accounts: groups them into organizational units, provides consolidated billing, and applies service control policies.","tip":"Two exam angles: <b>consolidated billing</b> (Domain 4) and <b>SCP guardrails</b> (Domain 2).","i":41},{"t":"Service control policy (SCP)","c":"govern","s":"","q":null,"d":"An Organizations policy that sets the <i>maximum</i> permissions available to accounts in an organizational unit. It never grants access — it only caps what IAM can grant.","tip":"Tell: <b>“regardless of what permissions the account administrator grants”</b> or <b>“cannot be overridden.”</b> An SCP binds even the member account's root user.","i":42},{"t":"AWS CloudFormation","c":"govern","s":"","q":null,"d":"Defines AWS infrastructure in JSON or YAML templates that can be version-controlled and deployed repeatedly as stacks — infrastructure as code.","tip":"Tell: <b>“template,” “repeatable,” “version control,” “infrastructure as code,” “deploy the same environment again.”</b>","i":43},{"t":"AWS IAM Identity Center","c":"identity","s":"missed","q":45,"d":"Centralized workforce sign-in across <i>multiple AWS accounts</i> and business applications, federated to an external identity provider (Okta, Microsoft Entra ID, Active Directory) so no per-account IAM users are needed.","tip":"Three tells fire together: <b>employees + multiple accounts + existing corporate credentials.</b> Formerly called AWS Single Sign-On (AWS SSO), so old material may use that name.","i":44},{"t":"AWS Directory Service for Microsoft Active Directory","c":"identity","s":"picked","q":45,"d":"A fully managed Microsoft Active Directory running in AWS, for workloads that need real AD — domain-joined EC2 Windows instances, LDAP, Group Policy.","tip":"It's a <b>directory</b>, not a sign-in portal. It can feed identities <i>into</i> IAM Identity Center, but by itself it does not deliver multi-account AWS console access.","i":45},{"t":"Amazon Cognito","c":"identity","s":"","q":45,"d":"Sign-up, sign-in, and access control for the users of <i>your own</i> web and mobile applications, including social and enterprise identity federation.","tip":"The split that decides this question: <b>Cognito = your customers. IAM Identity Center = your employees.</b>","i":46},{"t":"AWS Resource Access Manager (RAM)","c":"identity","s":"","q":45,"d":"Shares AWS resources — subnets, Transit Gateways, License Manager configurations — across accounts without duplicating them.","tip":"RAM shares <b>things</b>, not people. It has nothing to do with sign-in.","i":47},{"t":"AWS IAM","c":"identity","s":"","q":null,"d":"Controls who is authenticated and what they're authorized to do in an AWS account, through users, groups, roles, and policies. Free, and global rather than Regional.","tip":"Core rules to memorize: <b>deny by default</b>, <b>an explicit deny always wins</b>, and <b>roles beat long-term access keys</b> for applications.","i":48},{"t":"IAM role","c":"identity","s":"","q":null,"d":"An identity with permissions that can be temporarily assumed by a user, application, or AWS service. Delivers short-lived, auto-rotating credentials rather than stored keys.","tip":"Whenever a question says <b>“an application on EC2 needs to access another AWS service,”</b> the answer is an IAM role. Storing access keys on the instance is always the wrong answer.","i":49},{"t":"Principle of least privilege","c":"identity","s":"","q":null,"d":"Grant only the permissions required to perform a task, and nothing more.","tip":"Any option offering AdministratorAccess “for convenience” is wrong by construction.","i":50},{"t":"AWS CloudHSM","c":"keys","s":"missed","q":37,"d":"Dedicated, single-tenant hardware security modules that <i>you</i> control exclusively — AWS cannot access your keys. Validated to FIPS 140 Level 3 (hsm1.medium is FIPS 140-2 Level 3; the newer hsm2m.medium is FIPS 140-3 Level 3).","tip":"Three tells, any one of which points here: <b>“single-tenant,” “dedicated hardware,” “FIPS 140 Level 3.”</b> Also: <b>“we must be the only party able to access the keys.”</b>","i":51},{"t":"AWS Key Management Service (KMS)","c":"keys","s":"picked","q":37,"d":"Creates and manages encryption keys used across most AWS services, enforces key policies, and logs every key use to CloudTrail. Runs on multi-tenant AWS-managed infrastructure.","tip":"KMS is the <b>default answer for encryption at rest</b> — unless the question insists on dedicated single-tenant hardware or FIPS 140 Level 3, in which case it flips to CloudHSM.","i":52},{"t":"KMS key types","c":"keys","s":"","q":37,"d":"<b>AWS owned keys</b> — used across accounts, invisible to you. <b>AWS managed keys</b> — created and rotated by a service on your behalf. <b>Customer managed keys</b> — you create them, set the policy, control rotation and deletion.","tip":"Q37's trap: the option said “KMS with an <b>AWS managed</b> key,” which explicitly hands control <i>to AWS</i> — the opposite of “controls exclusively.” Even a customer managed KMS key wouldn't satisfy a single-tenant-hardware requirement.","i":53},{"t":"AWS Secrets Manager","c":"keys","s":"","q":37,"d":"Stores, retrieves, and <b>automatically rotates</b> secrets such as database credentials, API keys, and OAuth tokens.","tip":"Tell: <b>“rotate”</b> plus <b>“credentials.”</b> It stores secrets; KMS/CloudHSM store the keys that encrypt things.","i":54},{"t":"AWS Systems Manager Parameter Store","c":"keys","s":"","q":null,"d":"Hierarchical storage for configuration data and secrets, at no additional charge for standard parameters — but without automatic rotation.","tip":"The exam split: <b>needs automatic rotation → Secrets Manager. Just needs cheap config storage → Parameter Store.</b>","i":55},{"t":"AWS Certificate Manager (ACM)","c":"keys","s":"","q":null,"d":"Provisions, manages, and auto-renews free public SSL/TLS certificates for use with AWS services like ELB, CloudFront, and API Gateway.","tip":"Certificates = <b>encryption in transit</b>. KMS = <b>encryption at rest</b>.","i":56},{"t":"AWS Elastic Beanstalk","c":"compute","s":"missed","q":58,"d":"Platform as a service: you upload code and Beanstalk provisions capacity, load balancing, auto scaling, and health monitoring for you — while <b>still exposing</b> the underlying EC2 instances, load balancers, and Auto Scaling groups for you to inspect and tune.","tip":"The deciding phrase in Q58 was <b>“retaining full control of the underlying EC2 resources.”</b> Beanstalk is the only option where those resources still exist in your account and you can touch them. No extra charge for Beanstalk itself — you pay for the resources it creates.","i":57},{"t":"AWS Fargate","c":"compute","s":"picked","q":58,"d":"A serverless compute engine for containers. Runs ECS tasks and EKS pods without you provisioning, patching, or scaling any EC2 instances.","tip":"Fargate <b>hides</b> the servers — the opposite of “retain control of the underlying EC2 resources.” Tell: <b>“containers without managing servers.”</b>","i":58},{"t":"AWS Lambda","c":"compute","s":"","q":58,"d":"Runs code in response to events with zero servers to manage. Billed per request and per GB-second of execution — nothing while idle. Maximum 15-minute execution timeout per invocation.","tip":"Tells: <b>“no servers,” “event-driven,” “pay only when running.”</b> If a workload runs longer than 15 minutes, Lambda is wrong.","i":59},{"t":"Amazon Lightsail","c":"compute","s":"","q":58,"d":"Simple virtual private servers with bundled compute, storage, and networking at a <b>predictable flat monthly price</b>, plus preconfigured blueprints (WordPress, LAMP, Node.js).","tip":"Tells: <b>“small business,” “simple,” “predictable/fixed monthly price,” “WordPress,” “minimal AWS experience.”</b>","i":60},{"t":"Amazon EC2","c":"compute","s":"","q":null,"d":"Resizable virtual servers. You control everything from the guest OS upward — and you're responsible for patching it.","tip":"Instance family tells: <b>C</b> = compute-optimized (CPU-bound, HPC), <b>R/X</b> = memory-optimized (in-memory DB, caching), <b>I/D</b> = storage-optimized (high local IOPS), <b>M/T</b> = general purpose.","i":61},{"t":"Amazon ECS / Amazon EKS","c":"compute","s":"","q":null,"d":"Managed container orchestration. ECS is AWS's own orchestrator; EKS runs managed Kubernetes. Both can run on EC2 (you manage the instances) or on Fargate (you don't).","tip":"The word <b>“Kubernetes”</b> in a question means EKS, essentially always.","i":62},{"t":"EC2 Auto Scaling","c":"compute","s":"","q":null,"d":"Automatically adds and removes EC2 instances to match demand, and continuously maintains the desired capacity by replacing instances that fail health checks.","tip":"Two benefits, not one: <b>elasticity</b> (match demand) and <b>fault tolerance</b> (auto-replace failed instances).","i":63},{"t":"Elastic Load Balancing (ELB)","c":"compute","s":"","q":null,"d":"Distributes incoming traffic across multiple targets in one or more Availability Zones and stops routing to targets that fail health checks.","tip":"Easy pair to keep straight: <b>ELB distributes traffic. Auto Scaling changes how many instances exist.</b> They're used together but are different services.","i":64},{"t":"AWS Storage Gateway","c":"storage","s":"missed","q":83,"d":"A <b>hybrid</b> service that gives on-premises applications access to AWS storage through the protocols they already speak — NFS, SMB, iSCSI — while keeping frequently accessed data in a <b>local cache</b> for low latency.","tip":"Two tells must both appear: <b>“on premises”</b> and <b>“local cache”</b> or a familiar storage protocol. If the applications stay in your data center but the storage lives in AWS, it's Storage Gateway.","i":65},{"t":"Amazon FSx for Windows File Server","c":"storage","s":"picked","q":83,"d":"A fully managed native Windows file system <b>in AWS</b>, supporting SMB, NTFS, and Active Directory integration.","tip":"FSx lives <b>in the cloud</b>. Storage Gateway lives <b>at your site</b>. Q83 said the applications were on premises and wanted a local cache — that rules FSx out.","i":66},{"t":"Amazon FSx (family)","c":"storage","s":"","q":null,"d":"Managed third-party file systems: <b>FSx for Windows File Server</b> (SMB/Windows), <b>FSx for Lustre</b> (high-performance computing), <b>FSx for NetApp ONTAP</b>, and <b>FSx for OpenZFS</b>.","tip":"See <b>“Lustre”</b> or <b>“high-performance computing”</b> → FSx for Lustre. See <b>“Windows” or “SMB”</b> → FSx for Windows File Server.","i":67},{"t":"Amazon S3","c":"storage","s":"","q":null,"d":"Object storage: data lives as objects in buckets, accessed over HTTP APIs, with effectively unlimited capacity and 99.999999999% (11 nines) designed durability.","tip":"Storage class tells: <b>unknown/changing access → Intelligent-Tiering</b>; <b>archive, retrieval in hours → Glacier Deep Archive</b>; <b>infrequent but needs instant access → Standard-IA</b>.","i":68},{"t":"Amazon EBS","c":"storage","s":"","q":null,"d":"Block storage volumes attached to a single EC2 instance. Created in <b>one specific Availability Zone</b> and attachable only within that AZ; snapshots (stored in S3) move data elsewhere.","tip":"Tell: <b>“a volume for one instance,” “boot volume,” “low-latency block storage.”</b> Cannot be shared across AZs.","i":69},{"t":"Amazon EFS","c":"storage","s":"picked","q":19,"d":"A fully managed elastic NFS file system that <b>many Linux instances across multiple Availability Zones can mount at the same time</b>.","tip":"Tell: <b>“shared,” “concurrent,” “multiple instances,” “Linux/NFS.”</b> EFS is a file system for AWS-resident Linux workloads — it is not a database migration tool, which is why the Q19 pairing was wrong.","i":70},{"t":"Instance store","c":"storage","s":"","q":null,"d":"Temporary block storage physically attached to the host. Extremely fast, but <b>all data is lost</b> when the instance stops or terminates.","tip":"Tell: <b>“ephemeral,” “temporary,” “scratch,” “cache.”</b> Never the answer for anything that must persist.","i":71},{"t":"Amazon Athena","c":"analytics","s":"missed","q":85,"d":"Serverless interactive query service: run standard <b>SQL directly against files already sitting in Amazon S3</b>, with no clusters to provision. Billed per terabyte of data scanned.","tip":"The unmistakable tell is <b>“SQL” + “data in S3” + “no infrastructure.”</b> If all three appear, it's Athena. The pricing phrase <b>“pay for data scanned”</b> is Athena's alone.","i":72},{"t":"Amazon QuickSight","c":"analytics","s":"picked","q":85,"d":"Business intelligence service for building interactive <b>dashboards and visualizations</b> that business users consume, with ML-powered insights and natural-language Q.","tip":"QuickSight is the <b>picture at the end</b>, not the query engine. Tell: <b>“dashboard,” “visualize,” “report for executives,” “BI.”</b> An <i>analyst writing SQL</i> is Athena; a <i>business user looking at a chart</i> is QuickSight.","i":73},{"t":"Amazon Redshift","c":"analytics","s":"","q":19,"d":"Cloud <b>data warehouse</b> using columnar storage and massively parallel processing for complex analytical queries across petabytes of structured historical data.","tip":"Tells: <b>“data warehouse,” “petabytes,” “complex analytical queries,” “business intelligence at scale,” “OLAP.”</b> Redshift <i>stores</i> the warehouse; Athena queries S3 without one.","i":74},{"t":"Amazon EMR","c":"analytics","s":"","q":85,"d":"Managed clusters running big data frameworks — Apache Spark, Hadoop, Hive, Presto — for large-scale processing and transformation.","tip":"Tell: a <b>named open-source framework</b> (Spark/Hadoop/Hive). EMR means <b>clusters exist</b>, so it's wrong whenever the question says “no infrastructure to manage.”","i":75},{"t":"AWS Glue","c":"analytics","s":"","q":85,"d":"Serverless data integration and <b>ETL</b> (extract, transform, load), including the Glue Data Catalog — a central metadata registry that Athena, Redshift, and EMR all read from.","tip":"Tell: <b>“ETL,” “prepare/transform data,” “catalog,” “discover schema.”</b> Glue <i>prepares</i> data; Athena <i>queries</i> it.","i":76},{"t":"Amazon Kinesis","c":"analytics","s":"","q":19,"d":"The family for <b>real-time streaming</b> data: Kinesis Data Streams (ingest and process), Amazon Data Firehose (load streams into S3, Redshift, or OpenSearch), Kinesis Video Streams.","tip":"Tell: <b>“real time,” “streaming,” “clickstream,” “IoT telemetry,” “as it arrives.”</b> No streaming in the question means no Kinesis.","i":77},{"t":"Amazon OpenSearch Service","c":"analytics","s":"","q":null,"d":"Managed search and log analytics, commonly used for full-text search and operational log dashboards. Formerly Amazon Elasticsearch Service.","tip":"Tell: <b>“log analytics,” “search across logs,” “operational dashboards.”</b>","i":78},{"t":"AWS Lake Formation","c":"analytics","s":"","q":null,"d":"Simplifies building a secure <b>data lake</b> on S3, centralizing permissions and access control across analytics services.","tip":"Tell: the words <b>“data lake”</b> plus <b>“permissions.”</b>","i":79},{"t":"Amazon Rekognition","c":"ai","s":"missed","q":84,"d":"Pre-trained <b>computer vision</b>: detects objects, scenes, faces, celebrities, unsafe content, and <b>text within images and video</b> via a simple API — no ML expertise required.","tip":"Tell: <b>“images” or “video”</b> plus <b>“no machine learning expertise.”</b> Note the trap in Q84: “extract text” alone suggests Textract, but the input was <b>images</b> and the task also included <b>detecting objects</b> — that combination is Rekognition.","i":80},{"t":"Amazon SageMaker AI","c":"ai","s":"picked","q":84,"d":"The platform for <b>building, training, and deploying your own</b> machine learning models end to end.","tip":"The disqualifier is right in the question stem: <b>“without any machine learning expertise”</b> rules SageMaker out every time. SageMaker is for teams that <i>have</i> data scientists. If a question says a company has ML engineers and wants a custom model, it flips to the right answer.","i":81},{"t":"Amazon Bedrock","c":"ai","s":"missed","q":86,"d":"Fully managed access to <b>foundation models from multiple providers through a single API</b>, for building generative AI applications — with customization, guardrails, and no infrastructure to manage.","tip":"Tells that lock it in: <b>“foundation models,” “multiple providers,” “single API,” “generative AI.”</b> Bedrock is where you <i>use</i> someone else's foundation model; SageMaker is where you <i>build</i> your own.","i":82},{"t":"Amazon Kendra","c":"ai","s":"picked","q":86,"d":"Intelligent <b>enterprise search</b> — ask a natural-language question and get answers pulled from your internal documents, wikis, and repositories.","tip":"Kendra <b>finds documents you already have</b>. Bedrock <b>generates new content</b>. Q86 said “build generative AI applications,” which is generation, not retrieval.","i":83},{"t":"Amazon Textract","c":"ai","s":"","q":86,"d":"Extracts text, <b>form fields, and tables</b> from scanned documents and PDFs — invoices, contracts, forms — preserving structure.","tip":"Textract vs Rekognition, the clean split: <b>Textract = documents and forms. Rekognition = photos and video.</b> If the word “form,” “invoice,” or “PDF” appears, it's Textract.","i":84},{"t":"Amazon Comprehend","c":"ai","s":"","q":84,"d":"Natural language processing on text: sentiment analysis, entity extraction, key phrases, language detection, topic modeling.","tip":"Tell: <b>“sentiment,” “analyze customer reviews,” “extract entities from text.”</b> The input is already text.","i":85},{"t":"Amazon Transcribe","c":"ai","s":"","q":86,"d":"Automatic speech recognition — converts <b>audio into text</b>.","tip":"Direction matters and it's the most common mix-up in this cluster: <b>Transcribe = speech → text. Polly = text → speech.</b>","i":86},{"t":"Amazon Polly","c":"ai","s":"","q":84,"d":"Converts <b>text into lifelike speech</b> in many languages and voices.","tip":"Tell: <b>“read aloud,” “voice response,” “audio version of an article.”</b>","i":87},{"t":"Amazon Translate","c":"ai","s":"","q":null,"d":"Neural machine translation between languages.","tip":"Tell: <b>“localize,” “multiple languages,” “translate.”</b>","i":88},{"t":"Amazon Lex","c":"ai","s":"","q":null,"d":"Builds conversational interfaces — <b>chatbots and voice bots</b> — using the same technology as Alexa.","tip":"Tell: <b>“chatbot,” “conversational,” “virtual agent.”</b>","i":89},{"t":"Amazon Personalize","c":"ai","s":"","q":null,"d":"Real-time <b>recommendations</b> personalized per user, the same technology Amazon.com uses.","tip":"Tell: <b>“recommend products,” “customers also viewed,” “personalized content.”</b>","i":90},{"t":"Amazon Fraud Detector","c":"ai","s":"","q":null,"d":"Identifies potentially fraudulent online activity such as fake accounts and payment fraud.","tip":"Tell: the word <b>“fraud.”</b> Not to be confused with GuardDuty, which detects threats against <i>your AWS account</i>, not against your business transactions.","i":91},{"t":"Amazon Q","c":"ai","s":"","q":null,"d":"A generative AI assistant with role-specific variants: <b>Q Developer</b> (coding, debugging, modernization), <b>Q Business</b> (answers from your company's connected data), plus Q in QuickSight and Q in Connect.","tip":"Tell: <b>“AI assistant”</b> for a person's workflow. Bedrock is the platform developers build on; Q is a finished assistant you hand to employees.","i":92},{"t":"Spot Instances","c":"billing","s":"missed","q":89,"d":"Spare EC2 capacity at up to about <b>90% off On-Demand</b>. AWS can reclaim the instance at any time with a two-minute warning.","tip":"Two tells must appear together: <b>“lowest possible cost”</b> and <b>“can be interrupted / fault-tolerant / flexible start and end times.”</b> Once a question says interruption is acceptable, Spot is the answer — that acceptance is the entire reason the discount exists.","i":93},{"t":"On-Demand Instances","c":"billing","s":"picked","q":89,"d":"Pay by the second or hour with no commitment and no interruption risk. The most expensive per-hour rate.","tip":"On-Demand is the right answer for <b>short-term, unpredictable, or first-time workloads that cannot be interrupted</b>. Q89's workload explicitly <i>could</i> be interrupted and wanted the lowest cost, which is Spot's exact profile. Reflex to build: <b>“can be interrupted” → stop reading, pick Spot.</b>","i":94},{"t":"Reserved Instances (RI)","c":"billing","s":"","q":89,"d":"Up to ~72% discount in exchange for a <b>one- or three-year commitment</b> to a specific instance configuration. Standard RIs discount more; Convertible RIs allow changing families.","tip":"Tell: <b>“steady state,” “predictable,” “runs 24/7 all year.”</b> A sporadic batch job never fits an RI.","i":95},{"t":"Savings Plans","c":"billing","s":"","q":null,"d":"Commit to a consistent <b>dollar amount per hour</b> for one or three years. <b>Compute Savings Plans</b> apply across EC2 families, sizes, Regions, OS, tenancy, plus Fargate and Lambda. <b>EC2 Instance Savings Plans</b> commit to one family in one Region for a bigger discount.","tip":"Tell: <b>“flexible”</b> plus <b>“commitment.”</b> Savings Plans are the modern, more flexible alternative to RIs — and the only commitment option that also covers Lambda and Fargate.","i":96},{"t":"Dedicated Hosts","c":"billing","s":"","q":89,"d":"A whole physical server allocated to your account, with visibility into sockets and physical cores.","tip":"Tell: <b>“bring your own license,” “per-socket / per-core licensing,” “regulatory requirement for dedicated hardware.”</b> The word <b>“license”</b> is the giveaway.","i":97},{"t":"Dedicated Instances","c":"billing","s":"","q":null,"d":"Instances running on hardware dedicated to a single customer, but <b>without</b> visibility into or control over the underlying sockets and cores.","tip":"The subtle split: <b>Dedicated Hosts give you socket/core visibility (needed for licensing). Dedicated Instances only give you isolation.</b>","i":98},{"t":"AWS Pricing Calculator","c":"billing","s":"","q":null,"d":"Models the cost of an architecture <b>before you build it</b>, producing a shareable estimate.","tip":"The timing question sorts this whole cluster: <b>Pricing Calculator = before you spend.</b>","i":99},{"t":"AWS Cost Explorer","c":"billing","s":"","q":null,"d":"Interactive visualization of <b>historical</b> cost and usage with filtering by service, account, Region, and tag, plus forecasting based on past trends.","tip":"<b>Cost Explorer = after you've spent, looking back.</b> Tell: <b>“visualize,” “analyze trends,” “which service costs most.”</b>","i":100},{"t":"AWS Budgets","c":"billing","s":"","q":null,"d":"Sets cost, usage, RI, or Savings Plans thresholds and <b>sends alerts</b> when actual or forecast values breach them.","tip":"<b>Budgets = while you're spending, watching a limit.</b> The tell is always <b>“alert,” “notify,” “threshold,” “exceed.”</b>","i":101},{"t":"AWS Cost and Usage Report (CUR)","c":"billing","s":"","q":null,"d":"The most granular billing dataset available, delivered to S3 for analysis with Athena, Redshift, or QuickSight.","tip":"Tell: <b>“most detailed,” “line-item,” “export for our own analysis.”</b>","i":102},{"t":"AWS Cost Anomaly Detection","c":"billing","s":"","q":null,"d":"Uses machine learning to spot unusual spending patterns and alert you to unexpected spikes.","tip":"Tell: <b>“unexpected,” “unusual,” “anomaly”</b> — as opposed to Budgets, where <i>you</i> define the number in advance.","i":103},{"t":"Cost allocation tags","c":"billing","s":"","q":null,"d":"Key-value labels applied to resources and activated in the Billing console, so costs can be broken down by department, project, or environment.","tip":"Tell: <b>“break down the bill by team/project/cost center.”</b>","i":104},{"t":"Consolidated billing","c":"billing","s":"","q":null,"d":"An AWS Organizations feature: one invoice for all accounts, with usage aggregated so the organization reaches <b>volume discount tiers</b> sooner and unused RI/Savings Plan capacity is shared across accounts.","tip":"Tell: <b>“multiple accounts,” “single invoice,” “volume discounts.”</b>","i":105},{"t":"Enterprise Support","c":"support","s":"missed","q":98,"d":"The top classic tier. Includes a <b>designated Technical Account Manager (TAM)</b>, a 15-minute response target for business-critical system-down cases, full Trusted Advisor with Priority, Well-Architected reviews, and a Concierge billing team.","tip":"One word decides this question: <b>“designated.”</b> Designated TAM = Enterprise. Nothing below Enterprise gets a TAM assigned to you personally.","i":106},{"t":"Business Support","c":"support","s":"picked","q":98,"d":"24/7 phone, email, and chat access to <b>Cloud Support Engineers</b>, one-hour response for production-down, the full set of Trusted Advisor checks, and unlimited cases and contacts — but <b>no TAM</b>.","tip":"Business is where <b>24/7 engineer access</b> starts and where <b>full Trusted Advisor</b> unlocks. It is the classic wrong answer to a TAM question, because it does have everything else you'd want.","i":107},{"t":"Developer Support","c":"support","s":"","q":98,"d":"Business-hours email access to <b>Cloud Support Associates</b>, 24-hour general-guidance response, one primary contact. Aimed at experimentation and non-production workloads.","tip":"Tells: <b>“business hours,” “Associates,” “testing/development,” “non-production.”</b> Note the deliberate wording — <b>Associates</b> at Developer, <b>Engineers</b> at Business and above.","i":108},{"t":"Basic Support","c":"support","s":"","q":98,"d":"Included free with every AWS account: 24/7 customer service for <b>account and billing</b> questions, documentation, whitepapers, AWS re:Post, the AWS Health Dashboard, and core Trusted Advisor checks. <b>No technical support cases.</b>","tip":"Tell: <b>“no additional cost”</b> or <b>“included with every account.”</b> Basic gets billing help, never technical troubleshooting.","i":109},{"t":"Enterprise On-Ramp","c":"support","s":"","q":98,"d":"Sits between Business and Enterprise: 30-minute response for business-critical cases and a <b>pool</b> of Technical Account Managers rather than one designated to you.","tip":"The word that separates it from Enterprise is <b>“pool”</b> versus <b>“designated.”</b> That single distinction is a favourite exam trap.","i":110},{"t":"Technical Account Manager (TAM)","c":"support","s":"","q":98,"d":"A named AWS technical advisor who knows your environment, provides proactive guidance and architectural reviews, and advocates for you inside AWS.","tip":"“Designated TAM” → Enterprise Support. Full stop.","i":111},{"t":"Support plan changes (2026–2027)","c":"support","s":"","q":98,"d":"AWS is consolidating: <b>Developer, Business, and Enterprise On-Ramp reach end of support on January 1, 2027</b>, replaced by <b>Business Support+</b> (which does include a designated TAM) and Enterprise Support. AWS's current plans page shows Basic, Business Support+, Enterprise, and Unified Operations.","tip":"Important: <b>CLF-C02 still tests the five classic tiers</b>, so answer the exam with Basic / Developer / Business / Enterprise On-Ramp / Enterprise. This note exists so the live AWS website doesn't confuse you while you study.","i":112},{"t":"AWS Health Dashboard","c":"support","s":"","q":null,"d":"Shows general AWS service status plus a <b>personalized view of events affecting the specific resources in your account</b>, including scheduled changes and remediation guidance.","tip":"Tell: <b>“is this affecting my account / my resources?”</b> — the personalization is the distinguishing feature.","i":113},{"t":"AWS re:Post / Knowledge Center","c":"support","s":"","q":null,"d":"AWS's community Q&A site and its library of answers to frequently asked technical questions. Free to all accounts.","tip":"Generic answers, not account-specific. If the question needs <i>your</i> resources examined, it's the wrong choice.","i":114},{"t":"AWS Marketplace","c":"support","s":"","q":null,"d":"A digital catalog for finding, buying, and deploying <b>third-party</b> software and services, billed through your AWS account.","tip":"Tell: <b>“third-party software,” “vendor,” “purchase.”</b>","i":115},{"t":"AWS Partner Network (APN) / Professional Services","c":"support","s":"","q":null,"d":"APN is the global network of certified consulting and technology partners. AWS Professional Services is AWS's own consulting organization.","tip":"Tell: <b>“need outside help,” “consultants,” “implementation partner.”</b>","i":116}],"cats":{"advice":"Architecture & optimization tools","migration":"Migration & data transfer","protect":"Security — detect & protect","govern":"Governance, audit & compliance","identity":"Identity & access","keys":"Encryption, keys & secrets","compute":"Compute & deployment","storage":"Storage & file systems","analytics":"Analytics & data","ai":"AI / ML / generative AI","billing":"Billing & pricing","support":"Support & technical resources"},"compare":[{"id":"support","c":"support","title":"AWS Support plans","miss":true,"intro":"Every tier inherits everything below it. Two words do almost all the work on the exam: who you reach (<b>Associates</b> vs <b>Engineers</b>) and how a TAM is assigned (<b>pool</b> vs <b>designated</b>).","head":["Plan","Who you can reach","Response target","The one thing that identifies it"],"rows":[["Basic <span class='free'>free</span>","Customer service for billing and account only — no technical cases","—","<b>Included with every account.</b> Core Trusted Advisor checks only"],["Developer","Cloud Support <b>Associates</b>, business hours, email","24 h general guidance<br>12 h system impaired","<b>Business hours</b> + <b>Associates</b> + non-production"],["Business","Cloud Support <b>Engineers</b>, <b>24/7</b>, phone / email / chat","24 h general<br>1 h production down","Where <b>24/7</b> and the <b>full Trusted Advisor</b> check set begin. Still no TAM"],["Enterprise On-Ramp","24/7 Engineers + a <b>pool</b> of TAMs","30 min business-critical down","The word <b>“pool.”</b> Consultative reviews, but no one person is yours"],["Enterprise","24/7 Engineers + a <b>designated TAM</b>","<b>15 min</b> business-critical down","The word <b>“designated.”</b> Plus Well-Architected reviews and Concierge billing"]],"note":"<b>Your Q98 miss:</b> Business Support has almost everything — 24/7 engineers, full Trusted Advisor, unlimited cases — which is exactly what makes it the tempting wrong answer. The only thing it lacks is the TAM, and the TAM is what the question asked for. <br><br><b>Heads-up on the real world:</b> Developer, Business, and Enterprise On-Ramp reach end of support on 1 Jan 2027, replaced by Business Support+ and Enterprise. CLF-C02 still tests the five tiers above — answer with these."},{"id":"ec2buy","c":"billing","title":"EC2 purchasing options","miss":true,"intro":"Every one of these is decided by a single phrase in the question stem. Learn the phrase, not the service.","head":["Option","Discount","Trade-off","The phrase that means “pick me”"],"rows":[["On-Demand","none","none","<b>“short-term,” “unpredictable,” “first time,” “cannot be interrupted”</b>"],["Spot","up to <b>~90%</b>","AWS can reclaim it with a 2-minute warning","<b>“can be interrupted,” “fault tolerant,” “flexible start/end,” “lowest possible cost”</b>"],["Reserved Instances","up to <b>~72%</b>","1- or 3-year commitment to a configuration","<b>“steady state,” “predictable,” “runs 24/7 all year”</b>"],["Savings Plans","up to <b>~72%</b>","1- or 3-year commitment to $/hour","<b>“flexible commitment”</b> — and the only option that also covers <b>Lambda and Fargate</b>"],["Dedicated Hosts","—","most expensive","<b>“bring your own license,” “per-socket / per-core,” “physical server”</b>"],["Dedicated Instances","—","expensive","Isolation only — <b>no</b> visibility into sockets and cores, so it fails licensing questions"]],"note":"<b>Your Q89 miss:</b> you picked On-Demand for a job the question described as interruptible. Build this reflex: <b>the moment a stem says the work can be interrupted or restarted, stop evaluating and choose Spot.</b> That sentence exists in the question for no other reason."},{"id":"7rs","c":"migration","title":"The 7 Rs of migration","miss":true,"intro":"Ordered by how much you change. The exam almost always tests the boundary between two adjacent strategies.","head":["Strategy","What actually changes","Signature example"],"rows":[["<b>Retire</b>","Nothing moves — you switch it off","Decommission an unused reporting app"],["<b>Retain</b>","Nothing moves — you revisit later","A mainframe that can't move yet"],["<b>Relocate</b>","Infrastructure moves, hypervisor and app untouched","VMware workloads → VMware Cloud on AWS"],["<b>Rehost</b>","Location only. “Lift and shift”","A VM becomes an EC2 instance, no code changes"],["<b>Replatform</b>","The plumbing under the app. “Lift, tinker, and shift”","Self-managed MySQL → Amazon RDS. <b>Same app.</b>"],["<b>Repurchase</b>","The product itself. “Drop and shop”","Self-hosted email → a SaaS email subscription"],["<b>Refactor</b>","The application architecture","Monolith → microservices or serverless"]],"note":"<b>Your Q16 miss — the replatform/repurchase line:</b> ask one question. <b>Are you still running the same software?</b> Yes, on better infrastructure → <b>replatform</b>. No, you cancelled it and subscribed to something else → <b>repurchase</b>. The words “SaaS,” “subscribe,” or “different product” settle it instantly."},{"id":"detect","c":"protect","title":"The security services: who watches what","miss":true,"intro":"Five services that all sound like “security monitoring.” They're cleanly separated by <i>what they look at</i>.","head":["Service","Looks at","Answers the question","Blocks anything?"],"rows":[["<b>Amazon GuardDuty</b>","CloudTrail events, VPC Flow Logs, DNS logs","“Is something malicious happening <i>right now</i>?”","No — detects only"],["<b>Amazon Inspector</b>","EC2, ECR container images, Lambda","“Does my software have known vulnerabilities (CVEs)?”","No"],["<b>Amazon Macie</b>","The contents of <b>S3 objects</b>","“Is there sensitive data (PII) where it shouldn't be?”","No"],["<b>Amazon Detective</b>","Aggregated log graphs","“<i>Why</i> did that finding happen?”","No"],["<b>AWS Security Hub</b>","Findings from all of the above","“What should I fix first, across everything?”","No"]],"note":"<b>Your Q48 miss (GuardDuty instead of WAF):</b> the fastest correction is to remember that <b>GuardDuty never blocks anything.</b> The moment a question wants an attack <i>stopped</i>, GuardDuty is out. And “SQL injection” or “cross-site scripting” always means <b>AWS WAF</b> — those two attack names appear in questions for exactly that reason.<br><br><b>Your Q51 miss (Audit Manager instead of Inspector):</b> Inspector scans <i>software for vulnerabilities</i>; Audit Manager collects <i>evidence for auditors</i>. Nothing about Audit Manager touches CVEs."},{"id":"firewall","c":"protect","title":"The firewall stack, by layer","miss":false,"intro":"Work from the outside in. Each layer sits at a different point in the path a packet takes.","head":["Control","Sits at","Stateful?","Blocks"],"rows":[["<b>AWS Shield</b> (Standard / Advanced)","The AWS edge","—","DDoS floods (Layer 3/4). Standard is free and automatic"],["<b>AWS WAF</b>","CloudFront, ALB, API Gateway, AppSync","—","Web exploits at Layer 7 — SQLi, XSS, bad bots"],["<b>AWS Network Firewall</b>","The VPC boundary","Yes","Network traffic by domain, protocol, packet inspection"],["<b>Network ACL</b>","The subnet","<b>No</b> — allow both directions explicitly","Supports <b>allow and deny</b> rules"],["<b>Security group</b>","The instance / network interface","<b>Yes</b> — return traffic is automatic","<b>Allow rules only</b>"],["<b>AWS Firewall Manager</b>","Across the whole Organization","—","Nothing itself — it centrally manages the rules above"]],"note":"The single most reliable exam fact in this table: <b>need to explicitly block one specific IP address → network ACL</b>, because security groups physically cannot express a deny rule."},{"id":"audit","c":"govern","title":"Audit, config, and compliance","miss":true,"intro":"Four services with overlapping vocabulary. Each answers a different one-word question.","head":["Service","One-word question","Concretely"],"rows":[["<b>AWS CloudTrail</b>","<b>Who?</b>","“Which IAM identity deleted that bucket, from what IP, at what time?”"],["<b>AWS Config</b>","<b>What?</b>","“Are all my EBS volumes encrypted — and alert me when a non-compliant one appears”"],["<b>AWS Artifact</b>","<b>Paperwork about AWS</b>","“The auditor wants AWS's SOC 2 report” — you download it"],["<b>AWS Audit Manager</b>","<b>Paperwork about you</b>","“Assemble evidence from my environment and map it to PCI DSS controls”"],["<b>AWS Control Tower</b>","<b>Set it all up</b>","“Stand up a governed multi-account landing zone with guardrails”"]],"note":"<b>Your Q34 miss (Macie instead of Config):</b> Macie only ever looks <i>inside S3 objects</i>. The question was about <b>EBS volume encryption settings</b> — a resource configuration, which is Config's exact job. Quick filter: <b>if the resource isn't S3, Macie is wrong.</b>"},{"id":"advice","c":"advice","title":"Tools that tell you what to improve","miss":true,"intro":"All four “give recommendations.” They differ in what they examine.","head":["Tool","Examines","Output","Cost"],"rows":[["<b>Well-Architected Tool</b>","<b>You</b> — via a questionnaire about one workload","Identified risks + improvement plan across the 6 pillars","Free"],["<b>Trusted Advisor</b>","<b>Your live resources</b>","Checks across cost, performance, security, fault tolerance, service limits","Core checks free; full set at Business+"],["<b>Compute Optimizer</b>","<b>Utilization metrics</b>","“This instance should be smaller”","Free"],["<b>Service Catalog</b>","Nothing — it's a guardrail","A curated list of approved products users may deploy","Charged"]],"note":"<b>Your Q14 miss:</b> the stem said “review an existing <b>workload</b> against <b>architectural best practices</b>” and “report of identified <b>risks</b>.” Those are Well-Architected Tool's exact output words. Trusted Advisor produces <i>checks</i>, not a risk report — and Trusted Advisor <b>Priority</b> just signals the Enterprise Support tier, it doesn't change what the tool does."},{"id":"identity","c":"identity","title":"Identity services: employees vs. customers","miss":true,"intro":"The first question to ask is always <i>whose</i> identity is being managed.","head":["Service","Manages","Typical stem"],"rows":[["<b>AWS IAM</b>","Identities <i>inside one account</i>","“Grant this application access to that S3 bucket” → an IAM role"],["<b>IAM Identity Center</b>","<b>Employees</b> across <i>many accounts</i>","“Sign in to multiple accounts with existing corporate credentials”"],["<b>Amazon Cognito</b>","<b>Your app's customers</b>","“Users of our mobile app need sign-up and sign-in”"],["<b>AWS Directory Service</b>","A managed <b>Active Directory</b>","“Domain-join Windows EC2 instances,” “Group Policy,” “LDAP”"],["<b>AWS RAM</b>","<b>Resources</b>, not people","“Share a subnet or Transit Gateway with another account”"]],"note":"<b>Your Q45 miss:</b> Managed Microsoft AD is a <i>directory</i> — a place identities live. IAM Identity Center is the <i>front door</i> that turns those identities into multi-account AWS access. The stem said “sign in to multiple AWS accounts without creating IAM users in each,” which is the front door, not the directory. AD can feed it, but it isn't it."},{"id":"keys","c":"keys","title":"Keys, secrets, and certificates","miss":true,"intro":"Four services people blur together. Sort by <i>what is being protected</i>.","head":["Service","Protects","Chosen when the question says"],"rows":[["<b>AWS KMS</b>","Encryption keys, multi-tenant AWS infrastructure","Anything about encryption at rest — the default answer"],["<b>AWS CloudHSM</b>","Encryption keys, <b>dedicated single-tenant hardware</b>","<b>“single-tenant,” “dedicated HSM,” “FIPS 140 Level 3,” “only we can access the keys”</b>"],["<b>AWS Secrets Manager</b>","Credentials, API keys, tokens","<b>“rotate automatically”</b> + credentials"],["<b>Parameter Store</b>","Config values and simple secrets","Cheap config storage, <b>no rotation needed</b>"],["<b>AWS Certificate Manager</b>","TLS certificates","Encryption <b>in transit</b>, HTTPS, auto-renewal"]],"note":"<b>Your Q37 miss:</b> the option you chose was KMS with an <b>AWS managed</b> key — which by definition hands key control <i>to AWS</i>, contradicting “controls exclusively.” Even a customer managed KMS key would fail, because KMS runs on shared infrastructure. <b>Single-tenant hardware has exactly one answer: CloudHSM.</b>"},{"id":"ladder","c":"compute","title":"The compute ladder: how much do you manage?","miss":true,"intro":"Read top to bottom as AWS taking over progressively more. Exam questions pin you to a rung by stating what you must still control.","head":["Service","You manage","AWS manages","Signature phrase"],"rows":[["<b>Amazon EC2</b>","OS, patching, scaling, everything up","Hardware, hypervisor","“Full control,” “existing licenses,” “custom OS config”"],["<b>Amazon Lightsail</b>","The app inside a simple VPS","Bundling and pricing","“Simple,” “predictable monthly price,” “WordPress”"],["<b>Elastic Beanstalk</b>","Your code — <b>and you can still see and tune the EC2 instances</b>","Provisioning, load balancing, scaling, health","“Upload code, AWS handles capacity — <b>but I keep control of the resources</b>”"],["<b>ECS / EKS on EC2</b>","Container images + the instances","Orchestration","“Containers,” “Kubernetes” (EKS)"],["<b>AWS Fargate</b>","Container images only","Everything underneath — <b>no instances visible</b>","“Containers <b>without managing servers</b>”"],["<b>AWS Lambda</b>","Function code only","Everything","“No servers,” “event-driven,” “pay only when it runs,” ≤15 min"]],"note":"<b>Your Q58 miss:</b> Fargate and Beanstalk both “handle the infrastructure,” so the stem has to break the tie — and it did, with <b>“while retaining full control of the underlying EC2 resources.”</b> Fargate has no EC2 resources to retain. Whenever both a serverless and a managed-EC2 option appear, hunt the stem for whether instances must remain visible."},{"id":"storage","c":"storage","title":"Storage: pick by shape and location","miss":true,"intro":"Two questions resolve nearly every storage item: <b>object, block, or file?</b> and <b>does it live in AWS or at the customer's site?</b>","head":["Service","Type","Where","Signature phrase"],"rows":[["<b>Amazon S3</b>","Object","AWS","“Buckets,” “unlimited,” “11 nines durability,” “static website”"],["<b>Amazon EBS</b>","Block","AWS — <b>one AZ</b>","“Volume for a single instance,” “boot volume”"],["<b>Instance store</b>","Block","On the host","“Temporary,” “ephemeral,” “lost on stop” "],["<b>Amazon EFS</b>","File (NFS)","AWS — <b>multi-AZ</b>","“Shared by many Linux instances at once”"],["<b>Amazon FSx</b>","File","AWS","“Windows / SMB” or “Lustre / HPC”"],["<b>AWS Storage Gateway</b>","All three, hybrid","<b>Your data center</b>","“On premises” + “<b>local cache</b>” + NFS/SMB/iSCSI"]],"note":"<b>Your Q83 miss:</b> FSx for Windows File Server and Storage Gateway both speak SMB — so location breaks the tie. The stem said the <b>applications are on premises</b> and want a <b>local cache</b>. FSx lives in the cloud and caches nothing locally. <b>“Local cache” is Storage Gateway's exclusive phrase.</b>"},{"id":"movedata","c":"migration","title":"Getting data and workloads into AWS","miss":true,"intro":"Sort by <i>what</i> is moving, then by <i>whether the network can carry it</i>.","head":["Tool","Moves","Pick it when"],"rows":[["<b>DMS</b> (+ <b>SCT</b> if engines differ)","Databases","“Migrate a database” + “<b>source stays available</b>” / minimal downtime"],["<b>AWS DataSync</b>","Files and objects, over the network","Ongoing or bulk <b>file</b> transfer where bandwidth is adequate"],["<b>AWS Snowball Edge</b>","Files, physically","“Petabytes” + “would take months over our connection”"],["<b>AWS Storage Gateway</b>","Nothing — it <i>bridges</i>","On-prem apps need <b>continuing</b> access to AWS storage"],["<b>AWS Transfer Family</b>","Files, via SFTP/FTPS/FTP","Partners upload to you using those protocols"],["<b>Application Migration Service</b>","Whole servers","Rehost / lift-and-shift entire machines into EC2"]],"note":"<b>Your Q19 miss:</b> DataSync + EFS moves <i>files into a file system</i>. An Oracle database going to Aurora PostgreSQL is a <b>heterogeneous database migration</b>, which needs two tools: <b>SCT converts the schema</b> (because the engines differ) and <b>DMS moves the rows while the source stays up</b>. Rule of thumb: <b>different engines on each side → SCT is in the answer.</b>"},{"id":"analytics","c":"analytics","title":"The analytics pipeline, in order","miss":true,"intro":"These services aren't alternatives — they're stages. Placing a service on the pipeline usually answers the question by itself.","head":["Stage","Service","Signature phrase"],"rows":[["1. Ingest (streaming)","<b>Amazon Kinesis</b> / Data Firehose","“Real time,” “streaming,” “clickstream,” “IoT”"],["2. Prepare","<b>AWS Glue</b>","“ETL,” “transform,” “data catalog,” “discover schema”"],["3. Store","<b>Amazon S3</b> (lake) or <b>Amazon Redshift</b> (warehouse)","“Data lake” vs “data warehouse, petabytes, complex analytical queries”"],["4. Query","<b>Amazon Athena</b> or <b>Amazon EMR</b>","Athena: “<b>SQL on data in S3</b>, no infrastructure, pay per data scanned.” EMR: “Spark / Hadoop clusters”"],["5. Visualize","<b>Amazon QuickSight</b>","“Dashboard,” “visualize,” “BI,” “business users”"]],"note":"<b>Your Q85 miss:</b> QuickSight is stage 5, Athena is stage 4. The stem said “a data analyst wants to run <b>standard SQL queries</b>,” which is querying, not visualizing. Two Athena-exclusive phrases worth memorizing: <b>“SQL directly against S3”</b> and <b>“pay only for the data scanned.”</b>"},{"id":"ai","c":"ai","title":"AI services, sorted by what goes IN","miss":true,"intro":"This is the fastest way to lock down the AI cluster: don't memorize what each service does, memorize <b>what kind of input it accepts</b>. The input almost always appears in the first line of the stem.","head":["Input","Service","Output"],"rows":[["<b>Photos and video</b>","<b>Amazon Rekognition</b>","Objects, scenes, faces, moderation labels, text in images"],["<b>Scanned documents, PDFs, forms</b>","<b>Amazon Textract</b>","Text plus <b>form fields and tables</b>, structure preserved"],["<b>Text</b>","<b>Amazon Comprehend</b>","Sentiment, entities, key phrases, language"],["<b>Text</b> →","<b>Amazon Polly</b>","<b>Speech</b> (text-to-speech)"],["<b>Speech</b> →","<b>Amazon Transcribe</b>","<b>Text</b> (speech-to-text)"],["<b>Text in language A</b>","<b>Amazon Translate</b>","Text in language B"],["<b>A user's question</b>","<b>Amazon Lex</b>","A chatbot conversation"],["<b>Your internal documents</b>","<b>Amazon Kendra</b>","Search results — <b>finds</b> existing content"],["<b>A prompt</b>","<b>Amazon Bedrock</b>","Generated content — <b>creates</b> new content from foundation models"],["<b>Your own training data</b>","<b>Amazon SageMaker AI</b>","A custom model you built, trained, and deployed"]],"note":"<b>Your Q84 and Q86 misses, both fixable with one habit:</b><br><br><b>Q84</b> — “extract text” pulled you toward a document service, but the input was <b>images</b> and the job also included <b>detecting objects</b>. Input wins: images → <b>Rekognition</b>. SageMaker was doubly wrong, because the stem said <b>“without any machine learning expertise”</b> — that phrase eliminates SageMaker automatically, every single time.<br><br><b>Q86</b> — Kendra <b>finds</b> documents you already have; Bedrock <b>generates</b> new content. The stem said “build generative AI applications” from “foundation models from multiple providers through a single API,” which is Bedrock's exact description."},{"id":"costtools","c":"billing","title":"Cost tools, on a timeline","miss":false,"intro":"These four are separated purely by <i>when</i> you use them relative to spending the money.","head":["When","Tool","The stem says"],"rows":[["<b>Before</b> you spend","<b>AWS Pricing Calculator</b>","“Estimate the cost of a <b>proposed</b> architecture”"],["<b>While</b> you spend","<b>AWS Budgets</b>","“<b>Alert</b> me when spend exceeds / is forecast to exceed $X”"],["<b>After</b> you spend","<b>AWS Cost Explorer</b>","“<b>Visualize</b> and analyze where the money went; forecast trends”"],["<b>After</b>, in full detail","<b>Cost and Usage Report</b>","“<b>Most granular</b> line-item data, exported to S3”"],["Anytime, automatic","<b>Cost Anomaly Detection</b>","“<b>Unexpected</b> spike” — you didn't define a threshold"]],"note":"The trap pairing is Budgets vs Cost Explorer. <b>If the word “alert” or “notify” appears, it's Budgets.</b> Cost Explorer shows you a picture; it doesn't email you."}],"triggers":[["SQL injection, cross-site scripting","AWS WAF","protect"],["DDoS, at no extra cost","AWS Shield Standard","protect"],["DDoS Response Team, cost protection","AWS Shield Advanced","protect"],["Explicitly deny one IP address","Network ACL","protect"],["Stateful, instance level, allow-only","Security group","protect"],["Vulnerabilities, CVEs, scan workloads","Amazon Inspector","protect"],["Malicious activity, crypto-mining, compromised credentials","Amazon GuardDuty","protect"],["Sensitive data / PII in S3","Amazon Macie","protect"],["Aggregate findings in one place","AWS Security Hub","protect"],["Who made this API call?","AWS CloudTrail","govern"],["Continuously check resource compliance","AWS Config","govern"],["Auditor wants AWS's SOC 2 report","AWS Artifact","govern"],["Collect evidence for our own audit","AWS Audit Manager","govern"],["Multi-account landing zone with guardrails","AWS Control Tower","govern"],["Restrict Regions regardless of account admin","Service control policy (SCP)","govern"],["Infrastructure as code, repeatable templates","AWS CloudFormation","govern"],["Review a workload, report of risks, free","AWS Well-Architected Tool","advice"],["Real-time recommendations on live resources","AWS Trusted Advisor","advice"],["Is this instance the right size?","AWS Compute Optimizer","advice"],["Employees sign in to many accounts with corporate credentials","AWS IAM Identity Center","identity"],["Sign-in for our app's customers","Amazon Cognito","identity"],["Domain-join Windows instances, Group Policy","AWS Directory Service","identity"],["App on EC2 needs to reach another AWS service","IAM role","identity"],["Single-tenant, dedicated HSM, FIPS 140 Level 3","AWS CloudHSM","keys"],["Encrypt data at rest (default answer)","AWS KMS","keys"],["Automatically rotate database credentials","AWS Secrets Manager","keys"],["HTTPS / TLS certificates, auto-renew","AWS Certificate Manager","keys"],["Upload code, AWS handles capacity, but keep EC2 control","AWS Elastic Beanstalk","compute"],["Containers without managing servers","AWS Fargate","compute"],["No servers, event-driven, ≤15 minutes","AWS Lambda","compute"],["Simple VPS, predictable monthly price, WordPress","Amazon Lightsail","compute"],["Kubernetes","Amazon EKS","compute"],["Shared file system, many Linux instances, multi-AZ","Amazon EFS","storage"],["On premises + local cache + NFS/SMB/iSCSI","AWS Storage Gateway","storage"],["Windows file system in AWS, SMB","Amazon FSx for Windows File Server","storage"],["Petabytes, bandwidth would take months","AWS Snowball Edge","migration"],["Unknown or changing access patterns","S3 Intelligent-Tiering","storage"],["Migrate a database, source stays available","AWS DMS","migration"],["Source and target database engines differ","AWS Schema Conversion Tool","migration"],["Lift and shift, no code changes","Rehost","migration"],["Cancel it and subscribe to SaaS instead","Repurchase","migration"],["VMware","Relocate","migration"],["SQL against data in S3, pay per data scanned","Amazon Athena","analytics"],["Dashboards for business users","Amazon QuickSight","analytics"],["Data warehouse, petabytes, complex analytics","Amazon Redshift","analytics"],["ETL, data catalog","AWS Glue","analytics"],["Spark, Hadoop, managed clusters","Amazon EMR","analytics"],["Real-time streaming ingestion","Amazon Kinesis","analytics"],["Images or video, no ML expertise","Amazon Rekognition","ai"],["Scanned forms, invoices, PDFs","Amazon Textract","ai"],["Sentiment, entities from text","Amazon Comprehend","ai"],["Text to speech","Amazon Polly","ai"],["Speech to text","Amazon Transcribe","ai"],["Foundation models, single API, generative AI","Amazon Bedrock","ai"],["Search our internal documents","Amazon Kendra","ai"],["Build and train our own model","Amazon SageMaker AI","ai"],["\"Without any ML expertise\"","NOT SageMaker — pick the pre-trained service","ai"],["Can be interrupted, lowest cost","Spot Instances","billing"],["Steady state, runs all year","Reserved Instances / Savings Plans","billing"],["Bring your own per-socket license","Dedicated Hosts","billing"],["Estimate a proposed architecture","AWS Pricing Calculator","billing"],["Alert me when spend exceeds a threshold","AWS Budgets","billing"],["Visualize where the money went","AWS Cost Explorer","billing"],["Break the bill down by department","Cost allocation tags","billing"],["Designated Technical Account Manager","Enterprise Support","support"],["Pool of Technical Account Managers","Enterprise On-Ramp","support"],["24/7 Cloud Support Engineers, full Trusted Advisor","Business Support","support"],["Business hours, Cloud Support Associates","Developer Support","support"],["Is this outage affecting my account's resources?","AWS Health Dashboard","support"]]};
+const {terms:TERMS, cats:CATS, compare:COMPARE, triggers:TRIGGERS} = DATA;
+const $ = id => document.getElementById(id);
+
+let tab = "cmp", query = "", cat = "all", missOnly = false;
+
+$("sTerms").textContent = TERMS.length;
+$("sCmp").textContent   = COMPARE.length;
+$("sTrig").textContent  = TRIGGERS.length;
+$("sMiss").textContent  = TERMS.filter(t=>t.s).length;
+
+/* ---------- filters ---------- */
+const catCount = c => TERMS.filter(t=>t.c===c).length;
+$("catChips").innerHTML =
+  `<button class="chip warn" data-cat="miss" aria-pressed="false">★ Your misses<span class="n">${TERMS.filter(t=>t.s).length}</span></button>`
+  + `<button class="chip" data-cat="all" aria-pressed="true">All<span class="n">${TERMS.length}</span></button>`
+  + Object.entries(CATS).map(([k,v])=>
+      `<button class="chip" data-cat="${k}" aria-pressed="false">${v}<span class="n">${catCount(k)}</span></button>`).join("");
+
+$("catChips").addEventListener("click", e=>{
+  const b = e.target.closest("[data-cat]"); if(!b) return;
+  const c = b.dataset.cat;
+  if(c==="miss"){
+    missOnly = b.getAttribute("aria-pressed")!=="true";
+    b.setAttribute("aria-pressed", missOnly);
+  } else {
+    cat = c;
+    [...$("catChips").children].forEach(x=>{
+      if(x.dataset.cat!=="miss") x.setAttribute("aria-pressed", x.dataset.cat===c);
+    });
+  }
+  draw();
+});
+
+$("q").addEventListener("input", e=>{
+  query = e.target.value.trim().toLowerCase();
+  $("clr").classList.toggle("hide", !query);
+  if(query && tab==="cmp"){ setTab("gloss"); }   // searching implies you want the glossary
+  draw();
+});
+$("clr").onclick = ()=>{ $("q").value=""; query=""; $("clr").classList.add("hide"); draw(); };
+
+document.querySelector(".tabs").addEventListener("click", e=>{
+  const b = e.target.closest("[data-tab]"); if(!b) return;
+  setTab(b.dataset.tab);
+});
+function setTab(t){
+  tab = t;
+  document.querySelectorAll(".tabs button").forEach(x=>x.setAttribute("aria-selected", x.dataset.tab===t));
+  ["cmp","gloss","trig","cards"].forEach(x=>$("tab-"+x).classList.toggle("hide", x!==t));
+  $("filters").classList.toggle("hide", t==="cards");
+  $("searchWrap").classList.toggle("hide", t==="cards");
+  draw();
+}
+
+/* ---------- helpers ---------- */
+const esc = s => String(s).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+function hl(html){
+  if(!query) return html;
+  const q = query.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
+  const re = new RegExp("("+q+")","i");
+  const root = document.createElement("div");
+  root.innerHTML = html;
+  (function walk(node){
+    [...node.childNodes].forEach(c=>{
+      if(c.nodeType===3){
+        const parts = c.nodeValue.split(re);
+        if(parts.length<2) return;
+        const frag = document.createDocumentFragment();
+        parts.forEach((piece,i)=>{
+          if(i%2===1){ const m=document.createElement("mark"); m.textContent=piece; frag.appendChild(m); }
+          else if(piece) frag.appendChild(document.createTextNode(piece));
+        });
+        c.replaceWith(frag);
+      } else if(c.nodeType===1 && c.tagName!=="MARK"){ walk(c); }
+    });
+  })(root);
+  return root.innerHTML;
+}
+const strip = s => String(s).replace(/<[^>]*>/g,"");
+function matches(t){
+  if(missOnly && !t.s) return false;
+  if(cat!=="all" && t.c!==cat) return false;
+  if(!query) return true;
+  return (t.t+" "+strip(t.d)+" "+strip(t.tip)).toLowerCase().includes(query);
+}
+const badge = t => t.s==="missed" ? `<span class="badge m">missed · Q${t.q}</span>`
+                 : t.s==="picked" ? `<span class="badge p">you picked · Q${t.q}</span>` : "";
+
+/* ---------- draw ---------- */
+function draw(){
+  if(tab==="gloss") drawGloss();
+  if(tab==="cmp")   drawCmp();
+  if(tab==="trig")  drawTrig();
+  if(tab==="cards") drawDecks();
+}
+
+function drawGloss(){
+  const hits = TERMS.filter(matches);
+  if(!hits.length){
+    $("tab-gloss").innerHTML = `<div class="empty">No terms match <b>“${esc(query)}”</b>${cat!=="all"?" in this category":""}.<br><span class="sub">Try a shorter word, or switch the category back to All.</span></div>`;
+    return;
+  }
+  const byCat = {};
+  hits.forEach(t => (byCat[t.c] ||= []).push(t));
+  $("tab-gloss").innerHTML = Object.keys(CATS).filter(c=>byCat[c]).map(c=>
+    `<div class="catblk"><h3>${CATS[c]} <span style="opacity:.6">· ${byCat[c].length}</span></h3>
+      <div class="card" style="padding:6px 22px">` +
+      byCat[c].map(t=>`
+        <div class="term ${t.s==="missed"?"mi":t.s==="picked"?"pi":""}">
+          <div class="t">${hl(esc(t.t))}${badge(t)}</div>
+          <div class="d">${hl(t.d)}</div>
+          ${t.tip?`<div class="tip">${hl(t.tip)}</div>`:""}
+        </div>`).join("") +
+    `</div></div>`).join("");
+}
+
+function drawCmp(){
+  const list = COMPARE.filter(c => (cat==="all"||c.c===cat) && (!missOnly || c.miss));
+  if(!list.length){ $("tab-cmp").innerHTML = `<div class="empty">No comparison tables in this category.</div>`; return; }
+  $("tab-cmp").innerHTML = list.map(c=>`
+    <div class="card cmp">
+      <h2>${c.title}${c.miss?`<span class="badge m">covers a miss</span>`:""}</h2>
+      <p class="intro">${c.intro}</p>
+      <div class="tw"><table>
+        <thead><tr>${c.head.map(h=>`<th>${h}</th>`).join("")}</tr></thead>
+        <tbody>${c.rows.map(r=>`<tr>${r.map(x=>`<td>${x}</td>`).join("")}</tr>`).join("")}</tbody>
+      </table></div>
+      ${c.note?`<div class="note">${c.note}</div>`:""}
+    </div>`).join("");
+}
+
+function drawTrig(){
+  const rows = TRIGGERS.filter(([p,s,c])=>{
+    if(cat!=="all" && c!==cat) return false;
+    if(!query) return true;
+    return (p+" "+s).toLowerCase().includes(query);
+  });
+  $("trigGrid").innerHTML = rows.length
+    ? rows.map(([p,s])=>`<div>${hl(esc(p))}</div><div>${hl(esc(s))}</div>`).join("")
+    : `<div style="grid-column:1/-1" class="empty">No trigger phrases match.</div>`;
+}
+
+/* ---------- flashcards ---------- */
+let deck="miss", dir="t2d", cards=[], ci=0, flipped=false, got=0, again=[];
+
+function deckPool(d){
+  if(d==="miss") return TERMS.filter(t=>t.s);
+  if(d==="all")  return TERMS.slice();
+  return TERMS.filter(t=>t.c===d);
+}
+function drawDecks(){
+  if(!$("deckChips").children.length){
+    $("deckChips").innerHTML =
+      `<button class="chip warn" data-deck="miss" aria-pressed="true">★ Your misses<span class="n">${deckPool("miss").length}</span></button>`
+      + `<button class="chip" data-deck="all" aria-pressed="false">Everything<span class="n">${TERMS.length}</span></button>`
+      + Object.entries(CATS).map(([k,v])=>
+          `<button class="chip" data-deck="${k}" aria-pressed="false">${v}<span class="n">${catCount(k)}</span></button>`).join("");
+  }
+  $("fcCount").textContent = `${deckPool(deck).length} cards`;
+}
+$("deckChips").addEventListener("click", e=>{
+  const b=e.target.closest("[data-deck]"); if(!b) return;
+  deck=b.dataset.deck;
+  [...$("deckChips").children].forEach(x=>x.setAttribute("aria-pressed", x===b));
+  drawDecks();
+});
+$("dirChips").addEventListener("click", e=>{
+  const b=e.target.closest("[data-dir]"); if(!b) return;
+  dir=b.dataset.dir;
+  [...$("dirChips").children].forEach(x=>x.setAttribute("aria-pressed", x===b));
+});
+
+const shuffle = a=>{for(let i=a.length-1;i>0;i--){const j=Math.random()*(i+1)|0;[a[i],a[j]]=[a[j],a[i]];}return a;};
+
+$("fcStart").onclick = ()=>{
+  cards = shuffle(deckPool(deck)); ci=0; got=0; again=[]; flipped=false;
+  if(!cards.length) return;
+  $("fcSetup").classList.add("hide"); $("fcDone").classList.add("hide"); $("fcRun").classList.remove("hide");
+  showCard();
+};
+$("fcQuit").onclick = ()=>{ $("fcRun").classList.add("hide"); $("fcDone").classList.add("hide"); $("fcSetup").classList.remove("hide"); };
+
+function showCard(){
+  const t = cards[ci];
+  $("fcPos").textContent = `${ci+1} / ${cards.length}`;
+  $("fcBar").style.width = (ci/cards.length*100)+"%";
+  const askTerm = dir==="t2d";
+  if(!flipped){
+    $("fcCard").innerHTML = askTerm
+      ? `<div class="side">What does this do?</div><div class="front">${esc(t.t)}${badge(t)}</div>
+         <div class="hintline">Click the card, or press Space, to reveal</div>`
+      : `<div class="side">Name the service</div><div class="back" style="text-align:center;font-size:18px">${t.d}</div>
+         <div class="hintline">Click the card, or press Space, to reveal</div>`;
+    $("fcActions").innerHTML = `<button class="btn-primary" id="fcFlip">Reveal</button>`;
+    $("fcFlip").onclick = ev=>{ ev.stopPropagation(); flip(); };
+  } else {
+    $("fcCard").innerHTML = askTerm
+      ? `<div class="side">${esc(t.t)}${badge(t)}</div><div class="back">${t.d}${t.tip?`<div class="tip">${t.tip}</div>`:""}</div>`
+      : `<div class="side">Answer</div><div class="front" style="margin-bottom:14px">${esc(t.t)}${badge(t)}</div>
+         ${t.tip?`<div class="back"><div class="tip" style="margin-top:0">${t.tip}</div></div>`:""}`;
+    $("fcActions").innerHTML =
+      `<button id="fcAgain">Review again</button><button class="btn-primary" id="fcGot">Got it →</button>`;
+    $("fcAgain").onclick = ev=>{ ev.stopPropagation(); again.push(t); next(); };
+    $("fcGot").onclick   = ev=>{ ev.stopPropagation(); got++; next(); };
+  }
+}
+const flip = ()=>{ flipped=true; showCard(); };
+function next(){
+  flipped=false; ci++;
+  if(ci>=cards.length){
+    if(again.length){ cards=shuffle(again); again=[]; ci=0; showCard(); return; }
+    return done();
+  }
+  showCard();
+}
+function done(){
+  $("fcRun").classList.add("hide");
+  $("fcDone").classList.remove("hide");
+  $("fcDone").innerHTML = `<div class="card fcdone">
+    <div class="big">✓</div>
+    <h2 style="margin:14px 0 6px">Deck cleared</h2>
+    <p class="sub">${got} card${got===1?"":"s"} marked as known. Cards you sent back came round again until you got them.</p>
+    <div class="row" style="justify-content:center;margin-top:18px">
+      <button class="btn-primary" id="fcRedo">Run it again</button>
+      <button id="fcBack">Pick another deck</button>
+    </div></div>`;
+  $("fcRedo").onclick = ()=>$("fcStart").click();
+  $("fcBack").onclick = ()=>{ $("fcDone").classList.add("hide"); $("fcSetup").classList.remove("hide"); };
+}
+$("fcCard").addEventListener("click", ()=>{ if(!flipped) flip(); });
+
+document.addEventListener("keydown", e=>{
+  if(e.target.tagName==="INPUT"){ if(e.key==="Escape") $("clr").click(); return; }
+  if(e.key==="/" ){ e.preventDefault(); setTab(tab==="cards"?"gloss":tab); $("q").focus(); return; }
+  if(tab!=="cards" || $("fcRun").classList.contains("hide")) return;
+  if(e.key===" "){ e.preventDefault(); flipped ? $("fcGot")?.click() : flip(); }
+  else if(e.key==="ArrowRight" && flipped) $("fcGot")?.click();
+  else if(e.key==="ArrowLeft"  && flipped) $("fcAgain")?.click();
+});
+
+drawDecks(); draw();
+</script>
+</body>
+</html>
