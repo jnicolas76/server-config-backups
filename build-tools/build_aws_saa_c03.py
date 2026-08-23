@@ -116,7 +116,7 @@ def build_game(saa: dict) -> str:
             {
                 "q": item["q"],
                 "options": item["options"],
-                "answer": item["answer"][0],
+                "correct": item["answer"][0],
                 "explanation": item["opt_why"][item["answer"][0]],
                 "domain": f"Domain {item['domain']} · {item.get('topic', 'Architecture')}",
             }
