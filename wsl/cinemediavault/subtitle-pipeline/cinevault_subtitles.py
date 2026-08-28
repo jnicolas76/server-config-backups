@@ -166,8 +166,10 @@ def scan(cfg):
                   VALUES(?,?,?,?,?,?,NULL,?,?) ON CONFLICT(path) DO UPDATE SET size=excluded.size,mtime=excluded.mtime,
                   status=excluded.status,needs_en=excluded.needs_en,needs_es=excluded.needs_es,error=NULL,updated_at=excluded.updated_at""",
                   (str(video), stat.st_size, stat.st_mtime, status, int(need_en), int(need_es), now(), now()))
+                if discovered % 25 == 0:
+                    db.commit()
                 if discovered % 500 == 0:
-                    db.commit(); print(f"discovered={discovered} queued={queued}", flush=True)
+                    print(f"discovered={discovered} queued={queued}", flush=True)
     db.execute("UPDATE runs SET finished_at=?,discovered=?,queued=?,skipped=? WHERE id=?", (now(), discovered, queued, skipped, run))
     db.commit()
     notify(cfg, f"**CineVault subtitles:** discovery complete — {discovered:,} videos checked, {queued:,} queued, {skipped:,} already covered/recent.")
