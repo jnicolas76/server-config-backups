@@ -1845,17 +1845,35 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
     const playlistPosition = Number(playbackParams.get("position") || 0);
     const video = document.getElementById("player");
     const captionSelect = document.getElementById("captionSelect");
+    const captionSources = Array.from(video.querySelectorAll("track")).map(element => ({
+      src: element.getAttribute("src"),
+      srclang: element.getAttribute("srclang") || "und",
+      label: element.getAttribute("label") || "Subtitles"
+    }));
+    let activeCaptionValue = null;
     function applyCaptionSelection(value) {
       const selected = String(value);
-      const trackElements = Array.from(video.querySelectorAll("track"));
-      trackElements.forEach((element,index) => {
-        const enabled = String(index) === selected;
-        element.default = enabled;
-        if (element.track) element.track.mode = enabled ? "showing" : "disabled";
-      });
-      Array.from(video.textTracks || []).forEach((track,index) => {
-        track.mode = String(index) === selected ? "showing" : "disabled";
-      });
+      const current = video.querySelector("track[data-active-caption]");
+      if (selected === activeCaptionValue && current) {
+        if (current.track) current.track.mode = "showing";
+        return;
+      }
+      Array.from(video.textTracks || []).forEach(track => { track.mode = "disabled"; });
+      Array.from(video.querySelectorAll("track")).forEach(element => element.remove());
+      activeCaptionValue = selected;
+      const source = captionSources[Number(selected)];
+      if (selected !== "off" && source) {
+        const active = document.createElement("track");
+        active.kind = "subtitles";
+        active.src = source.src;
+        active.srclang = source.srclang;
+        active.label = source.label;
+        active.default = true;
+        active.dataset.activeCaption = "1";
+        active.addEventListener("load", () => { if (active.track) active.track.mode = "showing"; });
+        video.appendChild(active);
+        if (active.track) active.track.mode = "showing";
+      }
       try { localStorage.setItem("cinevaultCaptionTrack", String(value)); } catch (_) {}
     }
     if (captionSelect) {
@@ -1869,7 +1887,6 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
         setTimeout(() => applyCaptionSelection(captionSelect.value), 750);
       });
       video.addEventListener("loadedmetadata", () => applyCaptionSelection(captionSelect.value));
-      Array.from(video.querySelectorAll("track")).forEach(track => track.addEventListener("load", () => applyCaptionSelection(captionSelect.value)));
       setTimeout(() => applyCaptionSelection(captionSelect.value), 0);
     }
     const hero = document.getElementById("hero");
