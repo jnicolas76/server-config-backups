@@ -1,3 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
+python_root="$HOME/.local/share/cinevault-subtitles/venv"
+cuda_libs="$($python_root/bin/python - <<'PY'
+from pathlib import Path
+import nvidia.cublas, nvidia.cudnn
+print(f"{Path(nvidia.cublas.__file__).parent / 'lib'}:{Path(nvidia.cudnn.__file__).parent / 'lib'}")
+PY
+)"
+export LD_LIBRARY_PATH="$cuda_libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 exec "$HOME/.local/share/cinevault-subtitles/venv/bin/python" "$HOME/.local/share/cinevault-subtitles/cinevault_subtitles.py" "$@"
