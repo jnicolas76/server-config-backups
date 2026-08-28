@@ -329,16 +329,24 @@ def process_one(db, cfg, row):
         if result.returncode or not audio.exists(): raise RuntimeError("local audio extraction failed")
         native = scratch / "native.srt"
         detected, count = whisper(audio, native, cfg, language=None, task="transcribe")
-        detected = "es" if detected.startswith("es") else "en"
-        if detected == "es":
+        detected = detected.lower()
+        if detected.startswith("es"):
+            detected = "es"
             if "es" in need: write_srt_atomic(targets["es"], parse_srt(native)); need.remove("es")
             if "en" in need:
                 english = scratch / "english.srt"; whisper(audio, english, cfg, language="es", task="translate")
                 write_srt_atomic(targets["en"], parse_srt(english)); need.remove("en")
-        else:
+        elif detected.startswith("en"):
+            detected = "en"
             if "en" in need: write_srt_atomic(targets["en"], parse_srt(native)); need.remove("en")
             if "es" in need:
                 translate_srt(native, targets["es"], "en", "es"); need.remove("es")
+        else:
+            english = scratch / "english.srt"
+            whisper(audio, english, cfg, language=detected, task="translate")
+            if "en" in need: write_srt_atomic(targets["en"], parse_srt(english)); need.remove("en")
+            if "es" in need:
+                translate_srt(english, targets["es"], "en", "es"); need.remove("es")
         if cfg.get("audio_events", True):
             events = scratch / "events.srt"
             event_script = Path(__file__).with_name("audio_events_to_srt.py")
