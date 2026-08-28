@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+set -euo pipefail
+exec "$HOME/.local/share/cinevault-subtitles/venv/bin/python" "$HOME/.local/share/cinevault-subtitles/cinevault_subtitles.py" "$@"

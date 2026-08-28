@@ -1,0 +1,15 @@
+[Unit]
+Description=CineVault offline English and Spanish subtitle worker
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/subtitle-pipeline worker
+Restart=on-failure
+RestartSec=5m
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=default.target
+

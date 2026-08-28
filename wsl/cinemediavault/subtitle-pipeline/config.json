@@ -1,0 +1,25 @@
+{
+  "roots": [
+    "/mnt/nfs-share-movies/Movies",
+    "/mnt/nfs-share-tvshows/TV Shows"
+  ],
+  "video_extensions": [".mkv", ".mp4", ".m4v", ".avi", ".mov", ".ts", ".m2ts", ".webm"],
+  "stable_age_minutes": 30,
+  "scan_interval_hours": 6,
+  "worker_poll_seconds": 120,
+  "progress_every_completed": 10,
+  "minimum_scratch_gb": 20,
+  "maximum_gpu_utilization_percent": 45,
+  "pause_for_transcode_processes": true,
+  "whisper_model": "large-v3",
+  "whisper_compute_type": "float16",
+  "beam_size": 5,
+  "vad_filter": false,
+  "condition_on_previous_text": false,
+  "word_timestamps": true,
+  "maximum_cue_seconds": 8.0,
+  "characters_per_second": 15.0,
+  "audio_events": true,
+  "event_window_seconds": 5.0,
+  "webex_sender": "/mnt/c/Data/send_webex_notification.py"
+}
