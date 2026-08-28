@@ -1,8 +1,8 @@
 [Unit]
 Description=CineVault subtitle catalog discovery
 After=network-online.target
+OnSuccess=cinevault-subtitle-worker.service
 
 [Service]
 Type=oneshot
 ExecStart=%h/.local/bin/subtitle-pipeline scan
-
