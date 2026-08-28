@@ -4,7 +4,7 @@ exec "$HOME/.local/share/cinevault-subtitles/venv/bin/python" - <<'PY'
 import argostranslate.package
 argostranslate.package.update_package_index()
 packages = argostranslate.package.get_available_packages()
-for source, target in (("en", "es"),):
+for source, target in (("en", "es"), ("es", "en")):
     package = next((p for p in packages if p.from_code == source and p.to_code == target), None)
     if not package:
         raise SystemExit(f"No Argos package found for {source}->{target}")

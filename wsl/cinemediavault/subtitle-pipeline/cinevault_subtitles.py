@@ -22,6 +22,7 @@ CONFIG = Path(os.environ.get("CINEVAULT_SUBTITLE_CONFIG", HERE / "config.json"))
 VIDEO_DEFAULT = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".ts", ".m2ts", ".webm"}
 TIMING = re.compile(r"(\d\d):(\d\d):(\d\d)[,.](\d\d\d)\s+-->\s+(\d\d):(\d\d):(\d\d)[,.](\d\d\d)")
 LANG_ALIASES = {"eng": "en", "en": "en", "english": "en", "spa": "es", "es": "es", "spanish": "es", "castilian": "es"}
+_WHISPER_MODEL = None
 
 
 def now():
@@ -88,6 +89,18 @@ def sidecar_languages(video):
             if not tokens or not any(t for t in tokens if t):
                 langs.add("unknown")
     return langs
+
+
+def sidecar_for(video, language):
+    stem = video.stem.lower()
+    for path in video.parent.glob("*.srt"):
+        low = path.stem.lower()
+        if not low.startswith(stem + "."):
+            continue
+        tokens = re.split(r"[. _-]+", low[len(stem):])
+        if any(LANG_ALIASES.get(token) == language for token in tokens):
+            return path
+    return None
 
 
 def probe_subtitles(video):
@@ -218,8 +231,11 @@ def stamp(seconds):
 
 
 def whisper(media, target, cfg, language=None, task="transcribe"):
+    global _WHISPER_MODEL
     from faster_whisper import WhisperModel
-    model = WhisperModel(cfg["whisper_model"], device="cuda", compute_type=cfg["whisper_compute_type"])
+    if _WHISPER_MODEL is None:
+        _WHISPER_MODEL = WhisperModel(cfg["whisper_model"], device="cuda", compute_type=cfg["whisper_compute_type"])
+    model = _WHISPER_MODEL
     options = dict(language=language, task=task, beam_size=int(cfg["beam_size"]),
                    word_timestamps=bool(cfg["word_timestamps"]),
                    condition_on_previous_text=bool(cfg["condition_on_previous_text"]),
@@ -295,6 +311,13 @@ def process_one(db, cfg, row):
         if matching:
             extract_embedded(video, matching[0], targets[lang]); need.remove(lang)
     if not need: return "extracted embedded tracks"
+    english_sidecar = sidecar_for(video, "en")
+    spanish_sidecar = sidecar_for(video, "es")
+    if "es" in need and english_sidecar:
+        translate_srt(english_sidecar, targets["es"], "en", "es"); need.remove("es")
+    if "en" in need and spanish_sidecar:
+        translate_srt(spanish_sidecar, targets["en"], "es", "en"); need.remove("en")
+    if not need: return "translated existing sidecar"
     CACHE.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="job-", dir=CACHE) as scratch_name:
         scratch = Path(scratch_name)
