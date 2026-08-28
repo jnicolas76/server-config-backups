@@ -282,7 +282,8 @@ def target_for(video, language):
 
 
 def busy(cfg):
-    usage = subprocess.run(["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"], text=True, capture_output=True)
+    nvidia_smi = shutil.which("nvidia-smi") or "/usr/lib/wsl/lib/nvidia-smi"
+    usage = subprocess.run([nvidia_smi, "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"], text=True, capture_output=True)
     try:
         if int(usage.stdout.strip().splitlines()[0]) > int(cfg.get("maximum_gpu_utilization_percent", 45)):
             return "GPU is busy"
