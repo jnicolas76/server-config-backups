@@ -1,0 +1,10 @@
+[Unit]
+Description=CineVault bottom-up SubDL subtitle worker
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/share/cinevault-subtitles/venv/bin/python %h/.local/share/cinevault-subtitles/subdl_worker.py
+Nice=10
+IOSchedulingClass=idle
+

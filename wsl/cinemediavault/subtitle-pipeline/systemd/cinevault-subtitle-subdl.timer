@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the CineVault SubDL daily acquisition lane
+
+[Timer]
+OnBootSec=15m
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target

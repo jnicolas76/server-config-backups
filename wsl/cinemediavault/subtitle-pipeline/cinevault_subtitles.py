@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import csv
 import json
 import os
 import re
@@ -52,8 +53,37 @@ def connect():
         discovered INTEGER DEFAULT 0, queued INTEGER DEFAULT 0, skipped INTEGER DEFAULT 0,
         completed INTEGER DEFAULT 0, failed INTEGER DEFAULT 0
       );
+      CREATE TABLE IF NOT EXISTS subdl_usage (
+        day TEXT PRIMARY KEY, requests INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS subdl_attempts (
+        path TEXT NOT NULL, day TEXT NOT NULL, status TEXT NOT NULL,
+        detail TEXT, attempted_at TEXT NOT NULL, PRIMARY KEY(path, day)
+      );
     """)
+    columns = {row[1] for row in db.execute("PRAGMA table_info(media)")}
+    for name, definition in {
+        "media_type": "TEXT", "completion_method": "TEXT", "completion_detail": "TEXT"
+    }.items():
+        if name not in columns:
+            db.execute(f"ALTER TABLE media ADD COLUMN {name} {definition}")
+    db.execute("""UPDATE media SET media_type=CASE
+      WHEN path LIKE '/mnt/nfs-share-movies/Movies/%' THEN 'movie'
+      WHEN path LIKE '/mnt/nfs-share-tvshows/TV Shows/%' THEN 'tv'
+      ELSE 'unknown' END WHERE media_type IS NULL""")
+    db.execute("CREATE INDEX IF NOT EXISTS media_type_status_idx ON media(media_type,status,mtime)")
+    db.commit()
     return db
+
+
+def media_type_for(path, cfg):
+    resolved = str(path)
+    roots = cfg.get("roots", [])
+    if roots and resolved.startswith(str(roots[0]).rstrip("/") + "/"):
+        return "movie"
+    if len(roots) > 1 and resolved.startswith(str(roots[1]).rstrip("/") + "/"):
+        return "tv"
+    return "unknown"
 
 
 def notify(cfg, message):
@@ -162,10 +192,11 @@ def scan(cfg):
                 old = db.execute("SELECT size,mtime,status FROM media WHERE path=?", (str(video),)).fetchone()
                 if old and old["size"] == stat.st_size and old["mtime"] == stat.st_mtime and old["status"] in {"processing", "complete"}:
                     continue
-                db.execute("""INSERT INTO media(path,size,mtime,status,needs_en,needs_es,error,discovered_at,updated_at)
-                  VALUES(?,?,?,?,?,?,NULL,?,?) ON CONFLICT(path) DO UPDATE SET size=excluded.size,mtime=excluded.mtime,
-                  status=excluded.status,needs_en=excluded.needs_en,needs_es=excluded.needs_es,error=NULL,updated_at=excluded.updated_at""",
-                  (str(video), stat.st_size, stat.st_mtime, status, int(need_en), int(need_es), now(), now()))
+                db.execute("""INSERT INTO media(path,size,mtime,status,needs_en,needs_es,error,discovered_at,updated_at,media_type)
+                  VALUES(?,?,?,?,?,?,NULL,?,?,?) ON CONFLICT(path) DO UPDATE SET size=excluded.size,mtime=excluded.mtime,
+                  status=excluded.status,needs_en=excluded.needs_en,needs_es=excluded.needs_es,error=NULL,
+                  updated_at=excluded.updated_at,media_type=excluded.media_type""",
+                  (str(video), stat.st_size, stat.st_mtime, status, int(need_en), int(need_es), now(), now(), media_type_for(video, cfg)))
                 if discovered % 25 == 0:
                     db.commit()
                 if discovered % 500 == 0:
@@ -369,15 +400,25 @@ def worker(cfg, once=False):
             print(f"paused: {reason}", flush=True)
             if once: return
             time.sleep(int(cfg.get("worker_poll_seconds", 120))); continue
-        row = db.execute("SELECT * FROM media WHERE status IN ('queued','failed') AND attempts < 3 ORDER BY mtime,path LIMIT 1").fetchone()
+        db.execute("BEGIN IMMEDIATE")
+        unfinished_movies = db.execute("SELECT count(*) FROM media WHERE media_type='movie' AND status!='complete'").fetchone()[0]
+        wanted_type = "movie" if unfinished_movies else "tv"
+        row = db.execute("""SELECT * FROM media WHERE media_type=? AND status IN ('queued','failed')
+          AND attempts < 3 ORDER BY mtime,path LIMIT 1""", (wanted_type,)).fetchone()
         if not row:
+            db.commit()
             counts = dict(db.execute("SELECT status,count(*) n FROM media GROUP BY status").fetchall())
-            notify(cfg, f"**CineVault subtitles:** queue is currently complete. Status: {counts}.")
+            if unfinished_movies:
+                notify(cfg, f"**CineVault subtitles:** movie-first queue is waiting on non-runnable movie rows. TV remains paused. Status: {counts}.")
+            else:
+                notify(cfg, f"**CineVault subtitles:** queue is currently complete. Status: {counts}.")
             return
         db.execute("UPDATE media SET status='processing',attempts=attempts+1,updated_at=? WHERE path=?", (now(), row["path"])); db.commit()
         try:
             detail = process_one(db, cfg, row)
-            db.execute("UPDATE media SET status='complete',error=NULL,completed_at=?,updated_at=? WHERE path=?", (now(), now(), row["path"])); db.commit()
+            method = "whisper" if detail.startswith("Whisper") else ("embedded" if detail.startswith("extracted") else ("translated" if detail.startswith("translated") else "existing"))
+            db.execute("""UPDATE media SET status='complete',error=NULL,completed_at=?,updated_at=?,
+              completion_method=?,completion_detail=? WHERE path=?""", (now(), now(), method, detail, row["path"])); db.commit()
             completed_this_run += 1; print(f"complete: {row['path']} ({detail})", flush=True)
         except Exception as exc:
             failed_this_run += 1
@@ -399,11 +440,34 @@ def status():
         print(f"FAILED {row['path']}: {row['error']}")
 
 
+def export_reports(cfg):
+    db = connect()
+    report_dir = Path(cfg.get("report_dir", STATE / "reports")).expanduser()
+    report_dir.mkdir(parents=True, exist_ok=True)
+    columns = ["path", "media_type", "status", "completion_method", "completion_detail",
+               "attempts", "error", "discovered_at", "completed_at"]
+    queries = {
+        "handled.csv": "SELECT * FROM media ORDER BY media_type,path",
+        "processed.csv": "SELECT * FROM media WHERE status='complete' ORDER BY completed_at,path",
+        "transcribed.csv": "SELECT * FROM media WHERE completion_method='whisper' ORDER BY completed_at,path",
+    }
+    for filename, query in queries.items():
+        with (report_dir / filename).open("w", encoding="utf-8", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=columns, extrasaction="ignore")
+            writer.writeheader(); writer.writerows(dict(row) for row in db.execute(query))
+    with (report_dir / "subdl-attempts.csv").open("w", encoding="utf-8", newline="") as stream:
+        columns2 = ["path", "day", "status", "detail", "attempted_at"]
+        writer = csv.DictWriter(stream, fieldnames=columns2); writer.writeheader()
+        writer.writerows(dict(row) for row in db.execute("SELECT * FROM subdl_attempts ORDER BY attempted_at,path"))
+    print(json.dumps({"report_dir": str(report_dir), "files": list(queries) + ["subdl-attempts.csv"]}))
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("scan", "worker", "run-once", "status"))
+    parser.add_argument("command", choices=("scan", "worker", "run-once", "status", "export-reports"))
     args = parser.parse_args(); cfg = load_config()
-    {"scan": lambda: scan(cfg), "worker": lambda: worker(cfg), "run-once": lambda: worker(cfg, True), "status": status}[args.command]()
+    {"scan": lambda: scan(cfg), "worker": lambda: worker(cfg), "run-once": lambda: worker(cfg, True),
+     "status": status, "export-reports": lambda: export_reports(cfg)}[args.command]()
 
 
 if __name__ == "__main__": main()

@@ -21,5 +21,10 @@
   "characters_per_second": 15.0,
   "audio_events": true,
   "event_window_seconds": 5.0,
-  "webex_sender": "/mnt/c/Data/send_webex_notification.py"
+  "webex_sender": "/mnt/c/Data/send_webex_notification.py",
+  "report_dir": "/mnt/c/Users/jonat/Nextcloud/CineVault/Subtitle Pipeline/Reports",
+  "subdl_key_file": "/home/jnicolas/.config/cinevault-subtitles/subdl-api-key",
+  "subdl_daily_request_limit": 1000,
+  "subdl_request_delay_seconds": 1.0,
+  "subdl_progress_every_requests": 50
 }

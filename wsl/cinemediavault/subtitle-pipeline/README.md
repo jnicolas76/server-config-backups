@@ -51,7 +51,27 @@ not reliably deliver filesystem events to WSL.
 ./bin/subtitle-pipeline status
 ./bin/subtitle-pipeline worker
 ./bin/subtitle-pipeline run-once
+./bin/subtitle-pipeline export-reports
 ```
+
+## Movie-first dual-lane processing
+
+The catalog is processed in two directions. Whisper claims the oldest movie at the top of the queue. SubDL claims the newest movie at the bottom, performs one exact title/year search, downloads English, validates cue count and runtime coverage, and translates the accepted SRT to Spanish locally. SQLite transaction claims prevent both workers from processing the same asset.
+
+TV remains paused until there are no unfinished movie rows. Whisper then proceeds through TV; SubDL remains movie-only.
+
+SubDL is capped at 1,000 API searches per local calendar day. Every asset is attempted at most once by SubDL per day. A rejected or missing result returns to the Whisper queue, and the daily timer resumes automatically after the budget resets. Its API key is read from `~/.config/cinevault-subtitles/subdl-api-key` and is never stored in the repository or reports.
+
+## Processing ledgers
+
+`subtitle-pipeline export-reports` writes four CSV ledgers to the configured Nextcloud report folder:
+
+- `handled.csv`: every discovered asset and its current state
+- `processed.csv`: completed assets and their production method
+- `transcribed.csv`: assets transcribed by Whisper
+- `subdl-attempts.csv`: every SubDL outcome, including rejected matches and errors
+
+The SubDL worker refreshes them every 50 searches and whenever it stops. `completion_method` distinguishes `subdl`, `whisper`, `embedded`, `translated`, and already-covered files.
 
 The installer creates user services:
 
@@ -92,4 +112,3 @@ The first catalog run may take days or weeks depending on the number and length
 of missing tracks. Do not increase beyond one worker unless scratch I/O, GPU
 contention, share load, and atomic-output behavior have been re-evaluated. Review
 the first several results in CineVault before leaving the full worker unattended.
-
