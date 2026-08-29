@@ -1,0 +1,5 @@
+Backup date: 2026-08-29
+GitHub repository: jnicolas76/server-config-backups
+GitHub commit: 41ab7e8
+Scope: sanitized Ollama GPU, Open WebUI endpoint, network gateway source, and Proxmox resource configuration
+Excluded: passwords, tokens, private keys, databases, model weights, media, and logs
