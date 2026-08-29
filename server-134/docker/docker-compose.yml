@@ -172,6 +172,24 @@ services:
       - /mnt/nfs-share-tvshows:/tv
     restart: unless-stopped
 
+  bazarr:
+    image: lscr.io/linuxserver/bazarr:latest
+    container_name: bazarr
+    ports:
+      - "6767:6767"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Denver
+    volumes:
+      - ./bazarr:/config
+      - /mnt/nfs-share-movies:/movies
+      - /mnt/nfs-share-tvshows:/tv
+    depends_on:
+      - radarr
+      - sonarr
+    restart: unless-stopped
+
 # ------------------JellyFin ---------------
 
 

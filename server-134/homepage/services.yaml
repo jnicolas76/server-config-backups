@@ -70,6 +70,12 @@
         icon: sonarr.png
         server: local
         container: sonarr
+    - Bazarr:
+        href: http://192.168.1.134:6767
+        description: English and Spanish subtitles
+        icon: bazarr.png
+        server: local
+        container: bazarr
     - Lidarr:
         href: http://192.168.1.134:8686
         description: Music
