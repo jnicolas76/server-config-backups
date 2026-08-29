@@ -12,6 +12,21 @@ This is the sanitized recovery bundle for the home-network AI deployment.
 Open WebUI's persisted `ollama.base_urls` value and its container environment both point to
 `http://192.168.1.232:11434`. RAG/embedding settings were not moved.
 
+## Model tools
+
+Open WebUI exposes the `Current Time, Internet & Home Network` tool connection to models hosted
+on `.232`. Its OpenAPI gateway runs on `.20` and provides:
+
+- Exact current time in `America/Denver` and UTC.
+- Public internet search through Bing's RSS search results.
+- Text extraction from public HTTP/HTTPS pages.
+- The existing allowlisted, read-only home-network diagnostics.
+
+Internet page requests resolve and validate the destination before connecting. Private, loopback,
+link-local, and reserved IP addresses are blocked to prevent the internet reader from becoming a
+route into the LAN. Responses have time and size limits. The bearer token remains only in its
+runtime file and is excluded from this backup.
+
 ## Resource and safety settings
 
 Ollama is configured with one loaded model and one parallel request. Flash Attention and q8 KV
