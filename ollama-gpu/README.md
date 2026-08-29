@@ -48,6 +48,10 @@ Its username is `jnicolas`; the generated password is stored outside the reposit
 `/mnt/c/Data/opencode-232.pass.txt`. The runtime environment file is mode `0600` and is excluded
 from all source-control backups.
 
+The web service starts in `/home/jnicolas/dev-agent-workspace`. Starting it at the home-directory
+root prevents OpenCode's file picker from initializing and leaves the browser without a usable
+project. A `Welcome to Dev Agent` starter session is created in the dedicated workspace.
+
 The 14B model is the strongest practical local tier for this VM. Its approximately 9.7 GB GPU
 footprint fits beside the small NVENC allocation, but initial model loading and long agent turns are
 noticeably slower during active transcoding. Frontier cloud coding models remain materially stronger.

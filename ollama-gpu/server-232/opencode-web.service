@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/jnicolas
+WorkingDirectory=/home/jnicolas/dev-agent-workspace
 Environment=HOME=/home/jnicolas
 Environment=PATH=/home/jnicolas/.opencode/bin:/home/jnicolas/.local/bin:/usr/bin:/bin
 Environment=OPENCODE_SERVER_USERNAME=jnicolas
