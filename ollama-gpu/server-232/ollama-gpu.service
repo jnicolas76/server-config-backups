@@ -1,0 +1,13 @@
+[Unit]
+Description=GPU Ollama inference service (transcode-friendly)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/jnicolas/.local/bin/start-ollama-gpu.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

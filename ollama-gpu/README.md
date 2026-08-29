@@ -1,0 +1,49 @@
+# Ollama GPU Host and Open WebUI
+
+This is the sanitized recovery bundle for the home-network AI deployment.
+
+## Architecture
+
+- `192.168.1.20:8080`: Open WebUI 0.11.1 and the read-only home-network tool gateway.
+- `192.168.1.232:11434`: Ollama 0.33.2 with GTX 1080 Ti acceleration.
+- Models: `qwen3:4b` and `llama3.2:3b`.
+- Transcoding remains on `.232`; Ollama runs with low CPU and I/O priority and one request/model at a time.
+
+Open WebUI's persisted `ollama.base_urls` value and its container environment both point to
+`http://192.168.1.232:11434`. RAG/embedding settings were not moved.
+
+## Resource and safety settings
+
+Ollama is configured with one loaded model and one parallel request. Flash Attention and q8 KV
+cache are enabled. The launcher uses `nice -n 15` and idle-class I/O priority so HandBrake remains
+the priority workload.
+
+VM 100 has a pending Proxmox change from 4 vCPU/4 GiB to 6 vCPU/6 GiB. It deliberately was not
+rebooted while a transcode was active. The change applies at the next normal VM reboot.
+
+## Restore
+
+1. Install the official Ollama Linux bundle under `/home/jnicolas/.local` on `.232`.
+2. Copy `server-232/start-ollama-gpu.sh` to `/home/jnicolas/.local/bin/`.
+3. Copy `server-232/ollama-gpu.service` to `/home/jnicolas/.config/systemd/user/`.
+4. Run `systemctl --user daemon-reload`, then enable and start `ollama-gpu.service`.
+5. Preserve the existing user crontab and append the `@reboot` entry in `server-232/crontab-entry.txt`.
+6. Pull `qwen3:4b` and `llama3.2:3b`.
+7. Point Open WebUI at `http://192.168.1.232:11434` using the updater in `server-20/`.
+
+Before changing Open WebUI, copy `/app/backend/data/webui.db` out of the container and retain the
+old stopped container as a rollback. Do not commit that database: it contains private application data.
+
+## Validation
+
+- `curl http://192.168.1.232:11434/api/tags` lists both models.
+- Open WebUI reports healthy and `GET /api/version` returns 0.11.1.
+- A qwen request completed in about 3.8 seconds during the initial test.
+- `ollama ps` reported 100% GPU offload.
+- HandBrake continued running during installation, model loading, and validation.
+
+## Secrets excluded
+
+This bundle intentionally excludes passwords, API tokens, gateway tokens, SSH keys, Open WebUI
+databases, chat data, model weights, and media. Tokens are read from their runtime files and are not
+embedded in the source.

@@ -1,0 +1,1 @@
+@reboot /home/jnicolas/.local/bin/start-ollama-gpu.sh >> /home/jnicolas/.ollama/ollama-startup.log 2>&1
