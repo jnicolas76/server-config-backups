@@ -442,6 +442,11 @@ def status():
 
 def export_reports(cfg):
     db = connect()
+    for row in db.execute("SELECT path FROM media WHERE status='complete' AND completion_method IS NULL"):
+        video = Path(row["path"]); names = [p.name.lower() for p in video.parent.glob(video.stem + ".*.srt")]
+        method = "whisper" if any(".whisper.srt" in name for name in names) else ("subdl" if any(".subdl.srt" in name for name in names) else "existing")
+        db.execute("UPDATE media SET completion_method=? WHERE path=?", (method, row["path"]))
+    db.commit()
     report_dir = Path(cfg.get("report_dir", STATE / "reports")).expanduser()
     report_dir.mkdir(parents=True, exist_ok=True)
     columns = ["path", "media_type", "status", "completion_method", "completion_detail",

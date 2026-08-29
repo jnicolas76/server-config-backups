@@ -180,6 +180,13 @@ def main():
         row = claim(db)
         if not row:
             break
+        parsed_title, parsed_year = title_year(Path(row["path"]))
+        if not parsed_title or not parsed_year:
+            attempted += 1
+            detail = "skipped: title/year could not be parsed; no API request used"
+            record(db, row, "metadata_unusable", detail, False)
+            print(f"no-request skip: {row['path']} — {detail}", flush=True)
+            continue
         allowed, used = reserve_request(db, limit)
         if not allowed:
             db.execute("UPDATE media SET status='queued',updated_at=? WHERE path=?", (cv.now(), row["path"])); db.commit()
