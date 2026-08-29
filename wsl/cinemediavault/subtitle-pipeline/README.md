@@ -60,7 +60,7 @@ The catalog is processed in two directions. Whisper claims the oldest movie at t
 
 TV remains paused until there are no unfinished movie rows. Whisper then proceeds through TV; SubDL remains movie-only.
 
-SubDL is capped at 1,000 API searches per local calendar day. Every asset is attempted at most once by SubDL per day. A rejected or missing result returns to the Whisper queue, and the daily timer resumes automatically after the budget resets. Its API key is read from `~/.config/cinevault-subtitles/subdl-api-key` and is never stored in the repository or reports.
+SubDL is capped at 2,000 API searches per local calendar day, matching the documented free-tier search limit. The free tier has a separate 50-download daily limit. Every asset is attempted at most once by SubDL per day. A rejected or missing result returns to the Whisper queue, and the daily timer resumes automatically after the budget resets. Its API key is read from `~/.config/cinevault-subtitles/subdl-api-key` and is never stored in the repository or reports.
 
 ## Processing ledgers
 

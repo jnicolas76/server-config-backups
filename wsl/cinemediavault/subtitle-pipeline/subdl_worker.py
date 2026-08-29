@@ -173,7 +173,7 @@ def main():
     cfg = cv.load_config(); db = cv.connect(); cv.CACHE.mkdir(parents=True, exist_ok=True)
     key_path = Path(cfg["subdl_key_file"]).expanduser()
     key = key_path.read_text(encoding="utf-8").strip()
-    limit = int(cfg.get("subdl_daily_request_limit", 1000))
+    limit = int(cfg.get("subdl_daily_request_limit", 2000))
     succeeded = attempted = 0
     cv.notify(cfg, f"**CineVault SubDL:** bottom-up movie lane started with a hard {limit:,}-request daily cap.")
     while True:
