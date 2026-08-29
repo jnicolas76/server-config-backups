@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PATH="/home/jnicolas/.opencode/bin:/home/jnicolas/.local/bin:/usr/bin:/bin"
+project="${1:-$PWD}"
+exec /home/jnicolas/.opencode/bin/opencode "$project" --model ollama/dev-agent:14b

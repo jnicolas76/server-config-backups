@@ -1,0 +1,33 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "ollama/dev-agent:14b",
+  "small_model": "ollama/dev-agent:14b",
+  "enabled_providers": ["ollama"],
+  "provider": {
+    "ollama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Ollama on GPU Server 232",
+      "options": {
+        "baseURL": "http://127.0.0.1:11434/v1",
+        "timeout": 600000,
+        "chunkTimeout": 60000
+      },
+      "models": {
+        "dev-agent:14b": {"name": "Dev Agent 14B", "limit": {"context": 8192, "output": 4096}},
+        "qwen3:4b": {"name": "Qwen 3 4B (Fast Tasks)", "limit": {"context": 8192, "output": 4096}}
+      }
+    }
+  },
+  "permission": {
+    "read": "allow",
+    "glob": "allow",
+    "grep": "allow",
+    "list": "allow",
+    "lsp": "allow",
+    "webfetch": "allow",
+    "websearch": "allow",
+    "edit": "ask",
+    "external_directory": "ask",
+    "bash": {"*": "ask", "pwd": "allow", "ls *": "allow", "rg *": "allow", "git status*": "allow", "git diff*": "allow", "git log*": "allow"}
+  }
+}

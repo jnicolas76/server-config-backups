@@ -27,6 +27,26 @@ link-local, and reserved IP addresses are blocked to prevent the internet reader
 route into the LAN. Responses have time and size limits. The bearer token remains only in its
 runtime file and is excluded from this backup.
 
+## Local development agent
+
+Server `.232` also hosts OpenCode 1.18.25 and a dedicated `dev-agent:14b` model based on Qwen3
+14B Q4_K_M. The agent has an 8K context window and runs fully on the GTX 1080 Ti. The original
+`qwen2.5-coder:14b` model remains installed for pure code-generation tasks.
+
+Launch the terminal agent from a project directory with:
+
+```bash
+/home/jnicolas/.local/bin/dev-agent /path/to/project
+```
+
+Read, search, listing, language-server, and web operations are allowed. File edits, commands that
+are not explicitly read-only, and access outside the selected project require interactive approval.
+The agent is intentionally not exposed as an unauthenticated network service.
+
+The 14B model is the strongest practical local tier for this VM. Its approximately 9.7 GB GPU
+footprint fits beside the small NVENC allocation, but initial model loading and long agent turns are
+noticeably slower during active transcoding. Frontier cloud coding models remain materially stronger.
+
 ## Resource and safety settings
 
 Ollama is configured with one loaded model and one parallel request. Flash Attention and q8 KV
