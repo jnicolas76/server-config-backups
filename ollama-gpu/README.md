@@ -43,6 +43,11 @@ Read, search, listing, language-server, and web operations are allowed. File edi
 are not explicitly read-only, and access outside the selected project require interactive approval.
 The agent is intentionally not exposed as an unauthenticated network service.
 
+The password-protected web interface runs as a user service at `http://192.168.1.232:4096`.
+Its username is `jnicolas`; the generated password is stored outside the repository in
+`/mnt/c/Data/opencode-232.pass.txt`. The runtime environment file is mode `0600` and is excluded
+from all source-control backups.
+
 The 14B model is the strongest practical local tier for this VM. Its approximately 9.7 GB GPU
 footprint fits beside the small NVENC allocation, but initial model loading and long agent turns are
 noticeably slower during active transcoding. Frontier cloud coding models remain materially stronger.
