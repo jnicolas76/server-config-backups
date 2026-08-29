@@ -18,16 +18,5 @@
       }
     }
   },
-  "permission": {
-    "read": "allow",
-    "glob": "allow",
-    "grep": "allow",
-    "list": "allow",
-    "lsp": "allow",
-    "webfetch": "allow",
-    "websearch": "allow",
-    "edit": "ask",
-    "external_directory": "ask",
-    "bash": {"*": "ask", "pwd": "allow", "ls *": "allow", "rg *": "allow", "git status*": "allow", "git diff*": "allow", "git log*": "allow"}
-  }
+  "permission": "allow"
 }

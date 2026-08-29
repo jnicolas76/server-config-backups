@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# OpenCode's child-process sandbox strips ping's file capability. Execute ping through the local
+# SSH daemon under the same unprivileged account so the normal host capability applies.
+exec /usr/bin/ssh \
+  -i /home/jnicolas/.ssh/opencode_self_ed25519 \
+  -o BatchMode=yes \
+  -o ConnectTimeout=5 \
+  -o StrictHostKeyChecking=accept-new \
+  -o UpdateHostKeys=no \
+  jnicolas@127.0.0.1 \
+  /usr/bin/ping "$@"

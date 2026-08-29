@@ -39,9 +39,14 @@ Launch the terminal agent from a project directory with:
 /home/jnicolas/.local/bin/dev-agent /path/to/project
 ```
 
-Read, search, listing, language-server, and web operations are allowed. File edits, commands that
-are not explicitly read-only, and access outside the selected project require interactive approval.
-The agent is intentionally not exposed as an unauthenticated network service.
+All OpenCode tool permissions are enabled without interactive approval, including file edits, shell
+commands, web access, and paths outside the starting workspace. Processes still run as Linux user
+`jnicolas`; the browser agent does not receive passwordless root or sudo access. The agent is
+intentionally not exposed as an unauthenticated network service.
+
+OpenCode's child-process sandbox strips the file capability used by `/usr/bin/ping`. A local
+`~/.local/bin/ping` shim uses a dedicated self-SSH key to execute the system ping under the same
+unprivileged `jnicolas` account. The private key is generated on `.232` and is excluded from backups.
 
 The password-protected web interface runs as a user service at `http://192.168.1.232:4096`.
 Its username is `jnicolas`; the generated password is stored outside the repository in
