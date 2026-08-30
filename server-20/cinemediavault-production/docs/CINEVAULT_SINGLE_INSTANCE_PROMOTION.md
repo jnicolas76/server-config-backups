@@ -69,3 +69,9 @@ CINEVAULT_LEGACY_ENABLED=1 /home/jnicolas/start_everything.sh
 ```
 
 Do not run both applications as normal production services. Make changes only through the canonical port-5000 application so its durable override files remain authoritative.
+
+## Partial HLS self-healing
+
+CineVault validates cached HLS VOD playlists before reusing them. A playlist with `EXT-X-ENDLIST` is accepted only when the sum of its segment durations reaches the source duration within an eight-second/two-segment tolerance. If a restart terminates FFmpeg and leaves a shortened playlist that appears finished, CineVault now removes that stream directory and regenerates it on the next request.
+
+This repair was validated against *I'm Sorry*, Season 1 Episode 4. The interrupted cache ended at 704.7 seconds while the source duration is 1,474.026 seconds; the validator rejected it and the episode-specific stale cache was removed.

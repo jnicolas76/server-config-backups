@@ -6767,6 +6767,53 @@ def hls_segment_count(stream_dir: Path) -> int:
     return len(list(stream_dir.glob("seg_*.ts")))
 
 
+def hls_playlist_duration(playlist: Path) -> float:
+    if not playlist.is_file():
+        return 0.0
+    text = playlist.read_text(encoding="utf-8", errors="ignore")
+    total = 0.0
+    for value in re.findall(r"#EXTINF:([0-9]+(?:\.[0-9]+)?)", text):
+        try:
+            total += float(value)
+        except ValueError:
+            continue
+    return total
+
+
+def source_media_duration(path: Path) -> float:
+    try:
+        result = subprocess.run(
+            [
+                os.environ.get("FFPROBE_BIN") or shutil.which("ffprobe") or "ffprobe",
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        return max(0.0, float(result.stdout.strip()))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0.0
+
+
+def hls_playlist_is_complete(path: Path, playlist: Path) -> bool:
+    if not playlist.is_file():
+        return False
+    text = playlist.read_text(encoding="utf-8", errors="ignore")
+    if "#EXT-X-ENDLIST" not in text:
+        return False
+    playlist_duration = hls_playlist_duration(playlist)
+    media_duration = source_media_duration(path)
+    if media_duration <= 0:
+        return True
+    tolerance = max(8.0, float(HLS_SEGMENT_SECONDS) * 2.0)
+    return playlist_duration >= media_duration - tolerance
+
+
 def wait_for_hls_ready(stream_dir: Path, playlist: Path, process: subprocess.Popen) -> None:
     deadline = time.time() + max(1.0, HLS_START_TIMEOUT)
     target_segments = max(1, HLS_PREBUFFER_SEGMENTS)
@@ -6884,8 +6931,11 @@ def ensure_hls_stream(kind: str, item_id: str, path: Path) -> dict:
         existing = TRANSCODES.get(key)
         if existing:
             process = existing.get("process")
-            if playlist.is_file() or (process and process.poll() is None):
+            if process and process.poll() is None:
                 return existing
+            if hls_playlist_is_complete(path, playlist):
+                return existing
+            TRANSCODES.pop(key, None)
         stream_dir.mkdir(parents=True, exist_ok=True)
         if pid_file.is_file():
             try:
@@ -6905,7 +6955,7 @@ def ensure_hls_stream(kind: str, item_id: str, path: Path) -> dict:
                 return stream
             except (OSError, ValueError):
                 pid_file.unlink(missing_ok=True)
-        if playlist.is_file() and "EXT-X-ENDLIST" in playlist.read_text(encoding="utf-8", errors="ignore"):
+        if hls_playlist_is_complete(path, playlist):
             stream = {
                 "key": key,
                 "dir": stream_dir,
