@@ -1,11 +1,11 @@
 - Media:
     - CineMediaVault:
-        href: http://192.168.1.20:8093
+        href: https://192.168.1.20:5000
         description: Local movie, TV, comics, books, games, and stream status
         icon: /icons/cinemediavault.svg
         widget:
           type: customapi
-          url: http://192.168.1.20:8093/api/homepage/status
+          url: https://192.168.1.20:5000/api/homepage/status
           refreshInterval: 10000
           mappings:
             - field: movies
@@ -90,6 +90,36 @@
         container: qbittorrent
 
 - Tools:
+    - Transcode Status:
+        href: http://192.168.1.232:8765/status
+        description: Dedicated H.265 transcode server
+        icon: mdi-movie-cog
+        widget:
+          type: customapi
+          url: http://192.168.1.232:8765/status
+          refreshInterval: 10000
+          mappings:
+            - field: now
+              label: Now
+              format: text
+            - field: progress_display
+              label: Progress
+              format: text
+            - field: queue_display
+              label: Queues
+              format: text
+            - field: gpu_display
+              label: GPU
+              format: text
+    - Proxmox:
+        href: https://192.168.1.240:8006
+        description: Proxmox virtualization host
+        icon: proxmox.png
+        widget:
+          type: proxmox
+          url: https://192.168.1.240:8006
+          username: root@pam!homepage
+          password: 26b55f08-bae8-4e32-9547-2f77935b88bf
     - Prowlarr:
         href: http://192.168.1.134:9696
         description: Indexers
