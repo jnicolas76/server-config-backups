@@ -118,6 +118,10 @@ MOBILE_DOWNLOAD_LOCK = threading.Lock()
 MEDIA_SCAN_PROCESS = None
 MEDIA_SCAN_LOCK = threading.Lock()
 MEDIA_SCAN_LAST_RESULT = {"running": False}
+UPSTREAM_MOVIE_APP_DIR = Path(os.environ.get("CINEVAULT_UPSTREAM_MOVIE_APP_DIR", "/home/jnicolas/media-download-library")).resolve()
+UPSTREAM_TV_APP_DIR = Path(os.environ.get("CINEVAULT_UPSTREAM_TV_APP_DIR", "/home/jnicolas/tv-download-library")).resolve()
+UPSTREAM_SYNC_INTERVAL_SECONDS = max(15.0, float(os.environ.get("CINEVAULT_UPSTREAM_SYNC_INTERVAL_SECONDS", "30")))
+UPSTREAM_SYNC_DEBOUNCE_SECONDS = max(10.0, float(os.environ.get("CINEVAULT_UPSTREAM_SYNC_DEBOUNCE_SECONDS", "45")))
 HDHR_SCAN_LOCK = threading.Lock()
 HDHR_GUIDE_LOCK = threading.Lock()
 
@@ -866,6 +870,95 @@ def reload_media_state() -> dict:
         "movie_posters": len(movie_app.poster_map),
         "tv_posters": len(tv_app.poster_map),
     }
+
+
+def upstream_media_signature() -> tuple:
+    paths = (
+        UPSTREAM_MOVIE_APP_DIR / "movie-live-index.json",
+        UPSTREAM_MOVIE_APP_DIR / "poster-map.json",
+        UPSTREAM_MOVIE_APP_DIR / "movie-metadata-map.json",
+        UPSTREAM_TV_APP_DIR / "tv-live-index.json",
+        UPSTREAM_TV_APP_DIR / "tv-poster-map.json",
+        UPSTREAM_TV_APP_DIR / "tv-metadata-map.json",
+    )
+    signature = []
+    for path in paths:
+        try:
+            stat = path.stat()
+            signature.append((str(path), stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            signature.append((str(path), 0, 0))
+    return tuple(signature)
+
+
+def copy_file_if_changed(source: Path, destination: Path) -> bool:
+    if not source.is_file():
+        return False
+    try:
+        source_stat = source.stat()
+        destination_stat = destination.stat()
+        if source_stat.st_size == destination_stat.st_size and source_stat.st_mtime_ns <= destination_stat.st_mtime_ns:
+            return False
+    except OSError:
+        pass
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.sync-{os.getpid()}-{threading.get_ident()}")
+    shutil.copy2(source, temporary)
+    temporary.replace(destination)
+    return True
+
+
+def sync_poster_directory(source: Path, destination: Path) -> int:
+    if not source.is_dir():
+        return 0
+    copied = 0
+    for source_file in source.rglob("*"):
+        if not source_file.is_file():
+            continue
+        relative = source_file.relative_to(source)
+        if copy_file_if_changed(source_file, destination / relative):
+            copied += 1
+    return copied
+
+
+def sync_upstream_media_state() -> dict:
+    file_pairs = (
+        (UPSTREAM_MOVIE_APP_DIR / "movie-live-index.json", movie_app.LIVE_CACHE),
+        (UPSTREAM_MOVIE_APP_DIR / "poster-map.json", movie_app.POSTER_MAP),
+        (UPSTREAM_MOVIE_APP_DIR / "movie-metadata-map.json", movie_app.METADATA_MAP),
+        (UPSTREAM_TV_APP_DIR / "tv-live-index.json", tv_app.LIVE_CACHE),
+        (UPSTREAM_TV_APP_DIR / "tv-poster-map.json", tv_app.POSTER_MAP),
+        (UPSTREAM_TV_APP_DIR / "tv-metadata-map.json", tv_app.METADATA_MAP),
+    )
+    changed_files = sum(1 for source, destination in file_pairs if copy_file_if_changed(source, destination))
+    movie_posters = sync_poster_directory(UPSTREAM_MOVIE_APP_DIR / "posters", movie_app.POSTER_DIR)
+    tv_posters = sync_poster_directory(UPSTREAM_TV_APP_DIR / "posters", tv_app.POSTER_DIR)
+    state = reload_media_state()
+    state.update({"changed_files": changed_files, "movie_posters_copied": movie_posters, "tv_posters_copied": tv_posters})
+    return state
+
+
+def start_upstream_media_sync_thread() -> None:
+    def worker() -> None:
+        observed = ()
+        applied = ()
+        stable_since = 0.0
+        while True:
+            try:
+                signature = upstream_media_signature()
+                now = time.monotonic()
+                if signature != observed:
+                    observed = signature
+                    stable_since = now
+                if signature != applied and now - stable_since >= UPSTREAM_SYNC_DEBOUNCE_SECONDS:
+                    result = sync_upstream_media_state()
+                    applied = signature
+                    print(f"Lab media sync complete: {json.dumps(result, sort_keys=True)}", flush=True)
+            except Exception as exc:
+                print(f"Lab media sync failed: {exc}", flush=True)
+            time.sleep(UPSTREAM_SYNC_INTERVAL_SECONDS)
+
+    threading.Thread(target=worker, daemon=True, name="lab-upstream-media-sync").start()
 
 
 def watch_full_scan(process, out_path: Path, err_path: Path) -> None:
@@ -7027,6 +7120,7 @@ def main():
     tv_app.tv_index.refresh_background()
     start_hls_cleanup_thread()
     start_hdhr_guide_thread()
+    start_upstream_media_sync_thread()
 
     print(f"Loaded {len(movie_app.movie_index.items)} movies", flush=True)
     print(f"Loaded {len(tv_app.tv_index.shows)} shows and {len(tv_app.tv_index.episode_by_id)} episodes", flush=True)
@@ -7034,6 +7128,10 @@ def main():
     print(f"Migrated {migrated_movie_states} legacy movie state key(s) to stable identities", flush=True)
     print(
         f"HLS cache cleanup: {HLS_CACHE_DIR} older than {HLS_CACHE_MAX_AGE_HOURS:g} hour(s), every {HLS_CLEANUP_INTERVAL_MINUTES:g} minute(s)",
+        flush=True,
+    )
+    print(
+        f"Lab media sync: production caches every {UPSTREAM_SYNC_INTERVAL_SECONDS:g}s after {UPSTREAM_SYNC_DEBOUNCE_SECONDS:g}s stable",
         flush=True,
     )
     tls_cert = os.environ.get("CINEVAULT_TLS_CERT", "")
