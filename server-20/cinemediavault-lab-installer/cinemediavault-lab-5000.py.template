@@ -3,14 +3,14 @@ import argparse
 import base64
 import concurrent.futures
 import datetime
+import email
+import email.policy
 import gzip
-import warnings
-warnings.filterwarnings("ignore", category=DeprecationWarning, module="cgi")
-import cgi
 import hashlib
 import hmac
 import html
 import importlib.util
+import io
 import json
 import math
 import mimetypes
@@ -27,10 +27,12 @@ import sys
 import threading
 import time
 import urllib.parse
+from cinevault_video_lists import VideoListsMixin
 import urllib.error
 import urllib.request
 import zipfile
 import xml.etree.ElementTree as ET
+import music_module
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -60,6 +62,7 @@ MODULE_GAME_ROOTS = {
     "atari7800": (Path("/home/jnicolas/software/ATARI7800/roms"), {".a78", ".bin", ".zip", ".7z"}),
 }
 HLS_CACHE_DIR = Path(os.environ.get("HLS_CACHE_DIR", "/tmp/cinevault-hls")).resolve()
+SUBTITLE_CACHE_DIR = Path(os.environ.get("CINEVAULT_SUBTITLE_CACHE_DIR", "/tmp/cinemediavault-lab-subtitles")).resolve()
 MEDIA_REFRESH_SCRIPT = Path(os.environ.get("MEDIA_REFRESH_SCRIPT", "/home/jnicolas/media-library-refresh.sh")).resolve()
 SCAN_PROGRESS_FILE = Path(os.environ.get("SCAN_PROGRESS_FILE", "/home/jnicolas/cinemediavault-lab/.cinemediavault-scan-progress-5000.json")).resolve()
 CINEVAULT_DB = Path(os.environ.get("CINEVAULT_DB", "/home/jnicolas/cinevault-data/cinevault.db")).resolve()
@@ -70,6 +73,9 @@ CINEVAULT_SESSION_DAYS = int(os.environ.get("CINEVAULT_SESSION_DAYS", "30"))
 PLAYBACK_MODE_FILE = Path(os.environ.get("CINEVAULT_PLAYBACK_MODE_FILE", str(CINEVAULT_DB.parent / "playback-mode.txt"))).resolve()
 MODULE_CONFIG_FILE = Path(os.environ.get("CINEVAULT_MODULE_CONFIG_FILE", str(CINEVAULT_DB.parent / "modules.json"))).resolve()
 MODULE_LOGO_DIR = Path(os.environ.get("CINEVAULT_MODULE_LOGO_DIR", str(CINEVAULT_DB.parent / "module-logos"))).resolve()
+TRANSCODE_CONTROL_DB = Path(os.environ.get("TRANSCODE_CONTROL_DB", "/home/jnicolas/transcode-control/data/transcode-control.db")).resolve()
+POSTER_ROTATION_SECONDS = max(60, int(os.environ.get("CINEVAULT_POSTER_ROTATION_SECONDS", "21600")))
+POSTER_ROTATION_CACHE_FILE = Path(os.environ.get("CINEVAULT_POSTER_ROTATION_CACHE_FILE", str(CINEVAULT_DB.parent / "poster-rotation-cache.json"))).resolve()
 HLS_START_TIMEOUT = float(os.environ.get("HLS_START_TIMEOUT", "24"))
 HLS_SEGMENT_WAIT_TIMEOUT = float(os.environ.get("HLS_SEGMENT_WAIT_TIMEOUT", "120"))
 HLS_PREBUFFER_SEGMENTS = int(os.environ.get("HLS_PREBUFFER_SEGMENTS", "3"))
@@ -107,6 +113,7 @@ DIRECT_BANDWIDTH_SAMPLES = deque(maxlen=50000)
 MOBILE_DOWNLOAD_JOBS: dict[str, dict] = {}
 MEDIA_DURATION_CACHE: dict[str, float] = {}
 MEDIA_CODEC_CACHE: dict[str, tuple[float, int, dict]] = {}
+SUBTITLE_DISCOVERY_CACHE: dict[str, tuple[float, int, int, list[dict]]] = {}
 TRANSCODE_LOCK = threading.Lock()
 DIRECT_STREAM_LOCK = threading.Lock()
 HLS_VIEWER_LOCK = threading.Lock()
@@ -114,8 +121,13 @@ MOBILE_DOWNLOAD_LOCK = threading.Lock()
 MEDIA_SCAN_PROCESS = None
 MEDIA_SCAN_LOCK = threading.Lock()
 MEDIA_SCAN_LAST_RESULT = {"running": False}
+UPSTREAM_MOVIE_APP_DIR = Path(os.environ.get("CINEVAULT_UPSTREAM_MOVIE_APP_DIR", "/home/jnicolas/media-download-library")).resolve()
+UPSTREAM_TV_APP_DIR = Path(os.environ.get("CINEVAULT_UPSTREAM_TV_APP_DIR", "/home/jnicolas/tv-download-library")).resolve()
+UPSTREAM_SYNC_INTERVAL_SECONDS = max(15.0, float(os.environ.get("CINEVAULT_UPSTREAM_SYNC_INTERVAL_SECONDS", "30")))
+UPSTREAM_SYNC_DEBOUNCE_SECONDS = max(10.0, float(os.environ.get("CINEVAULT_UPSTREAM_SYNC_DEBOUNCE_SECONDS", "45")))
 HDHR_SCAN_LOCK = threading.Lock()
 HDHR_GUIDE_LOCK = threading.Lock()
+POSTER_ROTATION_LOCK = threading.Lock()
 
 
 def save_scan_progress(payload: dict) -> None:
@@ -135,6 +147,7 @@ def load_scan_progress() -> dict:
 
 
 DEFAULT_MODULES = [
+    {"id": "whisper", "name": "Whisper Subtitles", "logo": "CC", "enabled": False, "protocol": "http", "port": 0, "url": "", "start_script": "WSL control agent", "pid_file": "", "stop_pattern": "", "remote_control": "whisper"},
     {"id": "comics", "name": "Comics", "logo": "COMICS", "enabled": True, "protocol": "http", "port": 8110, "url": "", "start_script": "/media/jnicolas/Expansion/comic-library/start_library.sh", "pid_file": "/media/jnicolas/Expansion/comic-library/.server.pid", "stop_pattern": "python3 -m http.server 8110"},
     {"id": "bookvault", "name": "BookVault", "logo": "BOOKS", "enabled": True, "protocol": "http", "port": 8112, "url": "", "start_script": "/home/jnicolas/start_bookvault_8112.sh", "pid_file": "/home/jnicolas/bookvault-8112.pid", "stop_pattern": "bookvault_server.py"},
     {"id": "nes", "name": "NES", "logo": "NES", "enabled": True, "protocol": "https", "port": 8092, "url": "", "start_script": "/home/jnicolas/software/NES/start.sh", "pid_file": "/home/jnicolas/software/NES/.server.pid", "stop_pattern": "/home/jnicolas/software/NES/scripts/serve.py"},
@@ -223,6 +236,8 @@ def port_listening(port: int) -> bool:
 
 
 def module_running(module: dict) -> bool:
+    if module.get("remote_control") == "whisper":
+        return whisper_remote_status().get("running", False)
     pid_file = Path(str(module.get("pid_file") or ""))
     try:
         if pid_file.is_file():
@@ -235,6 +250,8 @@ def module_running(module: dict) -> bool:
 
 
 def start_module(module: dict) -> tuple[bool, str]:
+    if module.get("remote_control") == "whisper":
+        return queue_whisper_command("whisper_start")
     script = Path(str(module.get("start_script") or ""))
     if not script.is_file():
         return False, f"Start script not found: {script}"
@@ -249,6 +266,8 @@ def start_module(module: dict) -> tuple[bool, str]:
 
 
 def stop_module(module: dict) -> tuple[bool, str]:
+    if module.get("remote_control") == "whisper":
+        return queue_whisper_command("whisper_stop")
     stopped = False
     pid_file = Path(str(module.get("pid_file") or ""))
     try:
@@ -277,6 +296,99 @@ def stop_module(module: dict) -> tuple[bool, str]:
         except Exception:
             pass
     return stopped, f"Stopped {module.get('name')}." if stopped else f"No running process found for {module.get('name')}."
+
+
+def whisper_remote_status() -> dict:
+    """Read the latest WSL-reported Whisper state from the local control DB."""
+    try:
+        uri = f"file:{TRANSCODE_CONTROL_DB}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=2)
+        try:
+            row = conn.execute("SELECT created_at,payload FROM snapshots ORDER BY id DESC LIMIT 1").fetchone()
+        finally:
+            conn.close()
+        if not row:
+            return {"running": False, "available": False, "detail": "No WSL status received"}
+        payload = json.loads(row[1])
+        state = dict(payload.get("whisper") or {})
+        state["available"] = bool(state)
+        state["reported_at"] = row[0]
+        return state
+    except Exception as exc:
+        return {"running": False, "available": False, "detail": str(exc)}
+
+
+def queue_whisper_command(action: str) -> tuple[bool, str]:
+    """Queue one whitelisted operation for the authenticated WSL polling agent."""
+    if action not in {"whisper_start", "whisper_stop"}:
+        return False, "Unsupported Whisper action."
+    try:
+        conn = sqlite3.connect(TRANSCODE_CONTROL_DB, timeout=5)
+        try:
+            pending = conn.execute(
+                "SELECT id FROM commands WHERE action=? AND status IN ('pending','sent') ORDER BY id DESC LIMIT 1",
+                (action,),
+            ).fetchone()
+            if not pending:
+                conn.execute(
+                    "INSERT INTO commands(created_at,action,payload,status) VALUES(?,?,?,'pending')",
+                    (datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"), action, "{}"),
+                )
+                conn.commit()
+        finally:
+            conn.close()
+        verb = "start" if action.endswith("start") else "stop"
+        return True, f"Whisper {verb} requested. Status updates automatically within about 10 seconds."
+    except Exception as exc:
+        return False, f"Could not contact the WSL control queue: {exc}"
+
+
+class MultipartField:
+    """Minimal stand-in for the pieces of cgi.FieldStorage this app used.
+
+    cgi.FieldStorage is removed in Python 3.13 (PEP 594). The only user of
+    it in this file was the admin module-logo upload, which only ever needs
+    one plain text field ("module_id") and one file field ("logo_file").
+    This class plus parse_multipart_form() replace that narrow usage with
+    the stdlib email package, which stays available in 3.13+.
+    """
+
+    def __init__(self, filename: str, data: bytes):
+        self.filename = filename
+        self.data = data
+
+    @property
+    def file(self) -> "io.BytesIO":
+        return io.BytesIO(self.data)
+
+
+def parse_multipart_form(content_type: str, body: bytes) -> dict:
+    """Parse a multipart/form-data body without the removed cgi module.
+
+    Returns a dict mapping field name -> str (text fields) or
+    MultipartField (file fields), matching the subset of cgi.FieldStorage
+    behavior this app relies on.
+    """
+    match = re.search(r'boundary="?([^";]+)"?', content_type or "", re.IGNORECASE)
+    if not match:
+        return {}
+    header_bytes = f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8")
+    message = email.message_from_bytes(header_bytes + body, policy=email.policy.compat32)
+    fields: dict = {}
+    if not message.is_multipart():
+        return fields
+    for part in message.get_payload():
+        name = part.get_param("name", header="Content-Disposition")
+        if not name:
+            continue
+        filename = part.get_filename()
+        payload = part.get_payload(decode=True) or b""
+        if filename:
+            fields[name] = MultipartField(filename=filename, data=payload)
+        else:
+            charset = part.get_content_charset() or "utf-8"
+            fields[name] = payload.decode(charset, errors="replace")
+    return fields
 
 
 def format_seconds(seconds: float) -> str:
@@ -401,6 +513,8 @@ CREATE TABLE IF NOT EXISTS user_video_wall (
   media_type TEXT NOT NULL CHECK(media_type IN ('movie', 'tv', 'tuner')),
   media_id INTEGER NOT NULL,
   media_path TEXT NOT NULL DEFAULT '',
+  position_seconds REAL NOT NULL DEFAULT 0,
+  duration_seconds REAL NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL,
   PRIMARY KEY(user_id, slot)
 );
@@ -429,6 +543,27 @@ CREATE TABLE IF NOT EXISTS hdhr_channels (
   UNIQUE(device_id, guide_number)
 );
 CREATE INDEX IF NOT EXISTS idx_hdhr_channels_device_number ON hdhr_channels(device_id, guide_number);
+CREATE TABLE IF NOT EXISTS user_video_queue (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  media_key TEXT NOT NULL, media_type TEXT NOT NULL, media_id INTEGER NOT NULL,
+  title TEXT NOT NULL, subtitle TEXT, poster TEXT, href TEXT NOT NULL,
+  position INTEGER NOT NULL, created_at TEXT NOT NULL,
+  PRIMARY KEY(user_id, media_key)
+);
+CREATE INDEX IF NOT EXISTS idx_video_queue_order ON user_video_queue(user_id, position);
+CREATE TABLE IF NOT EXISTS user_video_playlists (
+  id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  UNIQUE(user_id, name)
+);
+CREATE TABLE IF NOT EXISTS user_video_playlist_items (
+  playlist_id INTEGER NOT NULL REFERENCES user_video_playlists(id) ON DELETE CASCADE,
+  media_key TEXT NOT NULL, media_type TEXT NOT NULL, media_id INTEGER NOT NULL,
+  title TEXT NOT NULL, subtitle TEXT, poster TEXT, href TEXT NOT NULL,
+  position INTEGER NOT NULL, created_at TEXT NOT NULL,
+  PRIMARY KEY(playlist_id, media_key)
+);
+CREATE INDEX IF NOT EXISTS idx_video_playlist_order ON user_video_playlist_items(playlist_id, position);
 """
 
 
@@ -475,6 +610,10 @@ def ensure_auth_schema() -> None:
         wall_columns = {row["name"] for row in conn.execute("PRAGMA table_info(user_video_wall)").fetchall()}
         if "media_path" not in wall_columns:
             conn.execute("ALTER TABLE user_video_wall ADD COLUMN media_path TEXT NOT NULL DEFAULT ''")
+        if "position_seconds" not in wall_columns:
+            conn.execute("ALTER TABLE user_video_wall ADD COLUMN position_seconds REAL NOT NULL DEFAULT 0")
+        if "duration_seconds" not in wall_columns:
+            conn.execute("ALTER TABLE user_video_wall ADD COLUMN duration_seconds REAL NOT NULL DEFAULT 0")
         wall_sql_row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='user_video_wall'").fetchone()
         if wall_sql_row and "'tuner'" not in (wall_sql_row["sql"] or ""):
             conn.execute("ALTER TABLE user_video_wall RENAME TO user_video_wall_legacy")
@@ -482,10 +621,12 @@ def ensure_auth_schema() -> None:
               user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
               slot INTEGER NOT NULL CHECK(slot BETWEEN 1 AND 4),
               media_type TEXT NOT NULL CHECK(media_type IN ('movie','tv','tuner')),
-              media_id INTEGER NOT NULL, media_path TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL,
+              media_id INTEGER NOT NULL, media_path TEXT NOT NULL DEFAULT '',
+              position_seconds REAL NOT NULL DEFAULT 0, duration_seconds REAL NOT NULL DEFAULT 0,
+              updated_at TEXT NOT NULL,
               PRIMARY KEY(user_id,slot))""")
-            conn.execute("""INSERT INTO user_video_wall(user_id,slot,media_type,media_id,media_path,updated_at)
-              SELECT user_id,slot,media_type,media_id,media_path,updated_at FROM user_video_wall_legacy""")
+            conn.execute("""INSERT INTO user_video_wall(user_id,slot,media_type,media_id,media_path,position_seconds,duration_seconds,updated_at)
+              SELECT user_id,slot,media_type,media_id,media_path,position_seconds,duration_seconds,updated_at FROM user_video_wall_legacy""")
             conn.execute("DROP TABLE user_video_wall_legacy")
         now = auth_now()
         admin_hash = password_hash("admin1")
@@ -832,6 +973,7 @@ def reload_media_state() -> dict:
     movie_app.load_metadata_map()
     tv_app.load_poster_map()
     tv_app.load_metadata_map()
+    migrate_legacy_movie_state_keys()
     rebuild_actor_index()
     return {
         "movies": len(movie_app.movie_index.items),
@@ -840,6 +982,95 @@ def reload_media_state() -> dict:
         "movie_posters": len(movie_app.poster_map),
         "tv_posters": len(tv_app.poster_map),
     }
+
+
+def upstream_media_signature() -> tuple:
+    paths = (
+        UPSTREAM_MOVIE_APP_DIR / "movie-live-index.json",
+        UPSTREAM_MOVIE_APP_DIR / "poster-map.json",
+        UPSTREAM_MOVIE_APP_DIR / "movie-metadata-map.json",
+        UPSTREAM_TV_APP_DIR / "tv-live-index.json",
+        UPSTREAM_TV_APP_DIR / "tv-poster-map.json",
+        UPSTREAM_TV_APP_DIR / "tv-metadata-map.json",
+    )
+    signature = []
+    for path in paths:
+        try:
+            stat = path.stat()
+            signature.append((str(path), stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            signature.append((str(path), 0, 0))
+    return tuple(signature)
+
+
+def copy_file_if_changed(source: Path, destination: Path) -> bool:
+    if not source.is_file():
+        return False
+    try:
+        source_stat = source.stat()
+        destination_stat = destination.stat()
+        if source_stat.st_size == destination_stat.st_size and source_stat.st_mtime_ns <= destination_stat.st_mtime_ns:
+            return False
+    except OSError:
+        pass
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.sync-{os.getpid()}-{threading.get_ident()}")
+    shutil.copy2(source, temporary)
+    temporary.replace(destination)
+    return True
+
+
+def sync_poster_directory(source: Path, destination: Path) -> int:
+    if not source.is_dir():
+        return 0
+    copied = 0
+    for source_file in source.rglob("*"):
+        if not source_file.is_file():
+            continue
+        relative = source_file.relative_to(source)
+        if copy_file_if_changed(source_file, destination / relative):
+            copied += 1
+    return copied
+
+
+def sync_upstream_media_state() -> dict:
+    file_pairs = (
+        (UPSTREAM_MOVIE_APP_DIR / "movie-live-index.json", movie_app.LIVE_CACHE),
+        (UPSTREAM_MOVIE_APP_DIR / "poster-map.json", movie_app.POSTER_MAP),
+        (UPSTREAM_MOVIE_APP_DIR / "movie-metadata-map.json", movie_app.METADATA_MAP),
+        (UPSTREAM_TV_APP_DIR / "tv-live-index.json", tv_app.LIVE_CACHE),
+        (UPSTREAM_TV_APP_DIR / "tv-poster-map.json", tv_app.POSTER_MAP),
+        (UPSTREAM_TV_APP_DIR / "tv-metadata-map.json", tv_app.METADATA_MAP),
+    )
+    changed_files = sum(1 for source, destination in file_pairs if copy_file_if_changed(source, destination))
+    movie_posters = sync_poster_directory(UPSTREAM_MOVIE_APP_DIR / "posters", movie_app.POSTER_DIR)
+    tv_posters = sync_poster_directory(UPSTREAM_TV_APP_DIR / "posters", tv_app.POSTER_DIR)
+    state = reload_media_state()
+    state.update({"changed_files": changed_files, "movie_posters_copied": movie_posters, "tv_posters_copied": tv_posters})
+    return state
+
+
+def start_upstream_media_sync_thread() -> None:
+    def worker() -> None:
+        observed = ()
+        applied = ()
+        stable_since = 0.0
+        while True:
+            try:
+                signature = upstream_media_signature()
+                now = time.monotonic()
+                if signature != observed:
+                    observed = signature
+                    stable_since = now
+                if signature != applied and now - stable_since >= UPSTREAM_SYNC_DEBOUNCE_SECONDS:
+                    result = sync_upstream_media_state()
+                    applied = signature
+                    print(f"Lab media sync complete: {json.dumps(result, sort_keys=True)}", flush=True)
+            except Exception as exc:
+                print(f"Lab media sync failed: {exc}", flush=True)
+            time.sleep(UPSTREAM_SYNC_INTERVAL_SECONDS)
+
+    threading.Thread(target=worker, daemon=True, name="lab-upstream-media-sync").start()
 
 
 def watch_full_scan(process, out_path: Path, err_path: Path) -> None:
@@ -961,11 +1192,11 @@ LANDING_PAGE = """<!doctype html>
     .nav { position:relative; z-index:4; display:grid; grid-template-columns:auto minmax(220px,420px) auto; align-items:center; gap:28px; padding:22px 30px; }
     .brand-wrap { min-width:max-content; }
     .brand { font-size:30px; font-weight:900; letter-spacing:0; line-height:1; }
-    .cmv-logo { display:inline-flex; align-items:center; gap:.34em; color:#fff; text-decoration:none; text-transform:uppercase; letter-spacing:0; line-height:.88; }
-    .cmv-left { display:grid; gap:.08em; align-items:center; }
-    .cmv-cine,.cmv-media { font-size:.54em; font-weight:950; letter-spacing:.03em; line-height:.86; }
+    .cmv-logo { display:inline-flex; align-items:center; gap:.34em; color:#fff; text-decoration:none; letter-spacing:0; line-height:.88; }
+    .cmv-left { display:inline-flex; gap:0; align-items:center; white-space:nowrap; }
+    .cmv-cine,.cmv-media { font-family:"Segoe Script","Brush Script MT","URW Chancery L",cursive; font-size:1.02em; font-weight:700; letter-spacing:-.055em; line-height:1; }
     .cmv-divider { width:.055em; height:1.16em; background:rgba(255,255,255,.72); }
-    .cmv-vault { color:var(--accent); font-size:.98em; font-weight:950; letter-spacing:.02em; }
+    .cmv-vault { color:var(--accent); font-size:.98em; font-weight:950; letter-spacing:.02em; text-transform:uppercase; }
     .cmv-mark { width:1.2em; height:1.2em; color:var(--accent); flex:0 0 auto; }
     .brand-credit { margin-top:4px; color:rgba(238,244,255,.72); font-size:11px; font-weight:700; }
     .search { width:100%; height:38px; border-radius:999px; border:1px solid var(--line); background:rgba(255,255,255,.12); color:#fff; padding:0 16px; font-size:15px; }
@@ -1056,6 +1287,7 @@ HOME_PAGE = """<!doctype html>
   <style>
     :root { color-scheme:dark; --bg:#0b0b0d; --panel:#171719; --text:#f7f7f8; --muted:#a7a7ad; --gold:#f5b73f; --line:rgba(255,255,255,.10); }
     * { box-sizing:border-box; }
+    html, body { width:100%; max-width:100%; overflow-x:hidden; }
     body { margin:0; min-height:100vh; background:var(--bg); color:var(--text); font-family:Arial, Helvetica, sans-serif; padding-bottom:0; position:relative; }
     body::before { content:""; position:fixed; inset:-70px; z-index:-2; background:radial-gradient(circle at 18% 10%,rgba(88,166,255,.22),transparent 28%),linear-gradient(135deg,#050506,#111217); }
     .home-backdrop { position:fixed; inset:-90px -120px auto -120px; height:calc(100vh + 190px); z-index:0; display:grid; grid-template-columns:repeat(15, minmax(58px, 1fr)); gap:10px; transform:rotate(-10deg) translateY(-34px); opacity:.42; pointer-events:none; overflow:hidden; filter:saturate(1.12) contrast(1.04); }
@@ -1064,15 +1296,15 @@ HOME_PAGE = """<!doctype html>
     .home-backdrop img:nth-child(3n) { transform:translateY(34px); }
     .home-backdrop img:nth-child(4n) { transform:translateY(-22px); }
     .home-backdrop img:nth-child(5n) { transform:translateY(56px); }
-    header { position:sticky; top:0; z-index:5; display:flex; align-items:center; justify-content:space-between; gap:18px; padding:22px 24px 14px; background:linear-gradient(180deg,#050506 0%,rgba(5,5,6,.92) 74%,rgba(5,5,6,0) 100%); }
+    header { position:sticky; top:0; z-index:5; width:100%; max-width:100vw; min-width:0; display:flex; align-items:center; justify-content:space-between; gap:18px; padding:22px 24px 14px; background:linear-gradient(180deg,#050506 0%,rgba(5,5,6,.92) 74%,rgba(5,5,6,0) 100%); }
     .brand { font-size:34px; font-weight:900; letter-spacing:0; }
-    .cmv-logo { display:inline-flex; align-items:center; gap:.30em; color:#fff; text-decoration:none; text-transform:uppercase; line-height:.88; white-space:nowrap; }
-    .cmv-left { display:grid; gap:.08em; align-items:center; }
-    .cmv-cine,.cmv-media { font-size:.54em; font-weight:950; letter-spacing:.03em; line-height:.86; }
+    .cmv-logo { display:inline-flex; align-items:center; gap:.30em; color:#fff; text-decoration:none; line-height:.88; white-space:nowrap; }
+    .cmv-left { display:inline-flex; gap:0; align-items:center; }
+    .cmv-cine,.cmv-media { font-family:"Segoe Script","Brush Script MT","URW Chancery L",cursive; font-size:1.02em; font-weight:700; letter-spacing:-.055em; line-height:1; }
     .cmv-divider { width:.052em; height:1.12em; background:rgba(255,255,255,.66); }
-    .cmv-vault { color:var(--gold); font-size:.95em; font-weight:950; letter-spacing:.02em; }
+    .cmv-vault { color:var(--gold); font-size:.95em; font-weight:950; letter-spacing:.02em; text-transform:uppercase; }
     .cmv-mark { width:1.08em; height:1.08em; color:var(--gold); flex:0 0 auto; }
-    .top-actions { display:flex; align-items:center; gap:18px; color:#fff; }
+    .top-actions { min-width:0; display:flex; align-items:center; gap:18px; color:#fff; }
     .home-search-panel { display:none; position:sticky; top:82px; z-index:4; padding:0 24px 14px; background:linear-gradient(180deg,rgba(5,5,6,.92),rgba(5,5,6,0)); }
     .home-search-panel.open { display:block; }
     .home-search-panel input { width:min(720px,100%); height:44px; border-radius:14px; border:1px solid rgba(88,166,255,.62); background:#20252d; color:#fff; padding:0 16px; font-size:17px; outline:none; box-shadow:0 0 0 3px rgba(47,157,255,.22); }
@@ -1114,7 +1346,7 @@ HOME_PAGE = """<!doctype html>
     .account-menu.open { display:grid; gap:4px; }
     .account-menu a { color:#fff; text-decoration:none; border-radius:10px; padding:10px 11px; font-size:13px; font-weight:850; }
     .account-menu a:hover { background:rgba(255,255,255,.09); }
-    main { position:relative; z-index:1; padding:0 0 18px; overflow:hidden; }
+    main { position:relative; z-index:1; width:100%; max-width:100vw; min-width:0; padding:0 0 18px; overflow:hidden; }
     .tabs { display:flex; gap:10px; padding:0 24px 22px; overflow-x:auto; scrollbar-width:none; }
     .tabs::-webkit-scrollbar { display:none; }
     .tab { flex:0 0 auto; display:inline-flex; align-items:center; justify-content:center; min-height:42px; padding:0 17px; border-radius:14px; border:1px solid rgba(255,255,255,.18); color:#eee; text-decoration:none; font-size:17px; font-weight:800; background:rgba(255,255,255,.06); }
@@ -1159,7 +1391,7 @@ HOME_PAGE = """<!doctype html>
     .bottom-nav span { font-size:24px; line-height:1; }
     .bottom-nav .library-svg { width:24px; height:24px; display:block; }
     .bottom-nav .library-svg svg { width:24px; height:24px; display:block; }
-    @media (hover: hover), (min-width: 900px) {
+    @media (min-width: 900px) and (hover: hover) and (pointer: fine) {
       body { padding-bottom:0; }
       .bottom-nav { display:none; }
       header { gap:12px; padding:16px 18px 10px; }
@@ -1203,7 +1435,7 @@ HOME_PAGE = """<!doctype html>
       header { padding:22px 24px 12px; }
       .brand { font-size:23px; }
       .cmv-mark { width:.80em; height:.80em; }
-      .cmv-media { letter-spacing:.03em; }
+      .cmv-media { letter-spacing:-.055em; }
       .top-actions { gap:12px; }
       .playback-toggle { min-height:30px; min-width:54px; padding:0 8px; font-size:10px; }
       .home-search-panel { top:68px; padding:0 24px 12px; }
@@ -1214,6 +1446,16 @@ HOME_PAGE = """<!doctype html>
       h2 { font-size:25px; }
       .card { flex-basis:138px; }
       .library { flex-basis:274px; }
+    }
+    @media (max-width: 700px) {
+      header { flex-wrap:wrap; align-items:center; gap:10px; padding:18px 18px 10px; }
+      header .brand { flex:1 1 100%; min-width:0; }
+      .top-actions { flex:1 1 100%; width:100%; min-width:0; gap:7px; justify-content:flex-start; }
+      .scan-button,.home-search-button { min-height:34px; padding:0 11px; font-size:12px; flex:0 0 auto; }
+      .playback-toggle { flex:0 0 auto; }
+      .cast-button { margin-left:auto; flex:0 0 32px; }
+      .account-wrap,.top-actions > .avatar { flex:0 0 auto; }
+      .home-search-panel { top:104px; padding-left:18px; padding-right:18px; }
     }
   </style>
 </head>
@@ -1226,7 +1468,7 @@ HOME_PAGE = """<!doctype html>
   <div class="scan-progress" id="scanProgress"><div class="scan-progress-row"><span id="scanProgressMessage">Preparing scan</span><strong id="scanProgressPercent">0%</strong></div><div class="scan-progress-track"><div class="scan-progress-fill" id="scanProgressFill"></div></div></div>
   <div class="home-search-panel" id="homeSearchPanel"><input id="homeSearch" type="search" placeholder="Search movies, shows, actors, or genres"></div>
   <main>
-    <nav class="tabs"><a class="tab active" href="/">Home</a><a class="tab" href="/movies">Movies</a><a class="tab" href="/tv">TV Shows</a><a class="tab" href="/live-tv">Live TV</a><a class="tab" href="/wall">Video Wall</a>{{MODULE_TABS}}</nav>
+    <nav class="tabs"><a class="tab active" href="/">Home</a><a class="tab" href="/movies">Movies</a><a class="tab" href="/tv">TV Shows</a><a class="tab" href="/music">Music</a><a class="tab" href="/video-lists">My Lists</a><a class="tab" href="/live-tv">Live TV</a><a class="tab" href="/wall">Video Wall</a>{{MODULE_TABS}}</nav>
     <section class="section" id="continueSection">
       <div class="section-head"><div><h2>Continue Watching</h2></div></div>
       <div class="rail" id="continueRail"></div>
@@ -1236,6 +1478,7 @@ HOME_PAGE = """<!doctype html>
       <div class="libraries">
         <a class="library" href="/movies"><div class="library-icon"><span class="library-svg film-reel" aria-hidden="true"><svg viewBox="0 0 32 32"><circle cx="16" cy="16" r="11" fill="none" stroke="currentColor" stroke-width="2.4"/><circle cx="16" cy="16" r="2.2" fill="currentColor"/><circle cx="16" cy="8.7" r="2.3" fill="currentColor"/><circle cx="23.3" cy="16" r="2.3" fill="currentColor"/><circle cx="16" cy="23.3" r="2.3" fill="currentColor"/><circle cx="8.7" cy="16" r="2.3" fill="currentColor"/><path d="M25.5 23.5h4.2" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></span></div><div><div class="library-title">Movies</div><div class="library-sub">{{SERVER_NAME}}</div></div></a>
         <a class="library" href="/tv"><div class="library-icon"><span class="library-svg tv-set" aria-hidden="true"><svg viewBox="0 0 32 32"><rect x="5" y="8" width="22" height="15" rx="2.2" fill="none" stroke="currentColor" stroke-width="2.4"/><path d="M12 27h8M16 23v4M11 4l5 4 5-4" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></span></div><div><div class="library-title">TV Shows</div><div class="library-sub">{{SERVER_NAME}}</div></div></a>
+        <a class="library" href="/music"><div class="library-icon" aria-hidden="true">&#9835;</div><div><div class="library-title">Music</div><div class="library-sub">Artists, albums, tracks, and playlists</div></div></a>
       </div>
     </section>
     <section class="section">
@@ -1638,14 +1881,15 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
     .episode-title { margin:12px 0 8px; font-size:clamp(22px,4vw,34px); font-weight:900; }
     .meta { display:flex; flex-wrap:wrap; justify-content:center; gap:9px 14px; color:#eef2f7; font-size:17px; margin:12px 0 18px; }
     .rating { display:inline-flex; align-items:center; min-height:31px; padding:0 10px; border-radius:10px; background:#050506; font-weight:900; }
-    .resume-row { display:grid; grid-template-columns:minmax(190px,400px) 44px; gap:10px; width:min(464px,100%); margin:8px auto 16px; }
+    .resume-row { display:grid; grid-template-columns:minmax(190px,400px) 104px; gap:10px; width:min(524px,100%); margin:8px auto 16px; }
     .resume { min-height:42px; border:0; border-radius:999px; background:#fff; color:#111; font-size:17px; font-weight:900; cursor:pointer; }
-    .restart { width:44px; height:44px; display:grid; place-items:center; border-radius:999px; border:1px solid rgba(255,255,255,.12); background:rgba(122,54,70,.50); color:#fff; font-size:0; cursor:pointer; position:relative; }
-    .restart::before { content:"\\21BB"; font-size:23px; line-height:1; transform:translateX(-2px); }
-    .restart::after { content:"\\25B6"; position:absolute; font-size:11px; line-height:1; transform:translate(5px,1px); }
+    .restart { min-width:104px; height:44px; display:flex; align-items:center; justify-content:center; gap:7px; padding:0 14px; border-radius:999px; border:1px solid rgba(255,255,255,.16); background:rgba(122,54,70,.58); color:#fff; font-size:13px; font-weight:900; cursor:pointer; }
+    .restart .restart-icon { font-size:21px; line-height:1; }
     .mode-switch { display:inline-flex; gap:6px; align-items:center; justify-content:center; padding:5px; margin:0 auto 10px; border-radius:999px; background:rgba(255,255,255,.10); border:1px solid rgba(255,255,255,.12); }
     .mode-switch a { min-width:74px; min-height:30px; display:inline-flex; align-items:center; justify-content:center; border-radius:999px; color:#e8edf5; text-decoration:none; font-size:12px; font-weight:950; }
     .mode-switch a.active { background:#fff; color:#111; }
+    .caption-control { display:inline-flex; align-items:center; gap:9px; margin:0 auto 14px; padding:7px 10px 7px 13px; border-radius:999px; background:rgba(0,0,0,.42); border:1px solid rgba(255,255,255,.18); color:#fff; font-size:13px; font-weight:950; }
+    .caption-control select { min-height:32px; max-width:min(280px,62vw); border:0; border-radius:999px; background:#fff; color:#111; padding:0 28px 0 11px; font-weight:850; }
     .download-size-panel { display:none; width:min(500px,100%); margin:0 auto 14px; padding:12px 14px; border-radius:18px; background:rgba(0,0,0,.34); border:1px solid rgba(255,255,255,.15); backdrop-filter:blur(10px); }
     .download-size-panel.open { display:block; }
     .download-size-panel.visible { display:block; }
@@ -1654,12 +1898,27 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
     .download-size-panel input[type=range] { width:100%; accent-color:#f5b73f; margin:8px 0 6px; }
     .download-size-meta { display:flex; justify-content:space-between; gap:10px; color:rgba(238,242,247,.78); font-size:11px; font-weight:800; }
     .actions { display:flex; flex-wrap:wrap; justify-content:center; gap:13px; margin:0 0 26px; }
+    .video-list-actions { display:flex; justify-content:center; gap:9px; flex-wrap:wrap; margin:12px 0 18px; }
+    .video-list-actions a { min-height:42px; padding:0 16px; border:1px solid rgba(255,255,255,.18); border-radius:999px; background:rgba(255,255,255,.12); color:#fff; display:inline-flex; align-items:center; justify-content:center; gap:7px; text-decoration:none; font-size:14px; font-weight:900; }
+    .video-list-actions a:first-child { background:#f5b73f; border-color:#f5b73f; color:#111; }
     .action { width:84px; color:#e8edf5; text-decoration:none; font-size:12px; line-height:1.25; }
     .action span { width:50px; height:50px; display:grid; place-items:center; margin:0 auto 7px; border-radius:999px; background:rgba(255,255,255,.12); border:1px solid rgba(255,255,255,.12); font-size:21px; }
     .action.download span, .action.mark-watched span { background:rgba(255,255,255,.10); border:3px solid rgba(255,255,255,.92); color:#fff; font-size:25px; }
     .action.download span { font-size:27px; }
     .action.watched { color:#fff; }
     .action.watched span { background:rgba(245,183,63,.28); border-color:rgba(245,183,63,.56); }
+    .more-sheet { position:fixed; inset:0; z-index:40; display:none; align-items:end; justify-content:center; padding-top:80px; background:rgba(0,0,0,.66); backdrop-filter:blur(4px); }
+    .more-sheet.open { display:flex; }
+    .more-card { width:min(560px,100%); max-height:calc(100svh - 80px); overflow:auto; padding:18px 18px calc(24px + env(safe-area-inset-bottom)); border-radius:24px 24px 0 0; background:#101114; border:1px solid rgba(255,255,255,.13); box-shadow:0 -24px 70px rgba(0,0,0,.60); }
+    .more-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
+    .more-head h2 { margin:0; font-size:22px; }
+    .more-close { width:40px; height:40px; border:0; border-radius:999px; background:rgba(255,255,255,.10); color:#fff; font-size:28px; cursor:pointer; }
+    .more-menu { display:grid; gap:8px; }
+    .more-menu a { min-height:58px; display:grid; grid-template-columns:42px minmax(0,1fr); gap:12px; align-items:center; padding:8px 14px; border-radius:15px; background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.10); color:#fff; text-decoration:none; text-align:left; }
+    .more-menu a:hover,.more-menu a:focus { background:rgba(255,255,255,.14); }
+    .more-menu .menu-icon { width:38px; height:38px; display:grid; place-items:center; border-radius:12px; background:rgba(255,255,255,.09); font-size:20px; }
+    .more-menu strong { display:block; font-size:16px; }
+    .more-menu small { display:block; margin-top:2px; color:#adb5c2; font-size:12px; }
     .summary { max-width:760px; font-size:18px; line-height:1.46; margin:0 auto 22px; text-align:left; color:#f1f5fb; text-shadow:0 2px 14px rgba(0,0,0,.42); }
     .cast-panel { display:none; max-width:760px; width:100%; margin:0 auto 22px; text-align:left; }
     .cast-panel.open { display:block; }
@@ -1717,9 +1976,9 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
       .topbar { margin-bottom:10px; }
       .hero { min-height:calc(100svh - 96px); justify-content:end; padding-bottom:10px; }
       .poster-logo { max-height:34vh; }
-      .resume-row { grid-template-columns:1fr 42px; gap:9px; }
+      .resume-row { grid-template-columns:minmax(0,1fr) 104px; gap:9px; }
       .resume { min-height:40px; font-size:17px; }
-      .restart { width:42px; height:42px; }
+      .restart { min-width:104px; height:42px; }
       .actions { gap:9px; }
       .action { width:70px; font-size:11px; }
       .action span { width:46px; height:46px; font-size:20px; }
@@ -1742,8 +2001,10 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
       <h1>{{TITLE}}</h1>
       <div class="episode-title">{{EPISODE_TITLE}}</div>
       <div class="meta">{{META}}</div>
-      <div class="resume-row"><button class="resume" id="resumeButton">Play</button><button class="restart" id="restartButton" title="Start from beginning" aria-label="Start from beginning">Start over</button></div>
+      <div class="resume-row"><button class="resume" id="resumeButton">Play</button><button class="restart" id="restartButton" title="Start from beginning" aria-label="Restart from beginning"><span class="restart-icon" aria-hidden="true">&#8634;</span>Restart</button></div>
       <div class="mode-switch"><a class="{{DIRECT_MODE_CLASS}}" href="{{DIRECT_MODE_HREF}}">Direct</a><a class="{{HLS_MODE_CLASS}}" href="{{HLS_MODE_HREF}}">HLS</a></div>
+      {{CAPTION_CONTROL}}
+      <div class="video-list-actions"><a href="#queue" data-video-queue="1">Add to Queue</a><a href="#playlist" data-video-playlist="1">Add to Playlist</a><a href="/video-lists">View My Lists</a></div>
       <div class="download-size-panel{{DOWNLOAD_SIZE_OPEN_CLASS}}" id="downloadSizePanel" data-source-bytes="{{SOURCE_BYTES}}" data-default-ratio="{{DOWNLOAD_DEFAULT_RATIO}}">
         <div class="download-size-head"><span>HLS compressed download size</span><span id="downloadSizeValue">{{DOWNLOAD_DEFAULT_LABEL}}</span></div>
         <input id="downloadSizeSlider" type="range" min="20" max="95" step="5" value="{{DOWNLOAD_DEFAULT_PERCENT}}" aria-label="Compressed download target size">
@@ -1752,8 +2013,9 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
       <div class="actions">{{ACTIONS}}</div>
       <p class="summary">{{SUMMARY}}</p>
       <section class="cast-panel" id="castPanel"><h2>Cast & Crew</h2><ul class="cast-list">{{ACTORS}}</ul></section>
-      <div class="file-grid"><div class="label">Video</div><div>{{VIDEO_LABEL}}</div><div class="label">Audio</div><div>Original audio</div><div class="label">Subtitles</div><div>Off</div></div>
+      <div class="file-grid"><div class="label">Video</div><div>{{VIDEO_LABEL}}</div><div class="label">Audio</div><div>Original audio</div><div class="label">Subtitles</div><div>{{SUBTITLE_SUMMARY}}</div></div>
     </section>
+    <div class="more-sheet" id="moreSheet" aria-hidden="true"><section class="more-card" role="dialog" aria-modal="true" aria-labelledby="moreTitle"><div class="more-head"><h2 id="moreTitle">More options</h2><button class="more-close" id="moreClose" type="button" aria-label="Close more options">&times;</button></div><nav class="more-menu">{{MORE_MENU}}</nav></section></div>
     <section class="player-shell{{PLAYER_OPEN_CLASS}}{{PLAYER_FULLSCREEN_CLASS}}" id="playerShell">
       <div class="player-head">
         <a class="circle" href="{{BACK}}" aria-label="Back">&lsaquo;</a>
@@ -1761,7 +2023,7 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
         <div class="episode-nav">{{PLAYER_NAV}}</div>
       </div>
       <div class="video-wrap">
-        <video id="player" controls playsinline preload="metadata"{{VIDEO_AUTOPLAY}} data-source="{{SOURCE}}"></video>
+        <video id="player" controls playsinline preload="metadata"{{VIDEO_AUTOPLAY}} data-source="{{SOURCE}}">{{SUBTITLE_TRACKS}}</video>
         <div class="player-overlay" id="playerOverlay">
           <div class="overlay-top">
             <div class="overlay-title"><strong>{{EPISODE_OR_TITLE}}</strong><span>{{SUBTITLE}}</span></div>
@@ -1794,7 +2056,56 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
     const item = {{ITEM_JSON}};
     const previousItem = {{PREV_JSON}};
     const nextItem = {{NEXT_JSON}};
+    const playbackParams = new URLSearchParams(location.search);
+    const queuePlayback = playbackParams.get("queue") === "1";
+    const playlistPlayback = Number(playbackParams.get("playlist") || 0);
+    const playlistPosition = Number(playbackParams.get("position") || 0);
     const video = document.getElementById("player");
+    const captionSelect = document.getElementById("captionSelect");
+    const captionSources = Array.from(video.querySelectorAll("track")).map(element => ({
+      src: element.getAttribute("src"),
+      srclang: element.getAttribute("srclang") || "und",
+      label: element.getAttribute("label") || "Subtitles"
+    }));
+    let activeCaptionValue = null;
+    function applyCaptionSelection(value) {
+      const selected = String(value);
+      const current = video.querySelector("track[data-active-caption]");
+      if (selected === activeCaptionValue && current) {
+        if (current.track) current.track.mode = "showing";
+        return;
+      }
+      Array.from(video.textTracks || []).forEach(track => { track.mode = "disabled"; });
+      Array.from(video.querySelectorAll("track")).forEach(element => element.remove());
+      activeCaptionValue = selected;
+      const source = captionSources[Number(selected)];
+      if (selected !== "off" && source) {
+        const active = document.createElement("track");
+        active.kind = "subtitles";
+        active.src = source.src;
+        active.srclang = source.srclang;
+        active.label = source.label;
+        active.default = true;
+        active.dataset.activeCaption = "1";
+        active.addEventListener("load", () => { if (active.track) active.track.mode = "showing"; });
+        video.appendChild(active);
+        if (active.track) active.track.mode = "showing";
+      }
+      try { localStorage.setItem("cinevaultCaptionTrack", String(value)); } catch (_) {}
+    }
+    if (captionSelect) {
+      let savedCaption = "off";
+      try { savedCaption = localStorage.getItem("cinevaultCaptionTrack") || "off"; } catch (_) {}
+      if (![...captionSelect.options].some(option => option.value === savedCaption)) savedCaption = "off";
+      captionSelect.value = savedCaption;
+      captionSelect.addEventListener("change", () => {
+        applyCaptionSelection(captionSelect.value);
+        setTimeout(() => applyCaptionSelection(captionSelect.value), 150);
+        setTimeout(() => applyCaptionSelection(captionSelect.value), 750);
+      });
+      video.addEventListener("loadedmetadata", () => applyCaptionSelection(captionSelect.value));
+      setTimeout(() => applyCaptionSelection(captionSelect.value), 0);
+    }
     const hero = document.getElementById("hero");
     const playerShell = document.getElementById("playerShell");
     const resumeButton = document.getElementById("resumeButton");
@@ -1904,7 +2215,8 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
     }
     async function loadServerState() {
       try {
-        const response = await fetch(`/api/watch/state?key=${encodeURIComponent(item.key)}`, {cache:"no-store"});
+        const stateQuery = new URLSearchParams({key:item.key, title:item.title || "", subtitle:item.subtitle || ""});
+        const response = await fetch(`/api/watch/state?${stateQuery}`, {cache:"no-store"});
         const payload = await response.json();
         serverState = payload.item || null;
         updatePlayButton();
@@ -1941,6 +2253,37 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
       try {
         await fetch("/api/watch/progress", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({item:entry, queued:true, position:0, duration:0, progress:0, watched:false})});
       } catch (_) {}
+    }
+    async function addCurrentToQueue() {
+      try {
+        const response = await fetch("/api/video/queue", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({action:"add", item})});
+        const payload = await response.json();
+        alert(payload.ok ? `Added to queue (${payload.count} items)` : (payload.error || "Could not add to queue"));
+      } catch (_) { alert("Could not add to queue"); }
+    }
+    async function addCurrentToPlaylist() {
+      const name = prompt("Playlist name");
+      if (!name) return;
+      try {
+        const response = await fetch("/api/video/playlists", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({action:"add", name, item})});
+        const payload = await response.json();
+        alert(payload.ok ? `Added to ${name}` : (payload.error || "Could not add to playlist"));
+      } catch (_) { alert("Could not add to playlist"); }
+    }
+    async function playNextFromVideoList() {
+      try {
+        if (queuePlayback) {
+          const response = await fetch("/api/video/queue", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({action:"finish", key:item.key})});
+          const payload = await response.json();
+          if (payload.next_href) { location.href = `${payload.next_href}${payload.next_href.includes("?") ? "&" : "?"}play=1&queue=1`; return true; }
+        }
+        if (playlistPlayback) {
+          const response = await fetch(`/api/video/playlist-next?playlist_id=${playlistPlayback}&position=${playlistPosition}`, {cache:"no-store"});
+          const payload = await response.json();
+          if (payload.next_href) { location.href = `${payload.next_href}${payload.next_href.includes("?") ? "&" : "?"}play=1&playlist=${playlistPlayback}&position=${playlistPosition + 1}`; return true; }
+        }
+      } catch (_) {}
+      return false;
     }
     function showUpNext() {
       if (!nextItem || nextItem.kind !== "tv") return false;
@@ -2136,12 +2479,15 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
       }
     });
     video.addEventListener("pause", saveProgress);
-    video.addEventListener("ended", () => {
+    video.addEventListener("ended", async () => {
       postWatched(true);
       remove(item.key);
+      if (await playNextFromVideoList()) return;
       postQueuedNext(nextItem);
       showUpNext();
     });
+    document.querySelectorAll("[data-video-queue]").forEach(link => link.addEventListener("click", event => { event.preventDefault(); addCurrentToQueue(); }));
+    document.querySelectorAll("[data-video-playlist]").forEach(link => link.addEventListener("click", event => { event.preventDefault(); addCurrentToPlaylist(); }));
     document.querySelectorAll("[data-mark-watched]").forEach(link => {
       link.addEventListener("click", event => {
         event.preventDefault();
@@ -2154,18 +2500,39 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
         const ok = await postBulkWatched(link.dataset.markBulk, true);
         if (ok) {
           link.classList.add("watched");
-          link.lastChild.textContent = link.dataset.markBulk === "show" ? "Show Watched" : "Season Watched";
+          const label = link.querySelector("strong") || link.lastChild;
+          label.textContent = link.dataset.markBulk === "show" ? "Show Watched" : "Season Watched";
         }
       });
     });
+    const moreSheet = document.getElementById("moreSheet");
+    const closeMoreSheet = () => {
+      if (!moreSheet) return;
+      moreSheet.classList.remove("open");
+      moreSheet.setAttribute("aria-hidden", "true");
+      document.body.style.overflow = "";
+    };
     document.querySelectorAll("[data-more-toggle]").forEach(link => {
       link.addEventListener("click", event => {
         event.preventDefault();
+        if (!moreSheet) return;
+        moreSheet.classList.add("open");
+        moreSheet.setAttribute("aria-hidden", "false");
+        document.body.style.overflow = "hidden";
+        document.getElementById("moreClose")?.focus();
+      });
+    });
+    document.getElementById("moreClose")?.addEventListener("click", closeMoreSheet);
+    moreSheet?.addEventListener("click", event => { if (event.target === moreSheet) closeMoreSheet(); });
+    document.addEventListener("keydown", event => { if (event.key === "Escape") closeMoreSheet(); });
+    document.querySelectorAll("[data-cast-toggle]").forEach(link => {
+      link.addEventListener("click", event => {
+        event.preventDefault();
+        closeMoreSheet();
         const panel = document.getElementById("castPanel");
         if (!panel) return;
-        const isOpen = panel.classList.toggle("open");
-        link.classList.toggle("watched", isOpen);
-        if (isOpen) panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        panel.classList.add("open");
+        panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
       });
     });
     document.querySelectorAll("[data-mobile-download]").forEach(link => {
@@ -2339,7 +2706,7 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
 """
 
 
-def home_backdrop_html(movie_items=None, tv_shows=None, limit: int = 70) -> str:
+def _build_home_backdrop_html(movie_items=None, tv_shows=None, limit: int = 70) -> str:
     posters: list[str] = []
     movie_items = list(movie_items if movie_items is not None else getattr(movie_app.movie_index, "items", []))
     tv_shows = list(tv_shows if tv_shows is not None else getattr(tv_app.tv_index, "shows", []))
@@ -2364,7 +2731,7 @@ def home_backdrop_html(movie_items=None, tv_shows=None, limit: int = 70) -> str:
     return "".join(f"<img src='{html.escape(poster)}' alt=''>" for poster in unique[:limit])
 
 
-def random_login_backdrop_html(limit: int = 70) -> str:
+def _build_login_backdrop_html(limit: int = 70) -> str:
     posters: list[str] = []
     movie_items = list(getattr(movie_app.movie_index, "items", []))
     tv_shows = list(getattr(tv_app.tv_index, "shows", []))
@@ -2391,6 +2758,40 @@ def random_login_backdrop_html(limit: int = 70) -> str:
     return "".join(f"<img src='{html.escape(poster)}' alt=''>" for poster in unique)
 
 
+def cached_poster_backdrop(cache_key: str, builder) -> str:
+    """Keep a selected poster set stable across requests and service restarts."""
+    now = time.time()
+    with POSTER_ROTATION_LOCK:
+        try:
+            cache = json.loads(POSTER_ROTATION_CACHE_FILE.read_text(encoding="utf-8"))
+            if not isinstance(cache, dict):
+                cache = {}
+        except (OSError, json.JSONDecodeError):
+            cache = {}
+        entry = cache.get(cache_key) if isinstance(cache.get(cache_key), dict) else {}
+        if float(entry.get("expires_at") or 0) > now and isinstance(entry.get("html"), str):
+            return entry["html"]
+        rendered = builder()
+        cache[cache_key] = {"created_at": now, "expires_at": now + POSTER_ROTATION_SECONDS, "html": rendered}
+        POSTER_ROTATION_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        temporary = POSTER_ROTATION_CACHE_FILE.with_suffix(POSTER_ROTATION_CACHE_FILE.suffix + ".tmp")
+        temporary.write_text(json.dumps(cache, separators=(",", ":")), encoding="utf-8")
+        temporary.replace(POSTER_ROTATION_CACHE_FILE)
+        return rendered
+
+
+def home_backdrop_html(movie_items=None, tv_shows=None, limit: int = 70) -> str:
+    if movie_items is not None or tv_shows is not None or limit != 70:
+        return _build_home_backdrop_html(movie_items, tv_shows, limit)
+    return cached_poster_backdrop("home", lambda: _build_home_backdrop_html(limit=limit))
+
+
+def random_login_backdrop_html(limit: int = 70) -> str:
+    if limit != 70:
+        return _build_login_backdrop_html(limit)
+    return cached_poster_backdrop("login", lambda: _build_login_backdrop_html(limit))
+
+
 def home_poster_html(poster: str) -> str:
     if poster:
         return f"<img src='{html.escape(poster)}' alt=''>"
@@ -2412,13 +2813,72 @@ def watched_badge_html(watched: bool) -> str:
     return "<span class='watched-badge'>Watched</span>" if watched else ""
 
 
+def movie_media_key(item) -> str:
+    """Return a scan-order-independent identity for a movie file."""
+    relative = str(getattr(item, "rel_path", "") or getattr(item, "path", "")).replace("\\", "/").casefold()
+    return "movie-path:" + hashlib.sha256(relative.encode("utf-8")).hexdigest()[:24]
+
+
+def movie_for_media_key(key: str):
+    if not str(key).startswith("movie-path:"):
+        return None
+    return next((item for item in movie_app.movie_index.items if movie_media_key(item) == key), None)
+
+
+def movie_for_saved_title(title: str, subtitle: str = ""):
+    """Repair legacy numeric resume keys after scan-order IDs have shifted."""
+    wanted = str(title or "").strip().casefold()
+    year_match = re.search(r"(?:19|20)\d{2}", str(subtitle or ""))
+    matches = []
+    for item in movie_app.movie_index.items:
+        metadata = movie_app.metadata_for(item)
+        current_title = str(metadata.get("title") or item.title).strip().casefold()
+        if current_title != wanted:
+            continue
+        current_year = str(metadata.get("year") or "")
+        if year_match and current_year and year_match.group(0) != current_year:
+            continue
+        matches.append(item)
+    return matches[0] if len(matches) == 1 else None
+
+
+def movie_for_stale_saved_id(user, numeric_id: str):
+    """Resolve a scan-order ID through this user's stable saved movie key."""
+    try:
+        requested_id = int(numeric_id)
+    except (TypeError, ValueError):
+        return None
+    conn = db_connect()
+    try:
+        rows = conn.execute(
+            """SELECT media_key, stamp FROM (
+                 SELECT media_key, updated_at AS stamp FROM user_media_state
+                 WHERE user_id=? AND media_type='movie' AND media_id=?
+                 UNION ALL
+                 SELECT media_key, last_played_at AS stamp FROM user_play_history
+                 WHERE user_id=? AND media_type='movie' AND media_id=?
+               ) ORDER BY stamp DESC""",
+            (int(user["id"]), requested_id, int(user["id"]), requested_id),
+        ).fetchall()
+    finally:
+        conn.close()
+    resolved_by_key = {}
+    for row in rows:
+        key = str(row["media_key"])
+        item = movie_for_media_key(key)
+        if item and int(item.id) != requested_id:
+            resolved_by_key[key] = item
+    resolved = list(resolved_by_key.values())
+    return resolved[0] if len(resolved) == 1 else None
+
+
 def home_movie_card(item, watched_keys: set[str] | None = None) -> str:
     poster = movie_app.poster_url_for(item)
     metadata = movie_app.metadata_for(item)
     title = metadata.get("title") or item.title
     year = metadata.get("year") or ""
     poster_class = "" if poster else " missing"
-    watched = bool(watched_keys and f"movie:{item.id}" in watched_keys)
+    watched = bool(watched_keys and movie_media_key(item) in watched_keys)
     card_class = "card watched" if watched else "card"
     return (
         f"<a class='{card_class}' href='/movie/{item.id}'>"
@@ -2584,7 +3044,7 @@ def unified_search_results(query: str, limit: int = 100, watched_keys: set[str] 
         if all(term in blob for term in terms):
             results.append({
                 "kind": "Movie",
-                "key": f"movie:{item.id}",
+                "key": movie_media_key(item),
                 "title": title,
                 "subtitle": str(year) if year else movie_app.human_size(item.size),
                 "poster": movie_app.poster_url_for(item),
@@ -2761,11 +3221,11 @@ SEARCH_PAGE = """<!doctype html>
 * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:#fff; font-family:Inter,system-ui,Segoe UI,sans-serif; }
 header { position:sticky; top:0; z-index:3; display:flex; align-items:center; gap:14px; padding:18px clamp(18px,4vw,42px); background:rgba(8,9,12,.92); border-bottom:1px solid var(--line); backdrop-filter:blur(14px); }
 .brand { font-size:clamp(24px,4vw,44px); font-weight:950; letter-spacing:0; }
-.cmv-logo { display:inline-flex; align-items:center; gap:.30em; color:#fff; text-decoration:none; text-transform:uppercase; line-height:.88; white-space:nowrap; }
-.cmv-left { display:grid; gap:.08em; align-items:center; }
-.cmv-cine,.cmv-media { font-size:.54em; font-weight:950; letter-spacing:.03em; line-height:.86; }
+.cmv-logo { display:inline-flex; align-items:center; gap:.30em; color:#fff; text-decoration:none; line-height:.88; white-space:nowrap; }
+.cmv-left { display:inline-flex; gap:0; align-items:center; }
+.cmv-cine,.cmv-media { font-family:"Segoe Script","Brush Script MT","URW Chancery L",cursive; font-size:1.02em; font-weight:700; letter-spacing:-.055em; line-height:1; }
 .cmv-divider { width:.052em; height:1.12em; background:rgba(255,255,255,.66); }
-.cmv-vault { color:var(--gold); font-size:.95em; font-weight:950; letter-spacing:.02em; }
+.cmv-vault { color:var(--gold); font-size:.95em; font-weight:950; letter-spacing:.02em; text-transform:uppercase; }
 .cmv-mark { width:1.08em; height:1.08em; color:var(--gold); flex:0 0 auto; }
 a { color:#fff; text-decoration:none; } .pill { border:1px solid var(--line); border-radius:999px; padding:11px 18px; background:#1a1f29; font-weight:850; }
 main { padding:22px clamp(18px,4vw,42px) 80px; }
@@ -2776,9 +3236,9 @@ button { min-height:48px; border:0; border-radius:999px; padding:0 22px; font-we
 .card { min-width:0; } .poster { aspect-ratio:2/3; border-radius:8px; overflow:hidden; background:#101722; border:1px solid rgba(255,255,255,.1); display:flex; align-items:center; justify-content:center; color:#9aa4b2; font-weight:800; }
 .poster img { width:100%; height:100%; object-fit:cover; } .card-title { margin-top:10px; font-weight:900; line-height:1.15; } .card-meta { margin-top:4px; color:var(--muted); font-size:14px; }
 @media (min-width:900px) { .grid { grid-template-columns:repeat(auto-fill, minmax(126px, 126px)); } }
-@media (max-width:700px) { .cmv-mark { width:.80em; height:.80em; } .cmv-media { letter-spacing:.03em; } }
+@media (max-width:700px) { .cmv-mark { width:.80em; height:.80em; } .cmv-media { letter-spacing:-.055em; } }
 </style></head><body>
-<header><a class="brand cmv-logo" href="/"><span class="cmv-left"><span class="cmv-cine">Cine</span><span class="cmv-media">Media</span></span><span class="cmv-divider"></span><span class="cmv-vault">Vault</span><svg class="cmv-mark" viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="32" r="26" fill="none" stroke="currentColor" stroke-width="4"/><circle cx="32" cy="32" r="9" fill="none" stroke="currentColor" stroke-width="4"/><path d="M32 6v17M32 41v17M6 32h17M41 32h17M13.6 13.6l12 12M38.4 38.4l12 12M50.4 13.6l-12 12M25.6 38.4l-12 12" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"/><circle cx="32" cy="32" r="3" fill="currentColor"/><path d="M32 32l5 4M32 32l-5 4M32 32v-6" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg></a><a class="pill" href="/">Home</a><a class="pill" href="/movies">Movies</a><a class="pill" href="/tv">TV Shows</a></header>
+<header><a class="brand cmv-logo" href="/"><span class="cmv-left"><span class="cmv-cine">Cine</span><span class="cmv-media">Media</span></span><span class="cmv-divider"></span><span class="cmv-vault">Vault</span><svg class="cmv-mark" viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="32" r="26" fill="none" stroke="currentColor" stroke-width="4"/><circle cx="32" cy="32" r="9" fill="none" stroke="currentColor" stroke-width="4"/><path d="M32 6v17M32 41v17M6 32h17M41 32h17M13.6 13.6l12 12M38.4 38.4l12 12M50.4 13.6l-12 12M25.6 38.4l-12 12" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"/><circle cx="32" cy="32" r="3" fill="currentColor"/><path d="M32 32l5 4M32 32l-5 4M32 32v-6" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg></a><a class="pill" href="/">Home</a><a class="pill" href="/movies">Movies</a><a class="pill" href="/tv">TV Shows</a><a class="pill" href="/music">Music</a></header>
 <main>
 <form class="search-row" action="/search" method="get"><input name="q" value="{{QUERY}}" placeholder="Search movies, shows, actors, genres, or episodes" autofocus><button type="submit">Search</button></form>
 <h1>{{TITLE}}</h1><p class="muted">{{SUBTITLE}}</p>
@@ -2792,8 +3252,9 @@ def continue_item_for_movie(item) -> dict:
     year = metadata.get("year") or ""
     poster = movie_app.poster_url_for(item)
     return {
-        "key": f"movie:{item.id}",
+        "key": movie_media_key(item),
         "kind": "movie",
+        "mediaId": int(item.id),
         "title": title,
         "subtitle": str(year) if year else movie_app.human_size(item.size),
         "poster": poster,
@@ -2824,6 +3285,9 @@ def continue_item_for_episode(episode) -> dict:
 
 
 def continue_metadata_for_key(key: str) -> dict | None:
+    if key.startswith("movie-path:"):
+        item = movie_for_media_key(key)
+        return continue_item_for_movie(item) if item else None
     if key.startswith("movie:"):
         try:
             item = movie_app.safe_item(key.split(":", 1)[1])
@@ -2865,6 +3329,14 @@ def user_state_item(row) -> dict:
 
 def continue_card_item(row) -> dict:
     item = user_state_item(row)
+    if item.get("kind") == "movie":
+        current = continue_metadata_for_key(str(item.get("key") or ""))
+        if not current:
+            current_movie = movie_for_saved_title(item.get("title", ""), item.get("subtitle", ""))
+            current = continue_item_for_movie(current_movie) if current_movie else None
+        if current:
+            item.update({key: value for key, value in current.items() if key not in {"position", "duration", "progress", "watched", "updatedAt"}})
+        return item
     if item.get("kind") != "tv":
         return item
     current = continue_metadata_for_key(str(item.get("key") or ""))
@@ -2875,6 +3347,37 @@ def continue_card_item(row) -> dict:
         item["href"] = current.get("href") or item["href"]
         item["detailHref"] = current.get("detailHref") or item["detailHref"]
     return item
+
+
+def migrate_legacy_movie_state_keys() -> int:
+    """Convert scan-order movie IDs in saved state to stable path identities."""
+    conn = db_connect()
+    migrated = 0
+    try:
+        rows = conn.execute("SELECT * FROM user_media_state WHERE media_type='movie' AND media_key LIKE 'movie:%'").fetchall()
+        for row in rows:
+            movie = movie_for_saved_title(row["title"], row["subtitle"])
+            if not movie:
+                continue
+            current = continue_item_for_movie(movie)
+            existing = conn.execute(
+                "SELECT 1 FROM user_media_state WHERE user_id=? AND media_key=?",
+                (int(row["user_id"]), current["key"]),
+            ).fetchone()
+            if existing:
+                conn.execute("DELETE FROM user_media_state WHERE user_id=? AND media_key=?", (int(row["user_id"]), row["media_key"]))
+            else:
+                conn.execute(
+                    """UPDATE user_media_state SET media_key=?,media_id=?,title=?,subtitle=?,poster=?,href=?,detail_href=?
+                       WHERE user_id=? AND media_key=?""",
+                    (current["key"], int(movie.id), current["title"], current["subtitle"], current["poster"],
+                     current["href"], current["detailHref"], int(row["user_id"]), row["media_key"]),
+                )
+            migrated += 1
+        conn.commit()
+        return migrated
+    finally:
+        conn.close()
 
 
 def duration_minutes_from_metadata(metadata: dict) -> float:
@@ -3084,6 +3587,13 @@ def action_link(icon: str, label: str, href: str, attrs: str = "") -> str:
     return f"<a class='action{extra_class}' href='{html.escape(href)}'{attrs}><span>{icon}</span>{html.escape(label)}</a>"
 
 
+def more_menu_link(icon: str, label: str, detail: str, href: str, attrs: str = "") -> str:
+    return (
+        f"<a href='{html.escape(href)}'{attrs}><span class='menu-icon'>{icon}</span>"
+        f"<span><strong>{html.escape(label)}</strong><small>{html.escape(detail)}</small></span></a>"
+    )
+
+
 def player_nav_link(label: str, href: str) -> str:
     return f"<a href='{html.escape(href)}'>{html.escape(label)}</a>"
 
@@ -3093,12 +3603,105 @@ def actor_items_for(metadata: dict) -> str:
     return "".join(f"<li><a href='/actor?name={urllib.parse.quote(actor)}'>{html.escape(actor)}</a></li>" for actor in actors) or "<li>No actor data available yet.</li>"
 
 
+SUBTITLE_TEXT_CODECS = {"subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text"}
+SUBTITLE_SIDECAR_EXTENSIONS = {".srt", ".vtt", ".ass", ".ssa"}
+SUBTITLE_LANGUAGE_NAMES = {"eng": "English", "en": "English", "spa": "Spanish", "es": "Spanish", "fre": "French", "fra": "French", "fr": "French"}
+
+
+def subtitle_language_label(code: str) -> str:
+    normalized = str(code or "").strip().lower()
+    return SUBTITLE_LANGUAGE_NAMES.get(normalized, normalized.upper() if normalized and normalized != "und" else "Unknown")
+
+
+def discover_subtitles(path: Path, kind: str, item_id: str) -> list[dict]:
+    path = path.resolve()
+    stat = path.stat()
+    directory_mtime = path.parent.stat().st_mtime_ns
+    cache_key = str(path)
+    cached = SUBTITLE_DISCOVERY_CACHE.get(cache_key)
+    if cached and cached[0] == stat.st_mtime and cached[1] == stat.st_size and cached[2] == directory_mtime:
+        return cached[3]
+    tracks = []
+    movie_stem = path.stem.casefold()
+    for sidecar in sorted(path.parent.iterdir(), key=lambda value: value.name.casefold()):
+        if not sidecar.is_file() or sidecar.suffix.lower() not in SUBTITLE_SIDECAR_EXTENSIONS:
+            continue
+        sidecar_stem = sidecar.stem.casefold()
+        if not (sidecar_stem == movie_stem or sidecar_stem.startswith(movie_stem + ".") or sidecar_stem.startswith(movie_stem + " ")):
+            continue
+        suffix = sidecar.stem[len(path.stem):].strip(" ._-")
+        language = suffix.split(".", 1)[0].split(" ", 1)[0].lower() if suffix else "eng"
+        label = subtitle_language_label(language)
+        if "forced" in suffix.casefold():
+            label += " Forced"
+        elif any(tag in re.split(r"[._\s-]+", suffix.casefold()) for tag in ("sdh", "hi")):
+            label += " SDH"
+        tracks.append({"token": f"sidecar-{len(tracks)}", "source": "sidecar", "path": str(sidecar), "stream": None,
+                       "language": language, "label": f"{label} (SRT)"})
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "s", "-show_entries",
+             "stream=index,codec_name:stream_tags=language,title:stream_disposition=default,forced,hearing_impaired",
+             "-of", "json", str(path)], capture_output=True, text=True, timeout=20, check=True,
+        )
+        streams = json.loads(probe.stdout or "{}").get("streams") or []
+    except Exception:
+        streams = []
+    for stream in streams:
+        codec = str(stream.get("codec_name") or "").lower()
+        if codec not in SUBTITLE_TEXT_CODECS:
+            continue
+        tags = stream.get("tags") or {}
+        disposition = stream.get("disposition") or {}
+        language = str(tags.get("language") or "und").lower()
+        label = subtitle_language_label(language)
+        if disposition.get("forced") and "forced" not in label.casefold():
+            label += " Forced"
+        elif disposition.get("hearing_impaired") and "sdh" not in label.casefold():
+            label += " SDH"
+        tracks.append({"token": f"embedded-{int(stream['index'])}", "source": "embedded", "path": str(path),
+                       "stream": int(stream["index"]), "language": language, "label": f"{label} (Embedded SRT)"})
+    for track in tracks:
+        track["url"] = f"/subtitles/{kind}/{urllib.parse.quote(str(item_id))}/{track['token']}.vtt"
+    SUBTITLE_DISCOVERY_CACHE[cache_key] = (stat.st_mtime, stat.st_size, directory_mtime, tracks)
+    return tracks
+
+
+def subtitle_markup(tracks: list[dict]) -> tuple[str, str, str]:
+    track_html = "".join(
+        f'<track kind="subtitles" src="{html.escape(track["url"])}" srclang="{html.escape(track["language"])}" label="{html.escape(track["label"])}"'
+        f'{" default" if index == 0 else ""}>'
+        for index, track in enumerate(tracks)
+    )
+    options = '<option value="off">Off</option>' + "".join(
+        f'<option value="{index}">{html.escape(track["label"])}</option>' for index, track in enumerate(tracks)
+    )
+    control = f'<label class="caption-control">CC <select id="captionSelect" aria-label="Closed captions">{options}</select></label>' if tracks else ""
+    summary = f"{len(tracks)} available" if tracks else "None found"
+    return track_html, control, summary
+
+
+def subtitle_detail_summary(path: Path) -> str:
+    tracks = discover_subtitles(Path(path), "detail", "0")
+    if not tracks:
+        return "None"
+    if any(track["source"] == "embedded" for track in tracks):
+        return "Embedded SRT"
+    return "SRT"
+
+
+movie_app.subtitle_summary_for_path = subtitle_detail_summary
+tv_app.subtitle_summary_for_path = subtitle_detail_summary
+
+
 def direct_player_context(kind: str, item_id: str, is_admin: bool = False, playback_mode: str | None = None) -> dict:
     playback_mode = (playback_mode or read_global_playback_mode()).lower()
     if playback_mode not in {"direct", "hls"}:
         playback_mode = "direct"
     if kind == "movie":
         item = movie_app.safe_item(item_id)
+        caption_tracks = discover_subtitles(item.path, kind, item_id)
+        caption_track_html, caption_control, caption_summary = subtitle_markup(caption_tracks)
         metadata = movie_app.metadata_for(item)
         title = metadata.get("title") or item.title
         subtitle = str(metadata.get("year") or "Movie")
@@ -3135,16 +3738,25 @@ def direct_player_context(kind: str, item_id: str, is_admin: bool = False, playb
             "source_size": item.size,
             "source_size_label": movie_app.human_size(item.size),
             "actions": "".join([
-                action_link("&#8595;", "Download", f"/download/{item.id}", " data-mobile-download='1' data-mobile-scope='movie' data-mobile-id='" + html.escape(str(item.id)) + "'"),
                 action_link("&#10003;", "Mark Watched", f"/movie/{item.id}", " data-mark-watched='1'"),
+                action_link("&#8595;", "Download", f"/download/{item.id}", " data-mobile-download='1' data-mobile-scope='movie' data-mobile-id='" + html.escape(str(item.id)) + "'"),
                 action_link("&#8943;", "More", "#more", " data-more-toggle='1'"),
+            ]),
+            "more_menu": "".join([
+                more_menu_link("&#127916;", "Fix Match", "Correct title, year, or poster", f"/movie/fix-match/{item.id}"),
+                more_menu_link("&#128101;", "Cast & Crew", "View people in this movie", "#cast", " data-cast-toggle='1'"),
             ]),
             "actors": actor_items,
             "player_nav": "",
             "playback_mode": playback_mode,
+            "caption_tracks": caption_track_html,
+            "caption_control": caption_control,
+            "caption_summary": caption_summary,
         }
     if kind == "tv":
         episode = tv_app.safe_episode(item_id)
+        caption_tracks = discover_subtitles(episode.path, kind, item_id)
+        caption_track_html, caption_control, caption_summary = subtitle_markup(caption_tracks)
         show = show_for_episode(episode)
         previous_episode = previous_episode_for(episode)
         next_episode = next_episode_for(episode)
@@ -3183,18 +3795,21 @@ def direct_player_context(kind: str, item_id: str, is_admin: bool = False, playb
             meta += f"<span class='rating'>TMDb {episode_rating:.1f}</span>"
         meta += "<span class='rating'>Local</span>"
         actions = [
-            action_link("&#9635;", "Show", show_href),
-            action_link("&#9776;", "Season", season_href),
-            action_link("&#8595;", "Download", f"/download/episode/{episode.id}", " data-mobile-download='1' data-mobile-scope='episode' data-mobile-id='" + html.escape(str(episode.id)) + "'"),
             action_link("&#10003;", "Mark Watched", show_href, " data-mark-watched='1'"),
-            action_link("&#10003;", "Mark Season", season_href, " data-mark-bulk='season'"),
-            action_link("&#10003;", "Mark Show", show_href, " data-mark-bulk='show'"),
-            action_link("&#8943;", "More", "#more", " data-more-toggle='1'"),
+            action_link("&#8595;", "Download", f"/download/episode/{episode.id}", " data-mobile-download='1' data-mobile-scope='episode' data-mobile-id='" + html.escape(str(episode.id)) + "'"),
         ]
-        if previous_episode:
-            actions.append(action_link("&#9664;", "Previous", f"/player/tv/{previous_episode.id}"))
         if next_episode:
             actions.append(action_link("&#9654;", "Next", f"/player/tv/{next_episode.id}"))
+        actions.append(action_link("&#8943;", "More", "#more", " data-more-toggle='1'"))
+        more_menu = [
+            more_menu_link("&#9635;", "Go to Show", "Open the complete series", show_href),
+            more_menu_link("&#9776;", "Go to Season", "Open this season's episodes", season_href),
+            more_menu_link("&#10003;", "Mark Season Watched", "Mark every episode in this season", season_href, " data-mark-bulk='season'"),
+            more_menu_link("&#10003;", "Mark Show Watched", "Mark every episode in this show", show_href, " data-mark-bulk='show'"),
+        ]
+        if previous_episode:
+            more_menu.append(more_menu_link("&#9664;", "Previous Episode", "Play the previous episode", f"/player/tv/{previous_episode.id}"))
+        more_menu.append(more_menu_link("&#128101;", "Cast & Crew", "View people in this episode", "#cast", " data-cast-toggle='1'"))
         player_nav = []
         if previous_episode:
             player_nav.append(player_nav_link("Previous", f"/player/tv/{previous_episode.id}"))
@@ -3219,8 +3834,12 @@ def direct_player_context(kind: str, item_id: str, is_admin: bool = False, playb
             "source_size": episode.size,
             "source_size_label": movie_app.human_size(episode.size),
             "actions": "".join(actions),
+            "more_menu": "".join(more_menu),
             "player_nav": "".join(player_nav),
             "playback_mode": playback_mode,
+            "caption_tracks": caption_track_html,
+            "caption_control": caption_control,
+            "caption_summary": caption_summary,
         }
     raise FileNotFoundError("Unknown media kind")
 
@@ -3614,35 +4233,39 @@ VIDEO_WALL_PAGE = r"""<!doctype html>
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,Segoe UI,sans-serif;overflow-x:hidden}
 header{position:sticky;top:0;z-index:5;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 18px;background:rgba(7,9,13,.94);border-bottom:1px solid var(--line);backdrop-filter:blur(14px)}
 .brand{font-size:24px;font-weight:950}.brand b{color:var(--gold)}.controls{display:flex;gap:8px;flex-wrap:wrap}button,.button{min-height:38px;border:1px solid var(--line);border-radius:8px;padding:0 13px;background:#171d27;color:#fff;font-weight:850;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}.primary{background:var(--gold);color:#111;border-color:var(--gold)}
-main{padding:14px}.wall{height:calc(100vh - 92px);min-height:520px;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:10px}.tile{position:relative;min-width:0;min-height:0;overflow:hidden;background:#000;border:2px solid transparent;border-radius:8px}.tile.active{border-color:var(--green)}.tile.expanded{position:fixed;inset:0;z-index:30;border:0;border-radius:0}.tile video{width:100%;height:100%;object-fit:contain;background:#000}.empty{height:100%;display:grid;place-items:center;text-align:center;color:var(--muted);border:1px dashed var(--line);padding:18px}.tile-bar{position:absolute;left:0;right:0;bottom:0;display:grid;grid-template-columns:auto auto minmax(90px,1fr) auto auto auto auto;align-items:center;gap:7px;padding:26px 9px 9px;background:linear-gradient(transparent,rgba(0,0,0,.94));opacity:0;transition:opacity .18s}.tile:hover .tile-bar,.tile.active .tile-bar,.tile.expanded .tile-bar{opacity:1}.tile-title{position:absolute;left:10px;right:10px;bottom:50px;min-width:0;font-weight:850;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 3px #000}.icon{width:34px;height:34px;padding:0;border-radius:50%}.seek{width:100%;accent-color:var(--gold)}.time{font-size:12px;color:#fff;white-space:nowrap;font-variant-numeric:tabular-nums}.bandwidth{display:none;align-items:center;gap:14px;padding:9px 14px;border-bottom:1px solid var(--line);background:#101620}.bandwidth.open{display:flex}.bandwidth strong{font-size:18px;color:var(--green);font-variant-numeric:tabular-nums}.bandwidth span{color:var(--muted);font-size:13px}
+main{padding:14px}.wall{height:calc(100vh - 92px);min-height:520px;position:relative;background:#000}.tiles{height:100%;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:10px}.wall.wall-fs-active{height:100vh}.wall.expanded{position:fixed;inset:0;z-index:40;height:100vh}.wall.wall-fs-active .tiles,.wall.expanded .tiles{grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}.tile{position:relative;min-width:0;min-height:0;overflow:hidden;background:#000;border:2px solid transparent;border-radius:8px}.tile.expanded{position:fixed;inset:0;z-index:30;border:0;border-radius:0}.tile video{width:100%;height:100%;object-fit:contain;background:#000}.empty{height:100%;display:grid;place-items:center;text-align:center;color:var(--muted);border:1px dashed var(--line);padding:18px}.tile-bar{position:absolute;left:0;right:0;bottom:0;display:grid;grid-template-columns:auto auto minmax(90px,1fr) auto auto auto auto;align-items:center;gap:7px;padding:26px 9px 9px;background:linear-gradient(transparent,rgba(0,0,0,.94));opacity:0;transition:opacity .18s}.tile:hover .tile-bar,.tile.active .tile-bar,.tile.expanded .tile-bar{opacity:1}.tile-title{position:absolute;left:10px;right:10px;bottom:50px;min-width:0;font-weight:850;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 3px #000}.icon{width:34px;height:34px;padding:0;border-radius:50%}#exitWallFs{display:none;position:absolute;top:10px;right:10px;z-index:41;width:40px;height:40px;border-radius:50%;background:rgba(0,0,0,.72)}.wall.wall-fs-active #exitWallFs,.wall.expanded #exitWallFs{display:flex}.seek{width:100%;accent-color:var(--gold)}.time{font-size:12px;color:#fff;white-space:nowrap;font-variant-numeric:tabular-nums}.bandwidth{display:none;align-items:center;gap:14px;padding:9px 14px;border-bottom:1px solid var(--line);background:#101620}.bandwidth.open{display:flex}.bandwidth strong{font-size:18px;color:var(--green);font-variant-numeric:tabular-nums}.bandwidth span{color:var(--muted);font-size:13px}
 .drawer{position:fixed;inset:0 0 0 auto;z-index:10;width:min(440px,100%);padding:18px;background:#0c1017;border-left:1px solid var(--line);transform:translateX(105%);transition:transform .2s;overflow:auto}.drawer.open{transform:none}.drawer-head{display:flex;justify-content:space-between;align-items:center}.search{width:100%;min-height:48px;margin:16px 0;border:1px solid var(--line);border-radius:8px;background:#171d27;color:#fff;padding:0 14px;font-size:16px}.results{display:grid;gap:9px}.result{display:grid;grid-template-columns:52px 1fr auto;align-items:center;gap:10px;border:1px solid var(--line);border-radius:8px;padding:8px;background:var(--panel)}.result img{width:52px;aspect-ratio:2/3;object-fit:cover;background:#06080c}.result small{display:block;color:var(--muted);margin-top:3px}.slot-picker{display:flex;gap:5px}.slot-picker button{width:34px;height:34px;min-height:34px;padding:0}.hint{color:var(--muted);font-size:13px}
-@media(max-width:720px){header{align-items:flex-start;flex-direction:column}.wall{height:auto;min-height:0;grid-template-columns:1fr;grid-template-rows:none}.tile{aspect-ratio:16/9}.tile-bar{opacity:1}.brand{font-size:20px}}
-</style></head><body><header><div class="brand">CineMedia<b>Vault</b> Wall</div><div class="controls"><a class="button" href="/">Home</a><button id="playAll" class="primary">Play all</button><button id="pauseAll">Pause all</button><button id="syncAll">Sync</button><button id="toggleBandwidth">Bandwidth</button><button id="addMedia">Add media</button></div></header><div class="bandwidth" id="bandwidthPanel"><strong id="bandwidthValue">0.00 Mbps</strong><span id="bandwidthBytes">0 B/s</span><span id="playingCount">0 playing</span></div>
-<main><div class="wall" id="wall"></div></main>
+@media(max-width:720px){header{align-items:flex-start;flex-direction:column}.wall{height:auto;min-height:0}.tiles{grid-template-columns:1fr;grid-template-rows:none}.tile{aspect-ratio:16/9}.wall.wall-fs-active .tile,.wall.expanded .tile{aspect-ratio:auto}.tile-bar{opacity:1}.brand{font-size:20px}}
+</style></head><body><header><div class="brand">CineMedia<b>Vault</b> Wall</div><div class="controls"><a class="button" href="/">Home</a><button id="playAll" class="primary">Play all</button><button id="pauseAll">Pause all</button><button id="syncAll">Sync</button><button id="fullWall">Full Screen Wall</button><button id="toggleBandwidth">Bandwidth</button><button id="addMedia">Add media</button><button id="clearWall">Clear Wall</button></div></header><div class="bandwidth" id="bandwidthPanel"><strong id="bandwidthValue">0.00 Mbps</strong><span id="bandwidthBytes">0 B/s</span><span id="playingCount">0 playing</span></div>
+<main><div class="wall" id="wall"><div class="tiles" id="tiles"></div><button class="icon" id="exitWallFs" title="Exit full screen" aria-label="Exit full screen">&#10005;</button></div></main>
 <aside class="drawer" id="drawer"><div class="drawer-head"><div><h2>Add to wall</h2><div class="hint">Search a movie, episode, or live tuner channel, then choose a slot.</div></div><button class="icon" id="closeDrawer" aria-label="Close">&#10005;</button></div><input class="search" id="wallSearch" type="search" placeholder="Search movies, episodes, or live channels"><div class="results" id="results"></div></aside>
 <script src="/assets/hls.min.js"></script><script>
-const wall=document.getElementById('wall'),drawer=document.getElementById('drawer'),search=document.getElementById('wallSearch'),results=document.getElementById('results');let slots=[],active=1,timer,hlsControllers=[];
+const wall=document.getElementById('wall'),tiles=document.getElementById('tiles'),drawer=document.getElementById('drawer'),search=document.getElementById('wallSearch'),results=document.getElementById('results');let slots=[],active=1,timer,hlsControllers=[];
 const esc=s=>String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function load(){const r=await fetch('/api/video-wall');const d=await r.json();slots=d.slots||[];render()}
 function fmt(t){if(!Number.isFinite(t))return '0:00';t=Math.max(0,Math.floor(t));return `${Math.floor(t/60)}:${String(t%60).padStart(2,'0')}`}
-function render(){hlsControllers.forEach(h=>h.destroy());hlsControllers=[];wall.innerHTML='';for(let n=1;n<=4;n++){const item=slots.find(x=>x.slot===n),el=document.createElement('section');el.className='tile'+(n===active?' active':'');el.dataset.slot=n;if(!item){el.innerHTML=`<button class="empty" data-add="${n}">Slot ${n}<br>Add a movie or episode</button>`}else{const source=item.requires_hls?item.hls_url:item.stream_url;el.innerHTML=`<video playsinline preload="metadata" muted data-source="${esc(source)}" data-hls="${item.requires_hls?'1':'0'}" data-slot="${n}"></video><div class="tile-bar"><span class="tile-title">${esc(item.title)} <small>${esc(item.subtitle)}${item.requires_hls?' - HLS':''}</small></span><button class="icon" data-back title="Rewind 10 seconds">-10</button><button class="icon" data-toggle title="Play or pause">&#9654;</button><input class="seek" data-seek type="range" min="0" max="1000" value="0" aria-label="Seek"><span class="time">0:00 / 0:00</span><button class="icon" data-forward title="Forward 10 seconds">+10</button><button class="icon" data-fullscreen title="Full screen">&#9974;</button><button class="icon" data-remove="${n}" title="Remove">&#10005;</button></div>`}wall.appendChild(el)}bindVideos();applyAudio();updateBandwidth()}
+function render(){hlsControllers.forEach(h=>h.destroy());hlsControllers=[];tiles.innerHTML='';for(let n=1;n<=4;n++){const item=slots.find(x=>x.slot===n),el=document.createElement('section');el.className='tile'+(n===active?' active':'');el.dataset.slot=n;if(!item){el.innerHTML=`<button class="empty" data-add="${n}">Slot ${n}<br>Add a movie or episode</button>`}else{const source=item.requires_hls?item.hls_url:item.stream_url;el.innerHTML=`<video playsinline preload="metadata" muted data-source="${esc(source)}" data-hls="${item.requires_hls?'1':'0'}" data-slot="${n}" data-kind="${item.media_type}" data-id="${item.media_id}" data-resume="${item.resume_position||0}"></video><div class="tile-bar"><span class="tile-title">${esc(item.title)} <small>${esc(item.subtitle)}${item.requires_hls?' - HLS':''}</small></span><button class="icon" data-back title="Rewind 10 seconds">-10</button><button class="icon" data-toggle title="Play or pause">&#9654;</button><input class="seek" data-seek type="range" min="0" max="1000" value="0" aria-label="Seek"><span class="time">0:00 / 0:00</span><button class="icon" data-forward title="Forward 10 seconds">+10</button><button class="icon" data-fullscreen title="Full screen">&#9974;</button><button class="icon" data-remove="${n}" title="Remove">&#10005;</button></div>`}tiles.appendChild(el)}bindVideos();applyAudio();updateBandwidth()}
 function wallUrl(url,slot){const join=url.includes('?')?'&':'?';return `${url}${join}wall=1&slot=${slot}`}
-function bindVideos(){document.querySelectorAll('.tile video').forEach(v=>{const tile=v.closest('.tile'),seek=tile.querySelector('[data-seek]'),label=tile.querySelector('.time'),toggle=tile.querySelector('[data-toggle]'),source=v.dataset.source,slot=v.dataset.slot;if(v.dataset.hls==='1'){if(v.canPlayType('application/vnd.apple.mpegurl'))v.src=wallUrl(source,slot);else if(window.Hls&&Hls.isSupported()){const h=new Hls({lowLatencyMode:false,backBufferLength:90,xhrSetup:(xhr,url)=>xhr.open('GET',wallUrl(url,slot),true)});h.loadSource(wallUrl(source,slot));h.attachMedia(v);hlsControllers.push(h)}else v.src=wallUrl(source,slot)}else v.src=wallUrl(source,slot);const update=()=>{if(seek&&Number.isFinite(v.duration)&&v.duration>0)seek.value=Math.round(v.currentTime/v.duration*1000);if(label)label.textContent=`${fmt(v.currentTime)} / ${fmt(v.duration)}`;if(toggle)toggle.innerHTML=v.paused?'&#9654;':'&#10074;&#10074;'};v.addEventListener('timeupdate',update);v.addEventListener('durationchange',update);v.addEventListener('play',update);v.addEventListener('pause',update);update()})}
+function saveWallPosition(v,finalSave=false){if(!v||v.dataset.kind==='tuner'||!Number.isFinite(v.duration)||v.duration<30)return;const body=JSON.stringify({slot:+v.dataset.slot,media_type:v.dataset.kind,media_id:+v.dataset.id,position:v.currentTime,duration:v.duration});if(finalSave&&navigator.sendBeacon){navigator.sendBeacon('/api/video-wall/position',new Blob([body],{type:'application/json'}));return}fetch('/api/video-wall/position',{method:'POST',headers:{'Content-Type':'application/json'},body,keepalive:finalSave}).catch(()=>{})}
+function bindVideos(){document.querySelectorAll('.tile video').forEach(v=>{const tile=v.closest('.tile'),seek=tile.querySelector('[data-seek]'),label=tile.querySelector('.time'),toggle=tile.querySelector('[data-toggle]'),source=v.dataset.source,slot=v.dataset.slot,resumeAt=parseFloat(v.dataset.resume||'0');if(v.dataset.hls==='1'){if(v.canPlayType('application/vnd.apple.mpegurl'))v.src=wallUrl(source,slot);else if(window.Hls&&Hls.isSupported()){const h=new Hls({lowLatencyMode:false,backBufferLength:90,xhrSetup:(xhr,url)=>xhr.open('GET',wallUrl(url,slot),true)});h.loadSource(wallUrl(source,slot));h.attachMedia(v);hlsControllers.push(h)}else v.src=wallUrl(source,slot)}else v.src=wallUrl(source,slot);if(resumeAt>0&&v.dataset.kind!=='tuner'){const applyResume=()=>{if(!Number.isFinite(v.duration)||v.duration<=0)return;v.currentTime=Math.min(Math.max(0,resumeAt-5),Math.max(0,v.duration-1));v.removeEventListener('loadedmetadata',applyResume);v.removeEventListener('durationchange',applyResume)};v.addEventListener('loadedmetadata',applyResume);v.addEventListener('durationchange',applyResume)}const update=()=>{if(seek&&Number.isFinite(v.duration)&&v.duration>0)seek.value=Math.round(v.currentTime/v.duration*1000);if(label)label.textContent=`${fmt(v.currentTime)} / ${fmt(v.duration)}`;if(toggle)toggle.innerHTML=v.paused?'&#9654;':'&#10074;&#10074;'};let lastSave=0;v.addEventListener('timeupdate',()=>{update();const now=Date.now();if(now-lastSave>=5000){lastSave=now;saveWallPosition(v)}});v.addEventListener('durationchange',update);v.addEventListener('play',update);v.addEventListener('pause',()=>{update();saveWallPosition(v)});update()})}
 function applyAudio(){document.querySelectorAll('.tile').forEach(t=>{t.classList.toggle('active',+t.dataset.slot===active);const v=t.querySelector('video');if(v)v.muted=+t.dataset.slot!==active})}
 wall.addEventListener('click',async e=>{const tile=e.target.closest('.tile');if(tile){active=+tile.dataset.slot;applyAudio()}const v=tile&&tile.querySelector('video');if(e.target.closest('[data-add]'))openDrawer(+e.target.closest('[data-add]').dataset.add);if(e.target.closest('[data-remove]')){await updateSlot(+e.target.closest('[data-remove]').dataset.remove,null);load()}if(v&&e.target.closest('[data-back]'))v.currentTime=Math.max(0,v.currentTime-10);if(v&&e.target.closest('[data-forward]'))v.currentTime=Math.min(Number.isFinite(v.duration)?v.duration:v.currentTime+10,v.currentTime+10);if(v&&e.target.closest('[data-toggle]'))v.paused?v.play().catch(()=>{}):v.pause();if(tile&&e.target.closest('[data-fullscreen]')){if(document.fullscreenElement)document.exitFullscreen().catch(()=>{});else if(tile.requestFullscreen)tile.requestFullscreen().catch(()=>tile.classList.toggle('expanded'));else if(tile.webkitRequestFullscreen)tile.webkitRequestFullscreen();else tile.classList.toggle('expanded')}});
 wall.addEventListener('input',e=>{const seek=e.target.closest('[data-seek]');if(!seek)return;const v=seek.closest('.tile').querySelector('video');if(v&&Number.isFinite(v.duration))v.currentTime=(+seek.value/1000)*v.duration});
 function openDrawer(slot){active=slot||active;drawer.classList.add('open');search.focus()}
 document.getElementById('addMedia').onclick=()=>openDrawer(active);document.getElementById('closeDrawer').onclick=()=>drawer.classList.remove('open');
+document.getElementById('clearWall').onclick=async()=>{if(!confirm('Remove all 4 wall slots and their saved positions?'))return;const response=await fetch('/api/video-wall/clear',{method:'POST'});const result=await response.json();if(!result.ok)return;active=1;await load()};
 document.getElementById('playAll').onclick=()=>document.querySelectorAll('video').forEach(v=>v.play().catch(()=>{}));document.getElementById('pauseAll').onclick=()=>document.querySelectorAll('video').forEach(v=>v.pause());document.getElementById('syncAll').onclick=()=>{const vs=[...document.querySelectorAll('video')];if(!vs.length)return;const t=Math.min(...vs.map(v=>v.currentTime||0));vs.forEach(v=>v.currentTime=t)};
+function fsElement(){return document.fullscreenElement||document.webkitFullscreenElement||null}function syncWallFsUi(){wall.classList.toggle('wall-fs-active',fsElement()===wall)}function requestWallFullscreen(){const request=wall.requestFullscreen||wall.webkitRequestFullscreen;if(!request){wall.classList.add('expanded');return}try{const pending=request.call(wall);if(pending&&pending.catch)pending.catch(()=>wall.classList.add('expanded'))}catch(_){wall.classList.add('expanded')}}function exitWallFullscreen(){if(document.exitFullscreen){const pending=document.exitFullscreen();if(pending&&pending.catch)pending.catch(()=>{})}else if(document.webkitExitFullscreen)document.webkitExitFullscreen();wall.classList.remove('expanded')}document.getElementById('fullWall').onclick=()=>{if(fsElement()===wall||wall.classList.contains('expanded'))exitWallFullscreen();else requestWallFullscreen()};document.getElementById('exitWallFs').onclick=exitWallFullscreen;document.addEventListener('fullscreenchange',syncWallFsUi);document.addEventListener('webkitfullscreenchange',syncWallFsUi);
 const bandwidthPanel=document.getElementById('bandwidthPanel');document.getElementById('toggleBandwidth').onclick=()=>{bandwidthPanel.classList.toggle('open');localStorage.setItem('cmv-wall-bandwidth',bandwidthPanel.classList.contains('open')?'1':'0');updateBandwidth()};if(localStorage.getItem('cmv-wall-bandwidth')==='1')bandwidthPanel.classList.add('open');
 function humanRate(n){if(n>=1048576)return (n/1048576).toFixed(2)+' MB/s';if(n>=1024)return (n/1024).toFixed(1)+' KB/s';return Math.round(n)+' B/s'}async function updateBandwidth(){const playing=[...document.querySelectorAll('video')].filter(v=>!v.paused&&!v.ended).length;document.getElementById('playingCount').textContent=`${playing} playing`;if(!bandwidthPanel.classList.contains('open'))return;try{const r=await fetch('/api/video-wall/bandwidth',{cache:'no-store'}),d=await r.json();document.getElementById('bandwidthValue').textContent=`${Number(d.mbps||0).toFixed(2)} Mbps`;document.getElementById('bandwidthBytes').textContent=humanRate(Number(d.bytes_per_second||0))}catch(_){document.getElementById('bandwidthValue').textContent='Unavailable'}}setInterval(updateBandwidth,1000);
 async function updateSlot(slot,item){await fetch('/api/video-wall/slot',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({slot,media_type:item&&item.media_type,media_id:item&&item.media_id})})}
 search.addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(runSearch,250)});async function runSearch(){const q=search.value.trim();if(q.length<2){results.innerHTML='';return}const r=await fetch('/api/video-wall/search?q='+encodeURIComponent(q));const d=await r.json();results.innerHTML=(d.items||[]).map(i=>`<article class="result">${i.poster?`<img src="${esc(i.poster)}" alt="">`:'<span></span>'}<div><strong>${esc(i.title)}</strong><small>${esc(i.subtitle)}</small></div><div class="slot-picker">${[1,2,3,4].map(n=>`<button data-pick="${n}" data-kind="${i.media_type}" data-id="${i.media_id}">${n}</button>`).join('')}</div></article>`).join('')||'<p class="hint">No matches.</p>'}
 results.addEventListener('click',async e=>{const b=e.target.closest('[data-pick]');if(!b)return;await updateSlot(+b.dataset.pick,{media_type:b.dataset.kind,media_id:+b.dataset.id});active=+b.dataset.pick;drawer.classList.remove('open');load()});load();
+window.addEventListener('pagehide',()=>document.querySelectorAll('.tile video').forEach(v=>saveWallPosition(v,true)));
 </script></body></html>"""
 
 
-class CombinedHandler(BaseHTTPRequestHandler):
+class CombinedHandler(VideoListsMixin, BaseHTTPRequestHandler):
     server_version = "CombinedMediaLibrary/1.0"
 
     def log_message(self, fmt, *args):
@@ -3656,6 +4279,13 @@ class CombinedHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?", 1)[0]
+        if path.startswith("/api/music/"):
+            user = self.current_user()
+            if not user:
+                return self.require_auth(path)
+            handled = music_module.handle_post(self, user, path)
+            if handled is not False:
+                return handled
         if path == "/login":
             return self.login_submit()
         if path == "/signup":
@@ -3700,6 +4330,16 @@ class CombinedHandler(BaseHTTPRequestHandler):
             if not user:
                 return self.require_auth(path)
             return self.api_watch_bulk_watched(user)
+        if path == "/api/video/queue":
+            user = self.current_user()
+            if not user:
+                return self.require_auth(path)
+            return self.api_video_queue(user)
+        if path == "/api/video/playlists":
+            user = self.current_user()
+            if not user:
+                return self.require_auth(path)
+            return self.api_video_playlists(user)
         if path == "/api/playback-mode":
             user = self.current_user()
             if not user:
@@ -3715,6 +4355,16 @@ class CombinedHandler(BaseHTTPRequestHandler):
             if not user:
                 return self.require_auth(path)
             return self.api_video_wall_slot(user)
+        if path == "/api/video-wall/position":
+            user = self.current_user()
+            if not user:
+                return self.require_auth(path)
+            return self.api_video_wall_position(user)
+        if path == "/api/video-wall/clear":
+            user = self.current_user()
+            if not user:
+                return self.require_auth(path)
+            return self.api_video_wall_clear(user)
         if path == "/api/hdhr/scan":
             user = self.current_user()
             if not user or not user["is_admin"]:
@@ -3939,11 +4589,11 @@ class CombinedHandler(BaseHTTPRequestHandler):
 .topbar {{ display:flex; justify-content:space-between; align-items:flex-start; gap:18px; }}
 .brand h1 {{ margin:0; }}
 .brand .cmv-logo {{ font-size:clamp(38px,7vw,68px); }}
-.cmv-logo {{ display:inline-flex; align-items:center; gap:.32em; color:#fff; text-decoration:none; text-transform:uppercase; line-height:.88; }}
-.cmv-left {{ display:grid; gap:.08em; align-items:center; }}
-.cmv-cine,.cmv-media {{ font-size:.54em; font-weight:950; letter-spacing:.03em; line-height:.86; }}
+.cmv-logo {{ display:inline-flex; align-items:center; gap:.32em; color:#fff; text-decoration:none; line-height:.88; }}
+.cmv-left {{ display:inline-flex; gap:0; align-items:center; }}
+.cmv-cine,.cmv-media {{ font-family:"Segoe Script","Brush Script MT","URW Chancery L",cursive; font-size:1.02em; font-weight:700; letter-spacing:-.055em; line-height:1; }}
 .cmv-divider {{ width:.055em; height:1.14em; background:rgba(255,255,255,.72); }}
-.cmv-vault {{ color:var(--lime); font-size:.96em; font-weight:950; letter-spacing:.02em; }}
+.cmv-vault {{ color:var(--lime); font-size:.96em; font-weight:950; letter-spacing:.02em; text-transform:uppercase; }}
 .cmv-mark {{ width:1.1em; height:1.1em; color:var(--lime); flex:0 0 auto; }}
 .signin-open {{ min-height:43px; padding:0 22px; border:1px solid rgba(255,255,255,.24); border-radius:999px; background:rgba(255,255,255,.13); color:#fff; font-size:17px; font-weight:950; cursor:pointer; backdrop-filter:blur(12px); }}
 .content {{ width:min(720px,100%); margin-top:auto; padding:0 0 48px; }}
@@ -3958,7 +4608,7 @@ h2 {{ margin:0 0 18px; font-size:clamp(44px,8vw,74px); line-height:.98; letter-s
 .signup {{ margin-top:14px; padding-top:14px; border-top:1px solid rgba(255,255,255,.14); }}
 .signup summary {{ cursor:pointer; font-size:14px; color:#fff; font-weight:950; margin-bottom:10px; }}
 .signup button {{ width:100%; min-height:42px; margin-top:8px; border-radius:999px; border:1px solid rgba(255,255,255,.22); background:rgba(255,255,255,.12); color:#fff; cursor:pointer; font-size:15px; font-weight:950; }}
-@media (max-width:700px) {{ .page {{ padding:30px; }} .backdrop {{ grid-template-columns:repeat(8,minmax(58px,1fr)); gap:8px; inset:-8vh -78vw; }} .content {{ padding-bottom:42px; }} .brand .cmv-logo {{ font-size:clamp(30px,9vw,44px); }} .cmv-mark {{ width:.82em; height:.82em; }} .cmv-media {{ letter-spacing:.03em; }} }}
+@media (max-width:700px) {{ .page {{ padding:30px; }} .backdrop {{ grid-template-columns:repeat(8,minmax(58px,1fr)); gap:8px; inset:-8vh -78vw; }} .content {{ padding-bottom:42px; }} .brand .cmv-logo {{ font-size:clamp(30px,9vw,44px); }} .cmv-mark {{ width:.82em; height:.82em; }} .cmv-media {{ letter-spacing:-.055em; }} }}
 </style></head><body>
 <div class="backdrop">{backdrop}</div><div class="veil"></div>
 <main class="page">
@@ -4323,17 +4973,11 @@ label {{ display:block; font-weight:850; color:#cfd5df; margin:10px 0 6px; }} in
 
     def admin_module_logo_submit(self, user):
         try:
-            form = cgi.FieldStorage(
-                fp=self.rfile,
-                headers=self.headers,
-                environ={
-                    "REQUEST_METHOD": "POST",
-                    "CONTENT_TYPE": self.headers.get("Content-Type", ""),
-                    "CONTENT_LENGTH": self.headers.get("Content-Length", "0"),
-                },
-            )
-            module_id = str(form.getfirst("module_id") or "").strip()
-            file_item = form["logo_file"] if "logo_file" in form else None
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length) if length > 0 else b""
+            form = parse_multipart_form(self.headers.get("Content-Type", ""), body)
+            module_id = str(form.get("module_id") or "").strip()
+            file_item = form.get("logo_file")
         except Exception as exc:
             return self.admin_modules_page(user, f"Could not read upload: {exc}")
         if not module_id or file_item is None or not getattr(file_item, "filename", ""):
@@ -4487,7 +5131,7 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
         kind = str(item.get("kind") or payload.get("kind") or "").replace("tv", "tv")
         media_id = 0
         try:
-            media_id = int(key.rsplit(":", 1)[-1])
+            media_id = int(item.get("mediaId") or key.rsplit(":", 1)[-1])
         except Exception:
             pass
         position = float(payload.get("position", item.get("position", 0)) or 0)
@@ -4665,10 +5309,31 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
 
     def api_watch_state(self, user):
         parsed = urllib.parse.urlparse(self.path)
-        key = urllib.parse.parse_qs(parsed.query).get("key", [""])[0]
+        params = urllib.parse.parse_qs(parsed.query)
+        key = params.get("key", [""])[0]
+        title = params.get("title", [""])[0]
+        subtitle = params.get("subtitle", [""])[0]
         conn = db_connect()
         try:
             row = conn.execute("SELECT * FROM user_media_state WHERE user_id=? AND media_key=?", (int(user["id"]), key)).fetchone()
+            if not row and key.startswith("movie-path:") and title:
+                movie = movie_for_saved_title(title, subtitle)
+                if movie and movie_media_key(movie) == key:
+                    legacy = conn.execute(
+                        """SELECT * FROM user_media_state WHERE user_id=? AND media_type='movie'
+                           AND lower(title)=lower(?) ORDER BY updated_at DESC LIMIT 1""",
+                        (int(user["id"]), title),
+                    ).fetchone()
+                    if legacy:
+                        current = continue_item_for_movie(movie)
+                        conn.execute(
+                            """UPDATE user_media_state SET media_key=?,media_id=?,title=?,subtitle=?,poster=?,href=?,detail_href=?
+                               WHERE user_id=? AND media_key=?""",
+                            (current["key"], int(movie.id), current["title"], current["subtitle"], current["poster"],
+                             current["href"], current["detailHref"], int(user["id"]), legacy["media_key"]),
+                        )
+                        conn.commit()
+                        row = conn.execute("SELECT * FROM user_media_state WHERE user_id=? AND media_key=?", (int(user["id"]), key)).fetchone()
             return self.json_response({"ok": True, "item": user_state_item(row) if row else None})
         finally:
             conn.close()
@@ -4688,7 +5353,32 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
                 """,
                 (int(user["id"]),),
             ).fetchall()
-            return self.json_response({"ok": True, "items": [continue_card_item(row) for row in rows]})
+            items = []
+            for row in rows:
+                card = continue_card_item(row)
+                movie_card_changed = (
+                    row["media_type"] == "movie"
+                    and card.get("key", "").startswith("movie-path:")
+                    and (
+                        row["media_key"] != card["key"]
+                        or int(row["media_id"] or 0) != int(card.get("mediaId") or 0)
+                        or str(row["title"] or "") != str(card.get("title") or "")
+                        or str(row["subtitle"] or "") != str(card.get("subtitle") or "")
+                        or str(row["poster"] or "") != str(card.get("poster") or "")
+                        or str(row["href"] or "") != str(card.get("href") or "")
+                        or str(row["detail_href"] or "") != str(card.get("detailHref") or "")
+                    )
+                )
+                if movie_card_changed:
+                    conn.execute(
+                        """UPDATE user_media_state SET media_key=?,media_id=?,title=?,subtitle=?,poster=?,href=?,detail_href=?
+                           WHERE user_id=? AND media_key=?""",
+                        (card["key"], int(card.get("mediaId") or 0), card["title"], card["subtitle"], card["poster"],
+                         card["href"], card["detailHref"], int(user["id"]), row["media_key"]),
+                    )
+                items.append(card)
+            conn.commit()
+            return self.json_response({"ok": True, "items": items})
         finally:
             conn.close()
 
@@ -4736,6 +5426,26 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
         user = self.current_user()
         if not user:
             return self.require_auth(path)
+        movie_id_routes = (
+            "/movie/fix-match/",
+            "/movie/apply-match/",
+            "/player/movie/",
+            "/watch/movie/",
+            "/movie/",
+            "/play/",
+            "/download/",
+        )
+        for prefix in movie_id_routes:
+            if path.startswith(prefix):
+                requested_id = path.rsplit("/", 1)[-1]
+                replacement = movie_for_stale_saved_id(user, requested_id)
+                if replacement:
+                    path = prefix + str(replacement.id)
+                break
+        if path == "/video-lists":
+            return self.video_lists_page(user)
+        if path == "/api/video/playlist-next":
+            return self.api_video_playlist_next(user)
         if path == "/admin/users":
             if not user["is_admin"]:
                 return self.send_error(403)
@@ -4765,6 +5475,10 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
             return self.landing()
         if path == "/search":
             return self.search_page()
+        if path == "/music" or path.startswith("/music/") or path.startswith("/api/music/"):
+            handled = music_module.handle_get(self, user, path, head=head)
+            if handled is not False:
+                return handled
         if path == "/wall":
             return self.video_wall_page()
         if path == "/live-tv":
@@ -4783,6 +5497,8 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
             return self.direct_player("movie", path.rsplit("/", 1)[-1])
         if path.startswith("/player/tv/"):
             return self.direct_player("tv", path.rsplit("/", 1)[-1])
+        if path.startswith("/subtitles/"):
+            return self.serve_subtitle(path, head_only=head)
         if path.startswith("/hls/"):
             return self.serve_hls(path)
         if path == "/api/refresh":
@@ -5837,7 +6553,7 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
     def api_video_wall(self, user):
         conn = db_connect()
         try:
-            rows = conn.execute("SELECT slot, media_type, media_id, media_path FROM user_video_wall WHERE user_id=? ORDER BY slot", (int(user["id"]),)).fetchall()
+            rows = conn.execute("SELECT slot, media_type, media_id, media_path, position_seconds, duration_seconds FROM user_video_wall WHERE user_id=? ORDER BY slot", (int(user["id"]),)).fetchall()
         finally:
             conn.close()
         slots = []
@@ -5846,6 +6562,9 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
             if item:
                 item["slot"] = int(row["slot"])
                 item.pop("media_path", None)
+                if row["media_type"] != "tuner":
+                    item["resume_position"] = float(row["position_seconds"] or 0)
+                    item["resume_duration"] = float(row["duration_seconds"] or 0)
                 slots.append(item)
         return self.json_response({"ok": True, "slots": slots})
 
@@ -5864,9 +6583,10 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
             if not media_id:
                 conn.execute("DELETE FROM user_video_wall WHERE user_id=? AND slot=?", (int(user["id"]), slot))
             elif media_type in {"movie", "tv", "tuner"} and (wall_item := self.video_wall_item(media_type, int(media_id))):
-                conn.execute("""INSERT INTO user_video_wall(user_id,slot,media_type,media_id,media_path,updated_at)
-                    VALUES(?,?,?,?,?,?) ON CONFLICT(user_id,slot) DO UPDATE SET
-                    media_type=excluded.media_type,media_id=excluded.media_id,media_path=excluded.media_path,updated_at=excluded.updated_at""",
+                conn.execute("""INSERT INTO user_video_wall(user_id,slot,media_type,media_id,media_path,position_seconds,duration_seconds,updated_at)
+                    VALUES(?,?,?,?,?,0,0,?) ON CONFLICT(user_id,slot) DO UPDATE SET
+                    media_type=excluded.media_type,media_id=excluded.media_id,media_path=excluded.media_path,
+                    position_seconds=0,duration_seconds=0,updated_at=excluded.updated_at""",
                     (int(user["id"]), slot, media_type, int(wall_item["media_id"]), wall_item["media_path"], auth_now()))
             else:
                 return self.json_response({"ok": False, "error": "media item not found"})
@@ -5874,6 +6594,54 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
         finally:
             conn.close()
         return self.json_response({"ok": True, "slot": slot})
+
+    def api_video_wall_position(self, user):
+        payload = self.read_json()
+        try:
+            slot = int(payload.get("slot"))
+            media_id = int(payload.get("media_id"))
+            position = max(0.0, float(payload.get("position") or 0))
+            duration = max(0.0, float(payload.get("duration") or 0))
+        except (TypeError, ValueError):
+            return self.json_response({"ok": False, "error": "invalid wall position payload"})
+        media_type = str(payload.get("media_type") or "")
+        if slot not in {1, 2, 3, 4} or media_type not in {"movie", "tv", "tuner"}:
+            return self.json_response({"ok": False, "error": "invalid wall slot or media type"})
+        conn = db_connect()
+        try:
+            row = conn.execute(
+                "SELECT media_type,media_id,media_path FROM user_video_wall WHERE user_id=? AND slot=?",
+                (int(user["id"]), slot),
+            ).fetchone()
+            if not row:
+                return self.json_response({"ok": False, "error": "slot is empty"})
+            if row["media_type"] == "tuner":
+                return self.json_response({"ok": True, "ignored": True, "reason": "live tuner"})
+            current = self.video_wall_item(row["media_type"], int(row["media_id"]), row["media_path"], include_compatibility=False)
+            if not current or current["media_type"] != media_type or int(current["media_id"]) != media_id:
+                return self.json_response({"ok": False, "ignored": True, "error": "slot content changed"})
+            if duration and position >= duration * 0.92:
+                position = 0.0
+            elif position < 10:
+                position = 0.0
+            conn.execute(
+                "UPDATE user_video_wall SET position_seconds=?,duration_seconds=?,updated_at=? WHERE user_id=? AND slot=?",
+                (position, duration, auth_now(), int(user["id"]), slot),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return self.json_response({"ok": True, "slot": slot, "position": position})
+
+    def api_video_wall_clear(self, user):
+        conn = db_connect()
+        try:
+            cursor = conn.execute("DELETE FROM user_video_wall WHERE user_id=?", (int(user["id"]),))
+            conn.commit()
+            cleared = int(cursor.rowcount or 0)
+        finally:
+            conn.close()
+        return self.json_response({"ok": True, "cleared": cleared})
 
     def api_video_wall_search(self, user):
         parsed = urllib.parse.urlparse(self.path)
@@ -5958,7 +6726,7 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
             playback_mode = "direct"
         context = direct_player_context(kind, item_id, playback_mode=playback_mode)
         if user and user["is_admin"]:
-            context["actions"] += action_link("A", "Admin", f"/admin/media/{kind}/{item_id}")
+            context["more_menu"] += more_menu_link("A", "Admin", "File details and administrative controls", f"/admin/media/{kind}/{item_id}")
         direct_play = query.get("play", [""])[0] == "1"
         base_href = f"/player/{kind}/{item_id}"
         direct_href = f"{base_href}?mode=direct"
@@ -5977,6 +6745,9 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
             .replace("{{SUMMARY}}", html.escape(context["summary"]))
             .replace("{{ACTORS}}", context["actors"])
             .replace("{{VIDEO_LABEL}}", html.escape(context["video_label"]))
+            .replace("{{SUBTITLE_TRACKS}}", context["caption_tracks"])
+            .replace("{{CAPTION_CONTROL}}", context["caption_control"])
+            .replace("{{SUBTITLE_SUMMARY}}", html.escape(context["caption_summary"]))
             .replace("{{DIRECT_MODE_CLASS}}", "active" if playback_mode == "direct" else "")
             .replace("{{HLS_MODE_CLASS}}", "active" if playback_mode == "hls" else "")
             .replace("{{DIRECT_MODE_HREF}}", html.escape(direct_href))
@@ -5988,6 +6759,7 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
             .replace("{{DOWNLOAD_DEFAULT_PERCENT}}", str(int(round(MOBILE_DOWNLOAD_TARGET_SOURCE_RATIO * 100))))
             .replace("{{DOWNLOAD_DEFAULT_LABEL}}", html.escape(movie_app.human_size(int((context.get("source_size") or 0) * MOBILE_DOWNLOAD_TARGET_SOURCE_RATIO))))
             .replace("{{ACTIONS}}", context["actions"])
+            .replace("{{MORE_MENU}}", context["more_menu"])
             .replace("{{PLAYER_NAV}}", context["player_nav"])
             .replace("{{HERO_ATTRS}}", " style=\"display:none\"" if direct_play else "")
             .replace("{{PLAYER_OPEN_CLASS}}", " open" if direct_play else "")
@@ -6004,6 +6776,46 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(data)
+
+    def serve_subtitle(self, request_path: str, head_only: bool = False):
+        match = re.match(r"^/subtitles/(movie|tv)/([^/]+)/([a-z0-9-]+)\.vtt$", request_path)
+        if not match:
+            return self.send_error(404, "Invalid subtitle path")
+        kind, item_id, token = match.groups()
+        media = media_for_kind(kind, urllib.parse.unquote(item_id))
+        tracks = discover_subtitles(media["path"], kind, item_id)
+        track = next((entry for entry in tracks if entry["token"] == token), None)
+        if not track:
+            return self.send_error(404, "Subtitle track not found")
+        source = Path(track["path"]).resolve()
+        source_stat = source.stat()
+        identity = f"{source}:{source_stat.st_mtime_ns}:{source_stat.st_size}:{track.get('stream')}"
+        cache_name = hashlib.sha256(identity.encode("utf-8")).hexdigest() + ".vtt"
+        SUBTITLE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        target = SUBTITLE_CACHE_DIR / cache_name
+        if not target.is_file() or target.stat().st_size < 8:
+            temporary = target.with_suffix(".tmp")
+            command = ["ffmpeg", "-y", "-v", "error", "-i", str(source)]
+            if track["source"] == "embedded":
+                command += ["-map", f"0:{int(track['stream'])}"]
+            command += ["-f", "webvtt", str(temporary)]
+            try:
+                subprocess.run(command, check=True, timeout=90, capture_output=True)
+                temporary.replace(target)
+            except Exception as exc:
+                temporary.unlink(missing_ok=True)
+                print(f"Subtitle conversion failed for {source}: {exc}", flush=True)
+                return self.send_error(500, "Subtitle conversion failed")
+        size = target.stat().st_size
+        self.send_response(200)
+        self.send_header("Content-Type", "text/vtt; charset=utf-8")
+        self.send_header("Content-Length", str(size))
+        self.send_header("Cache-Control", "private, max-age=86400")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        if not head_only:
+            with target.open("rb") as handle:
+                shutil.copyfileobj(handle, self.wfile)
 
     def serve_hls(self, request_path: str):
         match = re.match(r"^/hls/(movie|tv|tuner)/([^/]+)/([^/]+)$", request_path)
@@ -6269,6 +7081,53 @@ def hls_segment_count(stream_dir: Path) -> int:
     return len(list(stream_dir.glob("seg_*.ts")))
 
 
+def hls_playlist_duration(playlist: Path) -> float:
+    if not playlist.is_file():
+        return 0.0
+    text = playlist.read_text(encoding="utf-8", errors="ignore")
+    total = 0.0
+    for value in re.findall(r"#EXTINF:([0-9]+(?:\.[0-9]+)?)", text):
+        try:
+            total += float(value)
+        except ValueError:
+            continue
+    return total
+
+
+def source_media_duration(path: Path) -> float:
+    try:
+        result = subprocess.run(
+            [
+                os.environ.get("FFPROBE_BIN") or shutil.which("ffprobe") or "ffprobe",
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        return max(0.0, float(result.stdout.strip()))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0.0
+
+
+def hls_playlist_is_complete(path: Path, playlist: Path) -> bool:
+    if not playlist.is_file():
+        return False
+    text = playlist.read_text(encoding="utf-8", errors="ignore")
+    if "#EXT-X-ENDLIST" not in text:
+        return False
+    playlist_duration = hls_playlist_duration(playlist)
+    media_duration = source_media_duration(path)
+    if media_duration <= 0:
+        return True
+    tolerance = max(8.0, float(HLS_SEGMENT_SECONDS) * 2.0)
+    return playlist_duration >= media_duration - tolerance
+
+
 def wait_for_hls_ready(stream_dir: Path, playlist: Path, process: subprocess.Popen) -> None:
     deadline = time.time() + max(1.0, HLS_START_TIMEOUT)
     target_segments = max(1, HLS_PREBUFFER_SEGMENTS)
@@ -6386,8 +7245,11 @@ def ensure_hls_stream(kind: str, item_id: str, path: Path) -> dict:
         existing = TRANSCODES.get(key)
         if existing:
             process = existing.get("process")
-            if playlist.is_file() or (process and process.poll() is None):
+            if process and process.poll() is None:
                 return existing
+            if hls_playlist_is_complete(path, playlist):
+                return existing
+            TRANSCODES.pop(key, None)
         stream_dir.mkdir(parents=True, exist_ok=True)
         if pid_file.is_file():
             try:
@@ -6407,7 +7269,7 @@ def ensure_hls_stream(kind: str, item_id: str, path: Path) -> dict:
                 return stream
             except (OSError, ValueError):
                 pid_file.unlink(missing_ok=True)
-        if playlist.is_file() and "EXT-X-ENDLIST" in playlist.read_text(encoding="utf-8", errors="ignore"):
+        if hls_playlist_is_complete(path, playlist):
             stream = {
                 "key": key,
                 "dir": stream_dir,
@@ -6616,17 +7478,24 @@ def main():
     movie_app.load_metadata_map()
     tv_app.load_poster_map()
     tv_app.load_metadata_map()
+    migrated_movie_states = migrate_legacy_movie_state_keys()
     actor_stats = rebuild_actor_index()
     movie_app.movie_index.refresh_background()
     tv_app.tv_index.refresh_background()
     start_hls_cleanup_thread()
     start_hdhr_guide_thread()
+    start_upstream_media_sync_thread()
 
     print(f"Loaded {len(movie_app.movie_index.items)} movies", flush=True)
     print(f"Loaded {len(tv_app.tv_index.shows)} shows and {len(tv_app.tv_index.episode_by_id)} episodes", flush=True)
     print(f"Indexed {actor_stats['actors']} actors across {actor_stats['links']} library links", flush=True)
+    print(f"Migrated {migrated_movie_states} legacy movie state key(s) to stable identities", flush=True)
     print(
         f"HLS cache cleanup: {HLS_CACHE_DIR} older than {HLS_CACHE_MAX_AGE_HOURS:g} hour(s), every {HLS_CLEANUP_INTERVAL_MINUTES:g} minute(s)",
+        flush=True,
+    )
+    print(
+        f"Lab media sync: production caches every {UPSTREAM_SYNC_INTERVAL_SECONDS:g}s after {UPSTREAM_SYNC_DEBOUNCE_SECONDS:g}s stable",
         flush=True,
     )
     tls_cert = os.environ.get("CINEVAULT_TLS_CERT", "")

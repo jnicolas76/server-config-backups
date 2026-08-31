@@ -513,6 +513,8 @@ CREATE TABLE IF NOT EXISTS user_video_wall (
   media_type TEXT NOT NULL CHECK(media_type IN ('movie', 'tv', 'tuner')),
   media_id INTEGER NOT NULL,
   media_path TEXT NOT NULL DEFAULT '',
+  position_seconds REAL NOT NULL DEFAULT 0,
+  duration_seconds REAL NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL,
   PRIMARY KEY(user_id, slot)
 );
@@ -608,6 +610,10 @@ def ensure_auth_schema() -> None:
         wall_columns = {row["name"] for row in conn.execute("PRAGMA table_info(user_video_wall)").fetchall()}
         if "media_path" not in wall_columns:
             conn.execute("ALTER TABLE user_video_wall ADD COLUMN media_path TEXT NOT NULL DEFAULT ''")
+        if "position_seconds" not in wall_columns:
+            conn.execute("ALTER TABLE user_video_wall ADD COLUMN position_seconds REAL NOT NULL DEFAULT 0")
+        if "duration_seconds" not in wall_columns:
+            conn.execute("ALTER TABLE user_video_wall ADD COLUMN duration_seconds REAL NOT NULL DEFAULT 0")
         wall_sql_row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='user_video_wall'").fetchone()
         if wall_sql_row and "'tuner'" not in (wall_sql_row["sql"] or ""):
             conn.execute("ALTER TABLE user_video_wall RENAME TO user_video_wall_legacy")
@@ -615,10 +621,12 @@ def ensure_auth_schema() -> None:
               user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
               slot INTEGER NOT NULL CHECK(slot BETWEEN 1 AND 4),
               media_type TEXT NOT NULL CHECK(media_type IN ('movie','tv','tuner')),
-              media_id INTEGER NOT NULL, media_path TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL,
+              media_id INTEGER NOT NULL, media_path TEXT NOT NULL DEFAULT '',
+              position_seconds REAL NOT NULL DEFAULT 0, duration_seconds REAL NOT NULL DEFAULT 0,
+              updated_at TEXT NOT NULL,
               PRIMARY KEY(user_id,slot))""")
-            conn.execute("""INSERT INTO user_video_wall(user_id,slot,media_type,media_id,media_path,updated_at)
-              SELECT user_id,slot,media_type,media_id,media_path,updated_at FROM user_video_wall_legacy""")
+            conn.execute("""INSERT INTO user_video_wall(user_id,slot,media_type,media_id,media_path,position_seconds,duration_seconds,updated_at)
+              SELECT user_id,slot,media_type,media_id,media_path,position_seconds,duration_seconds,updated_at FROM user_video_wall_legacy""")
             conn.execute("DROP TABLE user_video_wall_legacy")
         now = auth_now()
         admin_hash = password_hash("admin1")
@@ -1184,11 +1192,11 @@ LANDING_PAGE = """<!doctype html>
     .nav { position:relative; z-index:4; display:grid; grid-template-columns:auto minmax(220px,420px) auto; align-items:center; gap:28px; padding:22px 30px; }
     .brand-wrap { min-width:max-content; }
     .brand { font-size:30px; font-weight:900; letter-spacing:0; line-height:1; }
-    .cmv-logo { display:inline-flex; align-items:center; gap:.34em; color:#fff; text-decoration:none; text-transform:uppercase; letter-spacing:0; line-height:.88; }
-    .cmv-left { display:grid; gap:.08em; align-items:center; }
-    .cmv-cine,.cmv-media { font-size:.54em; font-weight:950; letter-spacing:.03em; line-height:.86; }
+    .cmv-logo { display:inline-flex; align-items:center; gap:.34em; color:#fff; text-decoration:none; letter-spacing:0; line-height:.88; }
+    .cmv-left { display:inline-flex; gap:0; align-items:center; white-space:nowrap; }
+    .cmv-cine,.cmv-media { font-family:"Segoe Script","Brush Script MT","URW Chancery L",cursive; font-size:1.02em; font-weight:700; letter-spacing:-.055em; line-height:1; }
     .cmv-divider { width:.055em; height:1.16em; background:rgba(255,255,255,.72); }
-    .cmv-vault { color:var(--accent); font-size:.98em; font-weight:950; letter-spacing:.02em; }
+    .cmv-vault { color:var(--accent); font-size:.98em; font-weight:950; letter-spacing:.02em; text-transform:uppercase; }
     .cmv-mark { width:1.2em; height:1.2em; color:var(--accent); flex:0 0 auto; }
     .brand-credit { margin-top:4px; color:rgba(238,244,255,.72); font-size:11px; font-weight:700; }
     .search { width:100%; height:38px; border-radius:999px; border:1px solid var(--line); background:rgba(255,255,255,.12); color:#fff; padding:0 16px; font-size:15px; }
@@ -1290,11 +1298,11 @@ HOME_PAGE = """<!doctype html>
     .home-backdrop img:nth-child(5n) { transform:translateY(56px); }
     header { position:sticky; top:0; z-index:5; width:100%; max-width:100vw; min-width:0; display:flex; align-items:center; justify-content:space-between; gap:18px; padding:22px 24px 14px; background:linear-gradient(180deg,#050506 0%,rgba(5,5,6,.92) 74%,rgba(5,5,6,0) 100%); }
     .brand { font-size:34px; font-weight:900; letter-spacing:0; }
-    .cmv-logo { display:inline-flex; align-items:center; gap:.30em; color:#fff; text-decoration:none; text-transform:uppercase; line-height:.88; white-space:nowrap; }
-    .cmv-left { display:grid; gap:.08em; align-items:center; }
-    .cmv-cine,.cmv-media { font-size:.54em; font-weight:950; letter-spacing:.03em; line-height:.86; }
+    .cmv-logo { display:inline-flex; align-items:center; gap:.30em; color:#fff; text-decoration:none; line-height:.88; white-space:nowrap; }
+    .cmv-left { display:inline-flex; gap:0; align-items:center; }
+    .cmv-cine,.cmv-media { font-family:"Segoe Script","Brush Script MT","URW Chancery L",cursive; font-size:1.02em; font-weight:700; letter-spacing:-.055em; line-height:1; }
     .cmv-divider { width:.052em; height:1.12em; background:rgba(255,255,255,.66); }
-    .cmv-vault { color:var(--gold); font-size:.95em; font-weight:950; letter-spacing:.02em; }
+    .cmv-vault { color:var(--gold); font-size:.95em; font-weight:950; letter-spacing:.02em; text-transform:uppercase; }
     .cmv-mark { width:1.08em; height:1.08em; color:var(--gold); flex:0 0 auto; }
     .top-actions { min-width:0; display:flex; align-items:center; gap:18px; color:#fff; }
     .home-search-panel { display:none; position:sticky; top:82px; z-index:4; padding:0 24px 14px; background:linear-gradient(180deg,rgba(5,5,6,.92),rgba(5,5,6,0)); }
@@ -1427,7 +1435,7 @@ HOME_PAGE = """<!doctype html>
       header { padding:22px 24px 12px; }
       .brand { font-size:23px; }
       .cmv-mark { width:.80em; height:.80em; }
-      .cmv-media { letter-spacing:.03em; }
+      .cmv-media { letter-spacing:-.055em; }
       .top-actions { gap:12px; }
       .playback-toggle { min-height:30px; min-width:54px; padding:0 8px; font-size:10px; }
       .home-search-panel { top:68px; padding:0 24px 12px; }
@@ -1873,11 +1881,10 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
     .episode-title { margin:12px 0 8px; font-size:clamp(22px,4vw,34px); font-weight:900; }
     .meta { display:flex; flex-wrap:wrap; justify-content:center; gap:9px 14px; color:#eef2f7; font-size:17px; margin:12px 0 18px; }
     .rating { display:inline-flex; align-items:center; min-height:31px; padding:0 10px; border-radius:10px; background:#050506; font-weight:900; }
-    .resume-row { display:grid; grid-template-columns:minmax(190px,400px) 44px; gap:10px; width:min(464px,100%); margin:8px auto 16px; }
+    .resume-row { display:grid; grid-template-columns:minmax(190px,400px) 104px; gap:10px; width:min(524px,100%); margin:8px auto 16px; }
     .resume { min-height:42px; border:0; border-radius:999px; background:#fff; color:#111; font-size:17px; font-weight:900; cursor:pointer; }
-    .restart { width:44px; height:44px; display:grid; place-items:center; border-radius:999px; border:1px solid rgba(255,255,255,.12); background:rgba(122,54,70,.50); color:#fff; font-size:0; cursor:pointer; position:relative; }
-    .restart::before { content:"\\21BB"; font-size:23px; line-height:1; transform:translateX(-2px); }
-    .restart::after { content:"\\25B6"; position:absolute; font-size:11px; line-height:1; transform:translate(5px,1px); }
+    .restart { min-width:104px; height:44px; display:flex; align-items:center; justify-content:center; gap:7px; padding:0 14px; border-radius:999px; border:1px solid rgba(255,255,255,.16); background:rgba(122,54,70,.58); color:#fff; font-size:13px; font-weight:900; cursor:pointer; }
+    .restart .restart-icon { font-size:21px; line-height:1; }
     .mode-switch { display:inline-flex; gap:6px; align-items:center; justify-content:center; padding:5px; margin:0 auto 10px; border-radius:999px; background:rgba(255,255,255,.10); border:1px solid rgba(255,255,255,.12); }
     .mode-switch a { min-width:74px; min-height:30px; display:inline-flex; align-items:center; justify-content:center; border-radius:999px; color:#e8edf5; text-decoration:none; font-size:12px; font-weight:950; }
     .mode-switch a.active { background:#fff; color:#111; }
@@ -1900,6 +1907,18 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
     .action.download span { font-size:27px; }
     .action.watched { color:#fff; }
     .action.watched span { background:rgba(245,183,63,.28); border-color:rgba(245,183,63,.56); }
+    .more-sheet { position:fixed; inset:0; z-index:40; display:none; align-items:end; justify-content:center; padding-top:80px; background:rgba(0,0,0,.66); backdrop-filter:blur(4px); }
+    .more-sheet.open { display:flex; }
+    .more-card { width:min(560px,100%); max-height:calc(100svh - 80px); overflow:auto; padding:18px 18px calc(24px + env(safe-area-inset-bottom)); border-radius:24px 24px 0 0; background:#101114; border:1px solid rgba(255,255,255,.13); box-shadow:0 -24px 70px rgba(0,0,0,.60); }
+    .more-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
+    .more-head h2 { margin:0; font-size:22px; }
+    .more-close { width:40px; height:40px; border:0; border-radius:999px; background:rgba(255,255,255,.10); color:#fff; font-size:28px; cursor:pointer; }
+    .more-menu { display:grid; gap:8px; }
+    .more-menu a { min-height:58px; display:grid; grid-template-columns:42px minmax(0,1fr); gap:12px; align-items:center; padding:8px 14px; border-radius:15px; background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.10); color:#fff; text-decoration:none; text-align:left; }
+    .more-menu a:hover,.more-menu a:focus { background:rgba(255,255,255,.14); }
+    .more-menu .menu-icon { width:38px; height:38px; display:grid; place-items:center; border-radius:12px; background:rgba(255,255,255,.09); font-size:20px; }
+    .more-menu strong { display:block; font-size:16px; }
+    .more-menu small { display:block; margin-top:2px; color:#adb5c2; font-size:12px; }
     .summary { max-width:760px; font-size:18px; line-height:1.46; margin:0 auto 22px; text-align:left; color:#f1f5fb; text-shadow:0 2px 14px rgba(0,0,0,.42); }
     .cast-panel { display:none; max-width:760px; width:100%; margin:0 auto 22px; text-align:left; }
     .cast-panel.open { display:block; }
@@ -1957,9 +1976,9 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
       .topbar { margin-bottom:10px; }
       .hero { min-height:calc(100svh - 96px); justify-content:end; padding-bottom:10px; }
       .poster-logo { max-height:34vh; }
-      .resume-row { grid-template-columns:1fr 42px; gap:9px; }
+      .resume-row { grid-template-columns:minmax(0,1fr) 104px; gap:9px; }
       .resume { min-height:40px; font-size:17px; }
-      .restart { width:42px; height:42px; }
+      .restart { min-width:104px; height:42px; }
       .actions { gap:9px; }
       .action { width:70px; font-size:11px; }
       .action span { width:46px; height:46px; font-size:20px; }
@@ -1982,7 +2001,7 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
       <h1>{{TITLE}}</h1>
       <div class="episode-title">{{EPISODE_TITLE}}</div>
       <div class="meta">{{META}}</div>
-      <div class="resume-row"><button class="resume" id="resumeButton">Play</button><button class="restart" id="restartButton" title="Start from beginning" aria-label="Start from beginning">Start over</button></div>
+      <div class="resume-row"><button class="resume" id="resumeButton">Play</button><button class="restart" id="restartButton" title="Start from beginning" aria-label="Restart from beginning"><span class="restart-icon" aria-hidden="true">&#8634;</span>Restart</button></div>
       <div class="mode-switch"><a class="{{DIRECT_MODE_CLASS}}" href="{{DIRECT_MODE_HREF}}">Direct</a><a class="{{HLS_MODE_CLASS}}" href="{{HLS_MODE_HREF}}">HLS</a></div>
       {{CAPTION_CONTROL}}
       <div class="video-list-actions"><a href="#queue" data-video-queue="1">Add to Queue</a><a href="#playlist" data-video-playlist="1">Add to Playlist</a><a href="/video-lists">View My Lists</a></div>
@@ -1996,6 +2015,7 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
       <section class="cast-panel" id="castPanel"><h2>Cast & Crew</h2><ul class="cast-list">{{ACTORS}}</ul></section>
       <div class="file-grid"><div class="label">Video</div><div>{{VIDEO_LABEL}}</div><div class="label">Audio</div><div>Original audio</div><div class="label">Subtitles</div><div>{{SUBTITLE_SUMMARY}}</div></div>
     </section>
+    <div class="more-sheet" id="moreSheet" aria-hidden="true"><section class="more-card" role="dialog" aria-modal="true" aria-labelledby="moreTitle"><div class="more-head"><h2 id="moreTitle">More options</h2><button class="more-close" id="moreClose" type="button" aria-label="Close more options">&times;</button></div><nav class="more-menu">{{MORE_MENU}}</nav></section></div>
     <section class="player-shell{{PLAYER_OPEN_CLASS}}{{PLAYER_FULLSCREEN_CLASS}}" id="playerShell">
       <div class="player-head">
         <a class="circle" href="{{BACK}}" aria-label="Back">&lsaquo;</a>
@@ -2480,18 +2500,39 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
         const ok = await postBulkWatched(link.dataset.markBulk, true);
         if (ok) {
           link.classList.add("watched");
-          link.lastChild.textContent = link.dataset.markBulk === "show" ? "Show Watched" : "Season Watched";
+          const label = link.querySelector("strong") || link.lastChild;
+          label.textContent = link.dataset.markBulk === "show" ? "Show Watched" : "Season Watched";
         }
       });
     });
+    const moreSheet = document.getElementById("moreSheet");
+    const closeMoreSheet = () => {
+      if (!moreSheet) return;
+      moreSheet.classList.remove("open");
+      moreSheet.setAttribute("aria-hidden", "true");
+      document.body.style.overflow = "";
+    };
     document.querySelectorAll("[data-more-toggle]").forEach(link => {
       link.addEventListener("click", event => {
         event.preventDefault();
+        if (!moreSheet) return;
+        moreSheet.classList.add("open");
+        moreSheet.setAttribute("aria-hidden", "false");
+        document.body.style.overflow = "hidden";
+        document.getElementById("moreClose")?.focus();
+      });
+    });
+    document.getElementById("moreClose")?.addEventListener("click", closeMoreSheet);
+    moreSheet?.addEventListener("click", event => { if (event.target === moreSheet) closeMoreSheet(); });
+    document.addEventListener("keydown", event => { if (event.key === "Escape") closeMoreSheet(); });
+    document.querySelectorAll("[data-cast-toggle]").forEach(link => {
+      link.addEventListener("click", event => {
+        event.preventDefault();
+        closeMoreSheet();
         const panel = document.getElementById("castPanel");
         if (!panel) return;
-        const isOpen = panel.classList.toggle("open");
-        link.classList.toggle("watched", isOpen);
-        if (isOpen) panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        panel.classList.add("open");
+        panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
       });
     });
     document.querySelectorAll("[data-mobile-download]").forEach(link => {
@@ -3180,11 +3221,11 @@ SEARCH_PAGE = """<!doctype html>
 * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:#fff; font-family:Inter,system-ui,Segoe UI,sans-serif; }
 header { position:sticky; top:0; z-index:3; display:flex; align-items:center; gap:14px; padding:18px clamp(18px,4vw,42px); background:rgba(8,9,12,.92); border-bottom:1px solid var(--line); backdrop-filter:blur(14px); }
 .brand { font-size:clamp(24px,4vw,44px); font-weight:950; letter-spacing:0; }
-.cmv-logo { display:inline-flex; align-items:center; gap:.30em; color:#fff; text-decoration:none; text-transform:uppercase; line-height:.88; white-space:nowrap; }
-.cmv-left { display:grid; gap:.08em; align-items:center; }
-.cmv-cine,.cmv-media { font-size:.54em; font-weight:950; letter-spacing:.03em; line-height:.86; }
+.cmv-logo { display:inline-flex; align-items:center; gap:.30em; color:#fff; text-decoration:none; line-height:.88; white-space:nowrap; }
+.cmv-left { display:inline-flex; gap:0; align-items:center; }
+.cmv-cine,.cmv-media { font-family:"Segoe Script","Brush Script MT","URW Chancery L",cursive; font-size:1.02em; font-weight:700; letter-spacing:-.055em; line-height:1; }
 .cmv-divider { width:.052em; height:1.12em; background:rgba(255,255,255,.66); }
-.cmv-vault { color:var(--gold); font-size:.95em; font-weight:950; letter-spacing:.02em; }
+.cmv-vault { color:var(--gold); font-size:.95em; font-weight:950; letter-spacing:.02em; text-transform:uppercase; }
 .cmv-mark { width:1.08em; height:1.08em; color:var(--gold); flex:0 0 auto; }
 a { color:#fff; text-decoration:none; } .pill { border:1px solid var(--line); border-radius:999px; padding:11px 18px; background:#1a1f29; font-weight:850; }
 main { padding:22px clamp(18px,4vw,42px) 80px; }
@@ -3195,7 +3236,7 @@ button { min-height:48px; border:0; border-radius:999px; padding:0 22px; font-we
 .card { min-width:0; } .poster { aspect-ratio:2/3; border-radius:8px; overflow:hidden; background:#101722; border:1px solid rgba(255,255,255,.1); display:flex; align-items:center; justify-content:center; color:#9aa4b2; font-weight:800; }
 .poster img { width:100%; height:100%; object-fit:cover; } .card-title { margin-top:10px; font-weight:900; line-height:1.15; } .card-meta { margin-top:4px; color:var(--muted); font-size:14px; }
 @media (min-width:900px) { .grid { grid-template-columns:repeat(auto-fill, minmax(126px, 126px)); } }
-@media (max-width:700px) { .cmv-mark { width:.80em; height:.80em; } .cmv-media { letter-spacing:.03em; } }
+@media (max-width:700px) { .cmv-mark { width:.80em; height:.80em; } .cmv-media { letter-spacing:-.055em; } }
 </style></head><body>
 <header><a class="brand cmv-logo" href="/"><span class="cmv-left"><span class="cmv-cine">Cine</span><span class="cmv-media">Media</span></span><span class="cmv-divider"></span><span class="cmv-vault">Vault</span><svg class="cmv-mark" viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="32" r="26" fill="none" stroke="currentColor" stroke-width="4"/><circle cx="32" cy="32" r="9" fill="none" stroke="currentColor" stroke-width="4"/><path d="M32 6v17M32 41v17M6 32h17M41 32h17M13.6 13.6l12 12M38.4 38.4l12 12M50.4 13.6l-12 12M25.6 38.4l-12 12" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"/><circle cx="32" cy="32" r="3" fill="currentColor"/><path d="M32 32l5 4M32 32l-5 4M32 32v-6" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg></a><a class="pill" href="/">Home</a><a class="pill" href="/movies">Movies</a><a class="pill" href="/tv">TV Shows</a><a class="pill" href="/music">Music</a></header>
 <main>
@@ -3546,6 +3587,13 @@ def action_link(icon: str, label: str, href: str, attrs: str = "") -> str:
     return f"<a class='action{extra_class}' href='{html.escape(href)}'{attrs}><span>{icon}</span>{html.escape(label)}</a>"
 
 
+def more_menu_link(icon: str, label: str, detail: str, href: str, attrs: str = "") -> str:
+    return (
+        f"<a href='{html.escape(href)}'{attrs}><span class='menu-icon'>{icon}</span>"
+        f"<span><strong>{html.escape(label)}</strong><small>{html.escape(detail)}</small></span></a>"
+    )
+
+
 def player_nav_link(label: str, href: str) -> str:
     return f"<a href='{html.escape(href)}'>{html.escape(label)}</a>"
 
@@ -3690,9 +3738,13 @@ def direct_player_context(kind: str, item_id: str, is_admin: bool = False, playb
             "source_size": item.size,
             "source_size_label": movie_app.human_size(item.size),
             "actions": "".join([
-                action_link("&#8595;", "Download", f"/download/{item.id}", " data-mobile-download='1' data-mobile-scope='movie' data-mobile-id='" + html.escape(str(item.id)) + "'"),
                 action_link("&#10003;", "Mark Watched", f"/movie/{item.id}", " data-mark-watched='1'"),
+                action_link("&#8595;", "Download", f"/download/{item.id}", " data-mobile-download='1' data-mobile-scope='movie' data-mobile-id='" + html.escape(str(item.id)) + "'"),
                 action_link("&#8943;", "More", "#more", " data-more-toggle='1'"),
+            ]),
+            "more_menu": "".join([
+                more_menu_link("&#127916;", "Fix Match", "Correct title, year, or poster", f"/movie/fix-match/{item.id}"),
+                more_menu_link("&#128101;", "Cast & Crew", "View people in this movie", "#cast", " data-cast-toggle='1'"),
             ]),
             "actors": actor_items,
             "player_nav": "",
@@ -3743,18 +3795,21 @@ def direct_player_context(kind: str, item_id: str, is_admin: bool = False, playb
             meta += f"<span class='rating'>TMDb {episode_rating:.1f}</span>"
         meta += "<span class='rating'>Local</span>"
         actions = [
-            action_link("&#9635;", "Show", show_href),
-            action_link("&#9776;", "Season", season_href),
-            action_link("&#8595;", "Download", f"/download/episode/{episode.id}", " data-mobile-download='1' data-mobile-scope='episode' data-mobile-id='" + html.escape(str(episode.id)) + "'"),
             action_link("&#10003;", "Mark Watched", show_href, " data-mark-watched='1'"),
-            action_link("&#10003;", "Mark Season", season_href, " data-mark-bulk='season'"),
-            action_link("&#10003;", "Mark Show", show_href, " data-mark-bulk='show'"),
-            action_link("&#8943;", "More", "#more", " data-more-toggle='1'"),
+            action_link("&#8595;", "Download", f"/download/episode/{episode.id}", " data-mobile-download='1' data-mobile-scope='episode' data-mobile-id='" + html.escape(str(episode.id)) + "'"),
         ]
-        if previous_episode:
-            actions.append(action_link("&#9664;", "Previous", f"/player/tv/{previous_episode.id}"))
         if next_episode:
             actions.append(action_link("&#9654;", "Next", f"/player/tv/{next_episode.id}"))
+        actions.append(action_link("&#8943;", "More", "#more", " data-more-toggle='1'"))
+        more_menu = [
+            more_menu_link("&#9635;", "Go to Show", "Open the complete series", show_href),
+            more_menu_link("&#9776;", "Go to Season", "Open this season's episodes", season_href),
+            more_menu_link("&#10003;", "Mark Season Watched", "Mark every episode in this season", season_href, " data-mark-bulk='season'"),
+            more_menu_link("&#10003;", "Mark Show Watched", "Mark every episode in this show", show_href, " data-mark-bulk='show'"),
+        ]
+        if previous_episode:
+            more_menu.append(more_menu_link("&#9664;", "Previous Episode", "Play the previous episode", f"/player/tv/{previous_episode.id}"))
+        more_menu.append(more_menu_link("&#128101;", "Cast & Crew", "View people in this episode", "#cast", " data-cast-toggle='1'"))
         player_nav = []
         if previous_episode:
             player_nav.append(player_nav_link("Previous", f"/player/tv/{previous_episode.id}"))
@@ -3779,6 +3834,7 @@ def direct_player_context(kind: str, item_id: str, is_admin: bool = False, playb
             "source_size": episode.size,
             "source_size_label": movie_app.human_size(episode.size),
             "actions": "".join(actions),
+            "more_menu": "".join(more_menu),
             "player_nav": "".join(player_nav),
             "playback_mode": playback_mode,
             "caption_tracks": caption_track_html,
@@ -4180,7 +4236,7 @@ header{position:sticky;top:0;z-index:5;display:flex;align-items:center;justify-c
 main{padding:14px}.wall{height:calc(100vh - 92px);min-height:520px;position:relative;background:#000}.tiles{height:100%;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:10px}.wall.wall-fs-active{height:100vh}.wall.expanded{position:fixed;inset:0;z-index:40;height:100vh}.wall.wall-fs-active .tiles,.wall.expanded .tiles{grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}.tile{position:relative;min-width:0;min-height:0;overflow:hidden;background:#000;border:2px solid transparent;border-radius:8px}.tile.expanded{position:fixed;inset:0;z-index:30;border:0;border-radius:0}.tile video{width:100%;height:100%;object-fit:contain;background:#000}.empty{height:100%;display:grid;place-items:center;text-align:center;color:var(--muted);border:1px dashed var(--line);padding:18px}.tile-bar{position:absolute;left:0;right:0;bottom:0;display:grid;grid-template-columns:auto auto minmax(90px,1fr) auto auto auto auto;align-items:center;gap:7px;padding:26px 9px 9px;background:linear-gradient(transparent,rgba(0,0,0,.94));opacity:0;transition:opacity .18s}.tile:hover .tile-bar,.tile.active .tile-bar,.tile.expanded .tile-bar{opacity:1}.tile-title{position:absolute;left:10px;right:10px;bottom:50px;min-width:0;font-weight:850;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 3px #000}.icon{width:34px;height:34px;padding:0;border-radius:50%}#exitWallFs{display:none;position:absolute;top:10px;right:10px;z-index:41;width:40px;height:40px;border-radius:50%;background:rgba(0,0,0,.72)}.wall.wall-fs-active #exitWallFs,.wall.expanded #exitWallFs{display:flex}.seek{width:100%;accent-color:var(--gold)}.time{font-size:12px;color:#fff;white-space:nowrap;font-variant-numeric:tabular-nums}.bandwidth{display:none;align-items:center;gap:14px;padding:9px 14px;border-bottom:1px solid var(--line);background:#101620}.bandwidth.open{display:flex}.bandwidth strong{font-size:18px;color:var(--green);font-variant-numeric:tabular-nums}.bandwidth span{color:var(--muted);font-size:13px}
 .drawer{position:fixed;inset:0 0 0 auto;z-index:10;width:min(440px,100%);padding:18px;background:#0c1017;border-left:1px solid var(--line);transform:translateX(105%);transition:transform .2s;overflow:auto}.drawer.open{transform:none}.drawer-head{display:flex;justify-content:space-between;align-items:center}.search{width:100%;min-height:48px;margin:16px 0;border:1px solid var(--line);border-radius:8px;background:#171d27;color:#fff;padding:0 14px;font-size:16px}.results{display:grid;gap:9px}.result{display:grid;grid-template-columns:52px 1fr auto;align-items:center;gap:10px;border:1px solid var(--line);border-radius:8px;padding:8px;background:var(--panel)}.result img{width:52px;aspect-ratio:2/3;object-fit:cover;background:#06080c}.result small{display:block;color:var(--muted);margin-top:3px}.slot-picker{display:flex;gap:5px}.slot-picker button{width:34px;height:34px;min-height:34px;padding:0}.hint{color:var(--muted);font-size:13px}
 @media(max-width:720px){header{align-items:flex-start;flex-direction:column}.wall{height:auto;min-height:0}.tiles{grid-template-columns:1fr;grid-template-rows:none}.tile{aspect-ratio:16/9}.wall.wall-fs-active .tile,.wall.expanded .tile{aspect-ratio:auto}.tile-bar{opacity:1}.brand{font-size:20px}}
-</style></head><body><header><div class="brand">CineMedia<b>Vault</b> Wall</div><div class="controls"><a class="button" href="/">Home</a><button id="playAll" class="primary">Play all</button><button id="pauseAll">Pause all</button><button id="syncAll">Sync</button><button id="fullWall">Full Screen Wall</button><button id="toggleBandwidth">Bandwidth</button><button id="addMedia">Add media</button></div></header><div class="bandwidth" id="bandwidthPanel"><strong id="bandwidthValue">0.00 Mbps</strong><span id="bandwidthBytes">0 B/s</span><span id="playingCount">0 playing</span></div>
+</style></head><body><header><div class="brand">CineMedia<b>Vault</b> Wall</div><div class="controls"><a class="button" href="/">Home</a><button id="playAll" class="primary">Play all</button><button id="pauseAll">Pause all</button><button id="syncAll">Sync</button><button id="fullWall">Full Screen Wall</button><button id="toggleBandwidth">Bandwidth</button><button id="addMedia">Add media</button><button id="clearWall">Clear Wall</button></div></header><div class="bandwidth" id="bandwidthPanel"><strong id="bandwidthValue">0.00 Mbps</strong><span id="bandwidthBytes">0 B/s</span><span id="playingCount">0 playing</span></div>
 <main><div class="wall" id="wall"><div class="tiles" id="tiles"></div><button class="icon" id="exitWallFs" title="Exit full screen" aria-label="Exit full screen">&#10005;</button></div></main>
 <aside class="drawer" id="drawer"><div class="drawer-head"><div><h2>Add to wall</h2><div class="hint">Search a movie, episode, or live tuner channel, then choose a slot.</div></div><button class="icon" id="closeDrawer" aria-label="Close">&#10005;</button></div><input class="search" id="wallSearch" type="search" placeholder="Search movies, episodes, or live channels"><div class="results" id="results"></div></aside>
 <script src="/assets/hls.min.js"></script><script>
@@ -4188,14 +4244,16 @@ const wall=document.getElementById('wall'),tiles=document.getElementById('tiles'
 const esc=s=>String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function load(){const r=await fetch('/api/video-wall');const d=await r.json();slots=d.slots||[];render()}
 function fmt(t){if(!Number.isFinite(t))return '0:00';t=Math.max(0,Math.floor(t));return `${Math.floor(t/60)}:${String(t%60).padStart(2,'0')}`}
-function render(){hlsControllers.forEach(h=>h.destroy());hlsControllers=[];tiles.innerHTML='';for(let n=1;n<=4;n++){const item=slots.find(x=>x.slot===n),el=document.createElement('section');el.className='tile'+(n===active?' active':'');el.dataset.slot=n;if(!item){el.innerHTML=`<button class="empty" data-add="${n}">Slot ${n}<br>Add a movie or episode</button>`}else{const source=item.requires_hls?item.hls_url:item.stream_url;el.innerHTML=`<video playsinline preload="metadata" muted data-source="${esc(source)}" data-hls="${item.requires_hls?'1':'0'}" data-slot="${n}"></video><div class="tile-bar"><span class="tile-title">${esc(item.title)} <small>${esc(item.subtitle)}${item.requires_hls?' - HLS':''}</small></span><button class="icon" data-back title="Rewind 10 seconds">-10</button><button class="icon" data-toggle title="Play or pause">&#9654;</button><input class="seek" data-seek type="range" min="0" max="1000" value="0" aria-label="Seek"><span class="time">0:00 / 0:00</span><button class="icon" data-forward title="Forward 10 seconds">+10</button><button class="icon" data-fullscreen title="Full screen">&#9974;</button><button class="icon" data-remove="${n}" title="Remove">&#10005;</button></div>`}tiles.appendChild(el)}bindVideos();applyAudio();updateBandwidth()}
+function render(){hlsControllers.forEach(h=>h.destroy());hlsControllers=[];tiles.innerHTML='';for(let n=1;n<=4;n++){const item=slots.find(x=>x.slot===n),el=document.createElement('section');el.className='tile'+(n===active?' active':'');el.dataset.slot=n;if(!item){el.innerHTML=`<button class="empty" data-add="${n}">Slot ${n}<br>Add a movie or episode</button>`}else{const source=item.requires_hls?item.hls_url:item.stream_url;el.innerHTML=`<video playsinline preload="metadata" muted data-source="${esc(source)}" data-hls="${item.requires_hls?'1':'0'}" data-slot="${n}" data-kind="${item.media_type}" data-id="${item.media_id}" data-resume="${item.resume_position||0}"></video><div class="tile-bar"><span class="tile-title">${esc(item.title)} <small>${esc(item.subtitle)}${item.requires_hls?' - HLS':''}</small></span><button class="icon" data-back title="Rewind 10 seconds">-10</button><button class="icon" data-toggle title="Play or pause">&#9654;</button><input class="seek" data-seek type="range" min="0" max="1000" value="0" aria-label="Seek"><span class="time">0:00 / 0:00</span><button class="icon" data-forward title="Forward 10 seconds">+10</button><button class="icon" data-fullscreen title="Full screen">&#9974;</button><button class="icon" data-remove="${n}" title="Remove">&#10005;</button></div>`}tiles.appendChild(el)}bindVideos();applyAudio();updateBandwidth()}
 function wallUrl(url,slot){const join=url.includes('?')?'&':'?';return `${url}${join}wall=1&slot=${slot}`}
-function bindVideos(){document.querySelectorAll('.tile video').forEach(v=>{const tile=v.closest('.tile'),seek=tile.querySelector('[data-seek]'),label=tile.querySelector('.time'),toggle=tile.querySelector('[data-toggle]'),source=v.dataset.source,slot=v.dataset.slot;if(v.dataset.hls==='1'){if(v.canPlayType('application/vnd.apple.mpegurl'))v.src=wallUrl(source,slot);else if(window.Hls&&Hls.isSupported()){const h=new Hls({lowLatencyMode:false,backBufferLength:90,xhrSetup:(xhr,url)=>xhr.open('GET',wallUrl(url,slot),true)});h.loadSource(wallUrl(source,slot));h.attachMedia(v);hlsControllers.push(h)}else v.src=wallUrl(source,slot)}else v.src=wallUrl(source,slot);const update=()=>{if(seek&&Number.isFinite(v.duration)&&v.duration>0)seek.value=Math.round(v.currentTime/v.duration*1000);if(label)label.textContent=`${fmt(v.currentTime)} / ${fmt(v.duration)}`;if(toggle)toggle.innerHTML=v.paused?'&#9654;':'&#10074;&#10074;'};v.addEventListener('timeupdate',update);v.addEventListener('durationchange',update);v.addEventListener('play',update);v.addEventListener('pause',update);update()})}
+function saveWallPosition(v,finalSave=false){if(!v||v.dataset.kind==='tuner'||!Number.isFinite(v.duration)||v.duration<30)return;const body=JSON.stringify({slot:+v.dataset.slot,media_type:v.dataset.kind,media_id:+v.dataset.id,position:v.currentTime,duration:v.duration});if(finalSave&&navigator.sendBeacon){navigator.sendBeacon('/api/video-wall/position',new Blob([body],{type:'application/json'}));return}fetch('/api/video-wall/position',{method:'POST',headers:{'Content-Type':'application/json'},body,keepalive:finalSave}).catch(()=>{})}
+function bindVideos(){document.querySelectorAll('.tile video').forEach(v=>{const tile=v.closest('.tile'),seek=tile.querySelector('[data-seek]'),label=tile.querySelector('.time'),toggle=tile.querySelector('[data-toggle]'),source=v.dataset.source,slot=v.dataset.slot,resumeAt=parseFloat(v.dataset.resume||'0');if(v.dataset.hls==='1'){if(v.canPlayType('application/vnd.apple.mpegurl'))v.src=wallUrl(source,slot);else if(window.Hls&&Hls.isSupported()){const h=new Hls({lowLatencyMode:false,backBufferLength:90,xhrSetup:(xhr,url)=>xhr.open('GET',wallUrl(url,slot),true)});h.loadSource(wallUrl(source,slot));h.attachMedia(v);hlsControllers.push(h)}else v.src=wallUrl(source,slot)}else v.src=wallUrl(source,slot);if(resumeAt>0&&v.dataset.kind!=='tuner'){const applyResume=()=>{if(!Number.isFinite(v.duration)||v.duration<=0)return;v.currentTime=Math.min(Math.max(0,resumeAt-5),Math.max(0,v.duration-1));v.removeEventListener('loadedmetadata',applyResume);v.removeEventListener('durationchange',applyResume)};v.addEventListener('loadedmetadata',applyResume);v.addEventListener('durationchange',applyResume)}const update=()=>{if(seek&&Number.isFinite(v.duration)&&v.duration>0)seek.value=Math.round(v.currentTime/v.duration*1000);if(label)label.textContent=`${fmt(v.currentTime)} / ${fmt(v.duration)}`;if(toggle)toggle.innerHTML=v.paused?'&#9654;':'&#10074;&#10074;'};let lastSave=0;v.addEventListener('timeupdate',()=>{update();const now=Date.now();if(now-lastSave>=5000){lastSave=now;saveWallPosition(v)}});v.addEventListener('durationchange',update);v.addEventListener('play',update);v.addEventListener('pause',()=>{update();saveWallPosition(v)});update()})}
 function applyAudio(){document.querySelectorAll('.tile').forEach(t=>{t.classList.toggle('active',+t.dataset.slot===active);const v=t.querySelector('video');if(v)v.muted=+t.dataset.slot!==active})}
 wall.addEventListener('click',async e=>{const tile=e.target.closest('.tile');if(tile){active=+tile.dataset.slot;applyAudio()}const v=tile&&tile.querySelector('video');if(e.target.closest('[data-add]'))openDrawer(+e.target.closest('[data-add]').dataset.add);if(e.target.closest('[data-remove]')){await updateSlot(+e.target.closest('[data-remove]').dataset.remove,null);load()}if(v&&e.target.closest('[data-back]'))v.currentTime=Math.max(0,v.currentTime-10);if(v&&e.target.closest('[data-forward]'))v.currentTime=Math.min(Number.isFinite(v.duration)?v.duration:v.currentTime+10,v.currentTime+10);if(v&&e.target.closest('[data-toggle]'))v.paused?v.play().catch(()=>{}):v.pause();if(tile&&e.target.closest('[data-fullscreen]')){if(document.fullscreenElement)document.exitFullscreen().catch(()=>{});else if(tile.requestFullscreen)tile.requestFullscreen().catch(()=>tile.classList.toggle('expanded'));else if(tile.webkitRequestFullscreen)tile.webkitRequestFullscreen();else tile.classList.toggle('expanded')}});
 wall.addEventListener('input',e=>{const seek=e.target.closest('[data-seek]');if(!seek)return;const v=seek.closest('.tile').querySelector('video');if(v&&Number.isFinite(v.duration))v.currentTime=(+seek.value/1000)*v.duration});
 function openDrawer(slot){active=slot||active;drawer.classList.add('open');search.focus()}
 document.getElementById('addMedia').onclick=()=>openDrawer(active);document.getElementById('closeDrawer').onclick=()=>drawer.classList.remove('open');
+document.getElementById('clearWall').onclick=async()=>{if(!confirm('Remove all 4 wall slots and their saved positions?'))return;const response=await fetch('/api/video-wall/clear',{method:'POST'});const result=await response.json();if(!result.ok)return;active=1;await load()};
 document.getElementById('playAll').onclick=()=>document.querySelectorAll('video').forEach(v=>v.play().catch(()=>{}));document.getElementById('pauseAll').onclick=()=>document.querySelectorAll('video').forEach(v=>v.pause());document.getElementById('syncAll').onclick=()=>{const vs=[...document.querySelectorAll('video')];if(!vs.length)return;const t=Math.min(...vs.map(v=>v.currentTime||0));vs.forEach(v=>v.currentTime=t)};
 function fsElement(){return document.fullscreenElement||document.webkitFullscreenElement||null}function syncWallFsUi(){wall.classList.toggle('wall-fs-active',fsElement()===wall)}function requestWallFullscreen(){const request=wall.requestFullscreen||wall.webkitRequestFullscreen;if(!request){wall.classList.add('expanded');return}try{const pending=request.call(wall);if(pending&&pending.catch)pending.catch(()=>wall.classList.add('expanded'))}catch(_){wall.classList.add('expanded')}}function exitWallFullscreen(){if(document.exitFullscreen){const pending=document.exitFullscreen();if(pending&&pending.catch)pending.catch(()=>{})}else if(document.webkitExitFullscreen)document.webkitExitFullscreen();wall.classList.remove('expanded')}document.getElementById('fullWall').onclick=()=>{if(fsElement()===wall||wall.classList.contains('expanded'))exitWallFullscreen();else requestWallFullscreen()};document.getElementById('exitWallFs').onclick=exitWallFullscreen;document.addEventListener('fullscreenchange',syncWallFsUi);document.addEventListener('webkitfullscreenchange',syncWallFsUi);
 const bandwidthPanel=document.getElementById('bandwidthPanel');document.getElementById('toggleBandwidth').onclick=()=>{bandwidthPanel.classList.toggle('open');localStorage.setItem('cmv-wall-bandwidth',bandwidthPanel.classList.contains('open')?'1':'0');updateBandwidth()};if(localStorage.getItem('cmv-wall-bandwidth')==='1')bandwidthPanel.classList.add('open');
@@ -4203,6 +4261,7 @@ function humanRate(n){if(n>=1048576)return (n/1048576).toFixed(2)+' MB/s';if(n>=
 async function updateSlot(slot,item){await fetch('/api/video-wall/slot',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({slot,media_type:item&&item.media_type,media_id:item&&item.media_id})})}
 search.addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(runSearch,250)});async function runSearch(){const q=search.value.trim();if(q.length<2){results.innerHTML='';return}const r=await fetch('/api/video-wall/search?q='+encodeURIComponent(q));const d=await r.json();results.innerHTML=(d.items||[]).map(i=>`<article class="result">${i.poster?`<img src="${esc(i.poster)}" alt="">`:'<span></span>'}<div><strong>${esc(i.title)}</strong><small>${esc(i.subtitle)}</small></div><div class="slot-picker">${[1,2,3,4].map(n=>`<button data-pick="${n}" data-kind="${i.media_type}" data-id="${i.media_id}">${n}</button>`).join('')}</div></article>`).join('')||'<p class="hint">No matches.</p>'}
 results.addEventListener('click',async e=>{const b=e.target.closest('[data-pick]');if(!b)return;await updateSlot(+b.dataset.pick,{media_type:b.dataset.kind,media_id:+b.dataset.id});active=+b.dataset.pick;drawer.classList.remove('open');load()});load();
+window.addEventListener('pagehide',()=>document.querySelectorAll('.tile video').forEach(v=>saveWallPosition(v,true)));
 </script></body></html>"""
 
 
@@ -4296,6 +4355,16 @@ class CombinedHandler(VideoListsMixin, BaseHTTPRequestHandler):
             if not user:
                 return self.require_auth(path)
             return self.api_video_wall_slot(user)
+        if path == "/api/video-wall/position":
+            user = self.current_user()
+            if not user:
+                return self.require_auth(path)
+            return self.api_video_wall_position(user)
+        if path == "/api/video-wall/clear":
+            user = self.current_user()
+            if not user:
+                return self.require_auth(path)
+            return self.api_video_wall_clear(user)
         if path == "/api/hdhr/scan":
             user = self.current_user()
             if not user or not user["is_admin"]:
@@ -4520,11 +4589,11 @@ class CombinedHandler(VideoListsMixin, BaseHTTPRequestHandler):
 .topbar {{ display:flex; justify-content:space-between; align-items:flex-start; gap:18px; }}
 .brand h1 {{ margin:0; }}
 .brand .cmv-logo {{ font-size:clamp(38px,7vw,68px); }}
-.cmv-logo {{ display:inline-flex; align-items:center; gap:.32em; color:#fff; text-decoration:none; text-transform:uppercase; line-height:.88; }}
-.cmv-left {{ display:grid; gap:.08em; align-items:center; }}
-.cmv-cine,.cmv-media {{ font-size:.54em; font-weight:950; letter-spacing:.03em; line-height:.86; }}
+.cmv-logo {{ display:inline-flex; align-items:center; gap:.32em; color:#fff; text-decoration:none; line-height:.88; }}
+.cmv-left {{ display:inline-flex; gap:0; align-items:center; }}
+.cmv-cine,.cmv-media {{ font-family:"Segoe Script","Brush Script MT","URW Chancery L",cursive; font-size:1.02em; font-weight:700; letter-spacing:-.055em; line-height:1; }}
 .cmv-divider {{ width:.055em; height:1.14em; background:rgba(255,255,255,.72); }}
-.cmv-vault {{ color:var(--lime); font-size:.96em; font-weight:950; letter-spacing:.02em; }}
+.cmv-vault {{ color:var(--lime); font-size:.96em; font-weight:950; letter-spacing:.02em; text-transform:uppercase; }}
 .cmv-mark {{ width:1.1em; height:1.1em; color:var(--lime); flex:0 0 auto; }}
 .signin-open {{ min-height:43px; padding:0 22px; border:1px solid rgba(255,255,255,.24); border-radius:999px; background:rgba(255,255,255,.13); color:#fff; font-size:17px; font-weight:950; cursor:pointer; backdrop-filter:blur(12px); }}
 .content {{ width:min(720px,100%); margin-top:auto; padding:0 0 48px; }}
@@ -4539,7 +4608,7 @@ h2 {{ margin:0 0 18px; font-size:clamp(44px,8vw,74px); line-height:.98; letter-s
 .signup {{ margin-top:14px; padding-top:14px; border-top:1px solid rgba(255,255,255,.14); }}
 .signup summary {{ cursor:pointer; font-size:14px; color:#fff; font-weight:950; margin-bottom:10px; }}
 .signup button {{ width:100%; min-height:42px; margin-top:8px; border-radius:999px; border:1px solid rgba(255,255,255,.22); background:rgba(255,255,255,.12); color:#fff; cursor:pointer; font-size:15px; font-weight:950; }}
-@media (max-width:700px) {{ .page {{ padding:30px; }} .backdrop {{ grid-template-columns:repeat(8,minmax(58px,1fr)); gap:8px; inset:-8vh -78vw; }} .content {{ padding-bottom:42px; }} .brand .cmv-logo {{ font-size:clamp(30px,9vw,44px); }} .cmv-mark {{ width:.82em; height:.82em; }} .cmv-media {{ letter-spacing:.03em; }} }}
+@media (max-width:700px) {{ .page {{ padding:30px; }} .backdrop {{ grid-template-columns:repeat(8,minmax(58px,1fr)); gap:8px; inset:-8vh -78vw; }} .content {{ padding-bottom:42px; }} .brand .cmv-logo {{ font-size:clamp(30px,9vw,44px); }} .cmv-mark {{ width:.82em; height:.82em; }} .cmv-media {{ letter-spacing:-.055em; }} }}
 </style></head><body>
 <div class="backdrop">{backdrop}</div><div class="veil"></div>
 <main class="page">
@@ -6484,7 +6553,7 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
     def api_video_wall(self, user):
         conn = db_connect()
         try:
-            rows = conn.execute("SELECT slot, media_type, media_id, media_path FROM user_video_wall WHERE user_id=? ORDER BY slot", (int(user["id"]),)).fetchall()
+            rows = conn.execute("SELECT slot, media_type, media_id, media_path, position_seconds, duration_seconds FROM user_video_wall WHERE user_id=? ORDER BY slot", (int(user["id"]),)).fetchall()
         finally:
             conn.close()
         slots = []
@@ -6493,6 +6562,9 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
             if item:
                 item["slot"] = int(row["slot"])
                 item.pop("media_path", None)
+                if row["media_type"] != "tuner":
+                    item["resume_position"] = float(row["position_seconds"] or 0)
+                    item["resume_duration"] = float(row["duration_seconds"] or 0)
                 slots.append(item)
         return self.json_response({"ok": True, "slots": slots})
 
@@ -6511,9 +6583,10 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
             if not media_id:
                 conn.execute("DELETE FROM user_video_wall WHERE user_id=? AND slot=?", (int(user["id"]), slot))
             elif media_type in {"movie", "tv", "tuner"} and (wall_item := self.video_wall_item(media_type, int(media_id))):
-                conn.execute("""INSERT INTO user_video_wall(user_id,slot,media_type,media_id,media_path,updated_at)
-                    VALUES(?,?,?,?,?,?) ON CONFLICT(user_id,slot) DO UPDATE SET
-                    media_type=excluded.media_type,media_id=excluded.media_id,media_path=excluded.media_path,updated_at=excluded.updated_at""",
+                conn.execute("""INSERT INTO user_video_wall(user_id,slot,media_type,media_id,media_path,position_seconds,duration_seconds,updated_at)
+                    VALUES(?,?,?,?,?,0,0,?) ON CONFLICT(user_id,slot) DO UPDATE SET
+                    media_type=excluded.media_type,media_id=excluded.media_id,media_path=excluded.media_path,
+                    position_seconds=0,duration_seconds=0,updated_at=excluded.updated_at""",
                     (int(user["id"]), slot, media_type, int(wall_item["media_id"]), wall_item["media_path"], auth_now()))
             else:
                 return self.json_response({"ok": False, "error": "media item not found"})
@@ -6521,6 +6594,54 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
         finally:
             conn.close()
         return self.json_response({"ok": True, "slot": slot})
+
+    def api_video_wall_position(self, user):
+        payload = self.read_json()
+        try:
+            slot = int(payload.get("slot"))
+            media_id = int(payload.get("media_id"))
+            position = max(0.0, float(payload.get("position") or 0))
+            duration = max(0.0, float(payload.get("duration") or 0))
+        except (TypeError, ValueError):
+            return self.json_response({"ok": False, "error": "invalid wall position payload"})
+        media_type = str(payload.get("media_type") or "")
+        if slot not in {1, 2, 3, 4} or media_type not in {"movie", "tv", "tuner"}:
+            return self.json_response({"ok": False, "error": "invalid wall slot or media type"})
+        conn = db_connect()
+        try:
+            row = conn.execute(
+                "SELECT media_type,media_id,media_path FROM user_video_wall WHERE user_id=? AND slot=?",
+                (int(user["id"]), slot),
+            ).fetchone()
+            if not row:
+                return self.json_response({"ok": False, "error": "slot is empty"})
+            if row["media_type"] == "tuner":
+                return self.json_response({"ok": True, "ignored": True, "reason": "live tuner"})
+            current = self.video_wall_item(row["media_type"], int(row["media_id"]), row["media_path"], include_compatibility=False)
+            if not current or current["media_type"] != media_type or int(current["media_id"]) != media_id:
+                return self.json_response({"ok": False, "ignored": True, "error": "slot content changed"})
+            if duration and position >= duration * 0.92:
+                position = 0.0
+            elif position < 10:
+                position = 0.0
+            conn.execute(
+                "UPDATE user_video_wall SET position_seconds=?,duration_seconds=?,updated_at=? WHERE user_id=? AND slot=?",
+                (position, duration, auth_now(), int(user["id"]), slot),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return self.json_response({"ok": True, "slot": slot, "position": position})
+
+    def api_video_wall_clear(self, user):
+        conn = db_connect()
+        try:
+            cursor = conn.execute("DELETE FROM user_video_wall WHERE user_id=?", (int(user["id"]),))
+            conn.commit()
+            cleared = int(cursor.rowcount or 0)
+        finally:
+            conn.close()
+        return self.json_response({"ok": True, "cleared": cleared})
 
     def api_video_wall_search(self, user):
         parsed = urllib.parse.urlparse(self.path)
@@ -6605,7 +6726,7 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
             playback_mode = "direct"
         context = direct_player_context(kind, item_id, playback_mode=playback_mode)
         if user and user["is_admin"]:
-            context["actions"] += action_link("A", "Admin", f"/admin/media/{kind}/{item_id}")
+            context["more_menu"] += more_menu_link("A", "Admin", "File details and administrative controls", f"/admin/media/{kind}/{item_id}")
         direct_play = query.get("play", [""])[0] == "1"
         base_href = f"/player/{kind}/{item_id}"
         direct_href = f"{base_href}?mode=direct"
@@ -6638,6 +6759,7 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
             .replace("{{DOWNLOAD_DEFAULT_PERCENT}}", str(int(round(MOBILE_DOWNLOAD_TARGET_SOURCE_RATIO * 100))))
             .replace("{{DOWNLOAD_DEFAULT_LABEL}}", html.escape(movie_app.human_size(int((context.get("source_size") or 0) * MOBILE_DOWNLOAD_TARGET_SOURCE_RATIO))))
             .replace("{{ACTIONS}}", context["actions"])
+            .replace("{{MORE_MENU}}", context["more_menu"])
             .replace("{{PLAYER_NAV}}", context["player_nav"])
             .replace("{{HERO_ATTRS}}", " style=\"display:none\"" if direct_play else "")
             .replace("{{PLAYER_OPEN_CLASS}}", " open" if direct_play else "")

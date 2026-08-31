@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 170" role="img" aria-label="CineMediaVault">
+  <title>CineMediaVault</title>
+  <defs>
+    <!-- System-font stack only: no @font-face / url() / network fetch, so this renders identically offline.
+         Cursive fallback chain favors fonts pre-installed on Windows, then macOS, then generic 'cursive'. -->
+    <style>
+      .cmv2-script {
+        font-family: "Segoe Script", "Brush Script MT", "Lucida Handwriting", "Apple Chancery", "Bradley Hand", cursive;
+        font-style: italic;
+        font-weight: 400;
+      }
+      .cmv2-vault {
+        font-family: Inter, "Segoe UI", Arial, sans-serif;
+        font-weight: 950;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+    </style>
+    <linearGradient id="cmv2-gold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffe4a3"/>
+      <stop offset=".45" stop-color="#f5b73f"/>
+      <stop offset="1" stop-color="#d69420"/>
+    </linearGradient>
+    <linearGradient id="cmv2-cream" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#fffaf0"/>
+      <stop offset="1" stop-color="#f1e3c6"/>
+    </linearGradient>
+    <filter id="cmv2-soft-shadow" x="-20%" y="-60%" width="140%" height="220%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+
+  <!-- Transparent background by design: this asset is meant to sit on the app's existing dark header/hero. -->
+
+  <!-- REJECTED-DRAFT POSTMORTEM (see HANDOFF.md section 3 for full writeup):
+       The prior version pinned "CineMedia" to textLength="372" with lengthAdjust="spacingAndGlyphs",
+       assuming the SVG renderer would compress an oversized cursive run down to fit. Measuring the
+       rendered preview pixel-for-pixel showed the renderer ignored textLength/lengthAdjust entirely —
+       "CineMedia" rendered at its natural width (~505px at font-size 86, a 5.87x width:font-size ratio
+       for this glyph run), overlapping the divider and half of "VAULT". textLength/lengthAdjust support
+       is inconsistent across SVG renderers/browsers, so it must never be the thing standing between
+       this lockup and an overlap. Fix: no textLength on either text run. Instead every element is sized
+       and positioned so that even a WORST-CASE natural width (~6.6x font-size for the script run, ~3.7x
+       for VAULT — well above the measured 5.87x/typical vault ratio) still leaves a positive gap before
+       the next element. Verify by re-measuring rendered text bounding boxes if the font stack changes. -->
+
+  <!-- "CineMedia" — elegant script, single flowing baseline. Sized so even a worst-case-wide cursive
+       substitution (font-size * 6.6 =~ 370px) ends by x=386, leaving a 24px gap before the divider at
+       x=410. -->
+  <text x="16" y="108" class="cmv2-script" font-size="56" fill="url(#cmv2-cream)" filter="url(#cmv2-soft-shadow)">CineMedia</text>
+
+  <!-- divider, same proportions/opacity as the current .cmv-divider bar -->
+  <rect x="410" y="52" width="4" height="74" rx="2" fill="rgba(255,255,255,.72)"/>
+
+  <!-- "VAULT" — unchanged treatment: bold, uppercase, gold, matches current .cmv-vault styling.
+       Sized so even a worst-case-wide bold-uppercase render (font-size * 3.7 =~ 170px) ends by x=604,
+       leaving a 24px gap before the reel mark at x=648. -->
+  <text x="434" y="104" class="cmv2-vault" font-size="46" fill="url(#cmv2-gold)" filter="url(#cmv2-soft-shadow)">VAULT</text>
+
+  <!-- brand mark: exact path data reused verbatim from the live .cmv-mark SVG (aperture/reel glyph) so the
+       icon stays pixel-identical to the current site; only position/scale changed to fit the new lockup.
+       Local geometry spans x:6-58, y:6-58 (52x52) around center (32,32); scale 0.884 -> ~46px on canvas,
+       translated so it lands at x:653-699, comfortably inside the x=720 right edge. -->
+  <g transform="translate(648,62) scale(0.884)" fill="none" stroke="url(#cmv2-gold)" stroke-width="4">
+    <circle cx="32" cy="32" r="26"/>
+    <circle cx="32" cy="32" r="9"/>
+    <path d="M32 6v17M32 41v17M6 32h17M41 32h17M13.6 13.6l12 12M38.4 38.4l12 12M50.4 13.6l-12 12M25.6 38.4l-12 12" stroke-linecap="round"/>
+    <circle cx="32" cy="32" r="3" fill="url(#cmv2-gold)" stroke="none"/>
+    <path d="M32 32l5 4M32 32l-5 4M32 32v-6" stroke-width="3" stroke-linecap="round"/>
+  </g>
+</svg>
