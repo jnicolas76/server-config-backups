@@ -45,7 +45,7 @@ On first launch Android 13+ may ask for notification permission. Allow it so the
 - Android Gradle build completed successfully.
 - APK metadata verified as version 1.7.0 / versionCode 27.
 - APK signature SHA-256 matches the 1.6.1 release: `92bdd81dec465207dcd6f69c94dfa3d60333b76e59dc98b10ccbbc85e9963e55`.
-- APK SHA-256: `1efda976263eeb4fa5b4d4df9548c281389cdf9dd8d003e7055b88addcd10bf0`.
+- APK SHA-256: `b8e7a9e0071c857b058857af61ad21296734d2759f056f1251b48d16bcd0f45f`.
 
 ## Source
 

@@ -228,7 +228,7 @@ Recommended scope:
 - Android package remains `com.cinevault.companion`; release is versionCode `27`,
   versionName `1.7.0`. Its signing certificate matches 1.6.1, so it installs as an
   upgrade. APK SHA-256 is
-  `1efda976263eeb4fa5b4d4df9548c281389cdf9dd8d003e7055b88addcd10bf0`.
+  `b8e7a9e0071c857b058857af61ad21296734d2759f056f1251b48d16bcd0f45f`.
 - Nextcloud package directory: `C:\Users\jonat\Nextcloud\CineVault`.
 - Server `.20` package directory: `/home/jnicolas/cinemediavault-lab/apk`.
 - Both directories contain the 1.7.0 APK, 1.6.1 rollback APK, source ZIP, and README.
