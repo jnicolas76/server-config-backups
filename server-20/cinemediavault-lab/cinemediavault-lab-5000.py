@@ -971,6 +971,8 @@ def reload_media_state() -> dict:
         tv_app.tv_index.refresh()
     movie_app.load_poster_map()
     movie_app.load_metadata_map()
+    if hasattr(movie_app, "migrate_manual_overrides_to_stable_keys"):
+        movie_app.migrate_manual_overrides_to_stable_keys()
     tv_app.load_poster_map()
     tv_app.load_metadata_map()
     migrate_legacy_movie_state_keys()
@@ -7476,6 +7478,11 @@ def main():
         tv_app.tv_index.refresh()
     movie_app.load_poster_map()
     movie_app.load_metadata_map()
+    migrated_movie_overrides = (
+        movie_app.migrate_manual_overrides_to_stable_keys()
+        if hasattr(movie_app, "migrate_manual_overrides_to_stable_keys")
+        else 0
+    )
     tv_app.load_poster_map()
     tv_app.load_metadata_map()
     migrated_movie_states = migrate_legacy_movie_state_keys()
@@ -7490,6 +7497,7 @@ def main():
     print(f"Loaded {len(tv_app.tv_index.shows)} shows and {len(tv_app.tv_index.episode_by_id)} episodes", flush=True)
     print(f"Indexed {actor_stats['actors']} actors across {actor_stats['links']} library links", flush=True)
     print(f"Migrated {migrated_movie_states} legacy movie state key(s) to stable identities", flush=True)
+    print(f"Migrated {migrated_movie_overrides} legacy manual movie override(s) to stable identities", flush=True)
     print(
         f"HLS cache cleanup: {HLS_CACHE_DIR} older than {HLS_CACHE_MAX_AGE_HOURS:g} hour(s), every {HLS_CLEANUP_INTERVAL_MINUTES:g} minute(s)",
         flush=True,

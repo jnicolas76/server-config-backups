@@ -214,6 +214,10 @@ class MovieIndex:
 movie_index = MovieIndex()
 poster_map: dict[str, str] = {}
 metadata_map: dict[str, dict] = {}
+manual_poster_overrides: dict[str, str] = {}
+manual_metadata_overrides: dict[str, dict] = {}
+map_source_signature: tuple = ()
+map_source_checked_at = 0.0
 
 
 def clean_title(path: Path) -> str:
@@ -276,30 +280,69 @@ def slugify(value: str) -> str:
     return cleaned or "movie"
 
 
+def stable_asset_key(item: MovieItem) -> str:
+    """A match key that survives video extension/quality/transcode filename changes."""
+    parent = Path(item.rel_path).parent.name
+    identity = parent if parent and parent != "." else item.title
+    return "asset:" + normalize_name(identity)
+
+
+def map_file_signature() -> tuple:
+    signature = []
+    for path in (POSTER_MAP, METADATA_MAP, MANUAL_POSTER_OVERRIDES, MANUAL_METADATA_OVERRIDES):
+        try:
+            stat = path.stat()
+            signature.append((str(path), stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            signature.append((str(path), 0, 0))
+    return tuple(signature)
+
+
 def load_poster_map() -> None:
-    global poster_map
+    global poster_map, manual_poster_overrides, map_source_signature
     try:
         poster_map = json.loads(POSTER_MAP.read_text(encoding="utf-8")) if POSTER_MAP.is_file() else {}
     except Exception:
         poster_map = {}
     overrides = load_json_file(MANUAL_POSTER_OVERRIDES, {})
-    if isinstance(overrides, dict):
-        poster_map.update(overrides)
+    manual_poster_overrides = overrides if isinstance(overrides, dict) else {}
+    map_source_signature = map_file_signature()
 
 
 def load_metadata_map() -> None:
-    global metadata_map
+    global metadata_map, manual_metadata_overrides, map_source_signature
     try:
         metadata_map = json.loads(METADATA_MAP.read_text(encoding="utf-8")) if METADATA_MAP.is_file() else {}
     except Exception:
         metadata_map = {}
     overrides = load_json_file(MANUAL_METADATA_OVERRIDES, {})
-    if isinstance(overrides, dict):
-        metadata_map.update(overrides)
+    manual_metadata_overrides = overrides if isinstance(overrides, dict) else {}
+    map_source_signature = map_file_signature()
+
+
+def ensure_maps_current() -> None:
+    """Notice refresh-job atomic replacements without restarting CineVault."""
+    global map_source_checked_at
+    now = time.monotonic()
+    if now - map_source_checked_at < 2.0:
+        return
+    map_source_checked_at = now
+    if map_file_signature() != map_source_signature:
+        load_poster_map()
+        load_metadata_map()
 
 
 def poster_url_for(item: MovieItem) -> str:
-    rel = poster_map.get(item.rel_path) or poster_map.get(item.title)
+    ensure_maps_current()
+    stable_key = stable_asset_key(item)
+    rel = (
+        manual_poster_overrides.get(item.rel_path)
+        or manual_poster_overrides.get(stable_key)
+        or manual_poster_overrides.get(item.title)
+        or poster_map.get(item.rel_path)
+        or poster_map.get(stable_key)
+        or poster_map.get(item.title)
+    )
     if not rel:
         return ""
     return "/" + rel.lstrip("/")
@@ -321,7 +364,17 @@ def poster_backdrop_html(items, limit: int = 70) -> str:
 
 
 def metadata_for(item: MovieItem) -> dict:
-    return metadata_map.get(item.rel_path) or metadata_map.get(item.title) or {}
+    ensure_maps_current()
+    stable_key = stable_asset_key(item)
+    return (
+        manual_metadata_overrides.get(item.rel_path)
+        or manual_metadata_overrides.get(stable_key)
+        or manual_metadata_overrides.get(item.title)
+        or metadata_map.get(item.rel_path)
+        or metadata_map.get(stable_key)
+        or metadata_map.get(item.title)
+        or {}
+    )
 
 
 def load_json_file(path: Path, default):
@@ -338,6 +391,34 @@ def save_json_file(path: Path, payload) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     tmp.replace(path)
+
+
+def migrate_manual_overrides_to_stable_keys() -> int:
+    """Upgrade legacy exact-path overrides so later transcodes/renames retain them."""
+    global manual_poster_overrides, manual_metadata_overrides
+    poster_overrides = load_json_file(MANUAL_POSTER_OVERRIDES, {})
+    metadata_overrides = load_json_file(MANUAL_METADATA_OVERRIDES, {})
+    poster_overrides = poster_overrides if isinstance(poster_overrides, dict) else {}
+    metadata_overrides = metadata_overrides if isinstance(metadata_overrides, dict) else {}
+    changed = 0
+    for item in movie_index.items:
+        stable_key = stable_asset_key(item)
+        if stable_key not in poster_overrides:
+            value = poster_overrides.get(item.rel_path) or poster_overrides.get(item.title)
+            if value:
+                poster_overrides[stable_key] = value
+                changed += 1
+        if stable_key not in metadata_overrides:
+            value = metadata_overrides.get(item.rel_path) or metadata_overrides.get(item.title)
+            if value:
+                metadata_overrides[stable_key] = value
+                changed += 1
+    if changed:
+        save_json_file(MANUAL_POSTER_OVERRIDES, poster_overrides)
+        save_json_file(MANUAL_METADATA_OVERRIDES, metadata_overrides)
+        manual_poster_overrides = poster_overrides
+        manual_metadata_overrides = metadata_overrides
+    return changed
 
 
 def tmdb_config() -> dict:
@@ -398,7 +479,7 @@ def download_tmdb_poster(item: MovieItem, tmdb_row: dict) -> str:
 
 
 def apply_tmdb_match(item: MovieItem, tmdb_id: int) -> dict:
-    global poster_map, metadata_map
+    global poster_map, metadata_map, manual_poster_overrides, manual_metadata_overrides
     detail = tmdb_request_json(f"/movie/{tmdb_id}", {})
     actors = tmdb_movie_credits(tmdb_id)
     metadata = load_json_file(METADATA_MAP, {})
@@ -419,9 +500,10 @@ def apply_tmdb_match(item: MovieItem, tmdb_id: int) -> dict:
     save_json_file(METADATA_MAP, metadata)
     metadata_overrides = load_json_file(MANUAL_METADATA_OVERRIDES, {})
     metadata_overrides[item.rel_path] = matched_metadata
+    metadata_overrides[stable_asset_key(item)] = matched_metadata
     save_json_file(MANUAL_METADATA_OVERRIDES, metadata_overrides)
     metadata_map = metadata
-    metadata_map.update(metadata_overrides)
+    manual_metadata_overrides = metadata_overrides
     rel_poster = download_tmdb_poster(item, detail)
     if rel_poster:
         poster_data = load_json_file(POSTER_MAP, {})
@@ -429,9 +511,10 @@ def apply_tmdb_match(item: MovieItem, tmdb_id: int) -> dict:
         save_json_file(POSTER_MAP, poster_data)
         poster_overrides = load_json_file(MANUAL_POSTER_OVERRIDES, {})
         poster_overrides[item.rel_path] = rel_poster
+        poster_overrides[stable_asset_key(item)] = rel_poster
         save_json_file(MANUAL_POSTER_OVERRIDES, poster_overrides)
         poster_map = poster_data
-        poster_map.update(poster_overrides)
+        manual_poster_overrides = poster_overrides
     return metadata[item.rel_path]
 
 
@@ -468,7 +551,7 @@ def parse_multipart_form(content_type: str, body: bytes) -> tuple[dict[str, str]
 
 
 def save_uploaded_art(item: MovieItem, filename: str, data: bytes, mime: str) -> str:
-    global poster_map
+    global poster_map, manual_poster_overrides
     if len(data) < 1024:
         raise ValueError("Uploaded image is empty or too small")
     if len(data) > 20 * 1024 * 1024:
@@ -494,9 +577,10 @@ def save_uploaded_art(item: MovieItem, filename: str, data: bytes, mime: str) ->
     save_json_file(POSTER_MAP, poster_data)
     poster_overrides = load_json_file(MANUAL_POSTER_OVERRIDES, {})
     poster_overrides[item.rel_path] = poster_data[item.rel_path]
+    poster_overrides[stable_asset_key(item)] = poster_data[item.rel_path]
     save_json_file(MANUAL_POSTER_OVERRIDES, poster_overrides)
     poster_map = poster_data
-    poster_map.update(poster_overrides)
+    manual_poster_overrides = poster_overrides
     return poster_data[item.rel_path]
 
 
@@ -1912,6 +1996,9 @@ def main():
     movie_index.load_csv_bootstrap()
     load_poster_map()
     load_metadata_map()
+    migrated = migrate_manual_overrides_to_stable_keys()
+    if migrated:
+        print(f"Migrated {migrated} legacy manual movie overrides to stable asset keys", flush=True)
     print(f"Loaded {len(movie_index.items)} movie rows from CSV bootstrap", flush=True)
     movie_index.refresh_background()
     print(f"Started background live movie scan from {MOVIE_ROOT}", flush=True)
