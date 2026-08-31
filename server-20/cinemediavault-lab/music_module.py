@@ -286,15 +286,15 @@ def artwork_path(track_id):
     for candidate in source.parent.iterdir():
         if candidate.is_file() and candidate.name.casefold() in preferred:
             return candidate
+    missing = ART_CACHE / f"track-{track_id}.missing"
+    if missing.is_file() and time.time() - missing.stat().st_mtime < 86400 * 14:
+        return None
     try:
         subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(source), "-an", "-frames:v", "1", "-vf", "scale=700:-2", str(target)], timeout=25, check=True)
     except Exception:
         pass
     if target.is_file():
         return target
-    missing = ART_CACHE / f"track-{track_id}.missing"
-    if missing.is_file() and time.time() - missing.stat().st_mtime < 86400 * 14:
-        return None
     try:
         query = f"{row['artist']} {row['title']}"
         url = "https://itunes.apple.com/search?" + urllib.parse.urlencode({"term": query, "entity": "song", "limit": 1})
@@ -566,6 +566,17 @@ def ensure_music_v2():
           played_at REAL NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_music_plays_user_time ON music_plays(user_id,played_at DESC);
+        CREATE TABLE IF NOT EXISTS music_playback_state (
+          user_id INTEGER PRIMARY KEY,
+          track_id INTEGER NOT NULL DEFAULT 0,
+          position_seconds REAL NOT NULL DEFAULT 0,
+          queue_json TEXT NOT NULL DEFAULT '[]',
+          queue_index INTEGER NOT NULL DEFAULT -1,
+          shuffle INTEGER NOT NULL DEFAULT 0,
+          repeat_mode TEXT NOT NULL DEFAULT 'off',
+          playing INTEGER NOT NULL DEFAULT 0,
+          updated_at REAL NOT NULL DEFAULT 0
+        );
         """)
         conn.commit()
     finally:
@@ -581,6 +592,65 @@ def record_music_play(user_id, track_id):
             conn.execute("INSERT INTO music_plays(user_id,track_id,played_at) VALUES(?,?,?)", (int(user_id), int(track_id), now))
             conn.execute("DELETE FROM music_plays WHERE id IN (SELECT id FROM music_plays WHERE user_id=? ORDER BY played_at DESC LIMIT -1 OFFSET 500)", (int(user_id),))
             conn.commit()
+    finally:
+        conn.close()
+
+
+def playback_state_api(handler, user, save=False):
+    user_id = int(user["id"])
+    conn = connect()
+    try:
+        if save:
+            payload = read_json(handler)
+            queue = []
+            for value in payload.get("queue") or []:
+                try:
+                    value = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if value > 0 and value not in queue:
+                    queue.append(value)
+                if len(queue) >= 500:
+                    break
+            track_id = int(payload.get("track_id") or 0)
+            if track_id and track_id not in queue:
+                queue.insert(0, track_id)
+            if track_id and not conn.execute("SELECT 1 FROM tracks WHERE id=?", (track_id,)).fetchone():
+                return json_response(handler, {"ok": False, "error": "Track not found"}, 404)
+            queue_index = max(-1, min(int(payload.get("queue_index") or 0), len(queue) - 1))
+            position = max(0.0, float(payload.get("position_seconds") or 0))
+            repeat_mode = str(payload.get("repeat_mode") or "off")
+            if repeat_mode not in {"off", "all", "one"}:
+                repeat_mode = "off"
+            conn.execute("""INSERT INTO music_playback_state
+              (user_id,track_id,position_seconds,queue_json,queue_index,shuffle,repeat_mode,playing,updated_at)
+              VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET
+              track_id=excluded.track_id,position_seconds=excluded.position_seconds,
+              queue_json=excluded.queue_json,queue_index=excluded.queue_index,
+              shuffle=excluded.shuffle,repeat_mode=excluded.repeat_mode,
+              playing=excluded.playing,updated_at=excluded.updated_at""",
+              (user_id, track_id, position, json.dumps(queue), queue_index,
+               1 if payload.get("shuffle") else 0, repeat_mode,
+               1 if payload.get("playing") else 0, time.time()))
+            conn.commit()
+        row = conn.execute("SELECT * FROM music_playback_state WHERE user_id=?", (user_id,)).fetchone()
+        if not row:
+            return json_response(handler, {"ok": True, "state": None})
+        state = dict(row)
+        try:
+            ids = [int(value) for value in json.loads(state.pop("queue_json") or "[]")][:500]
+        except Exception:
+            ids = []
+        tracks = []
+        if ids:
+            placeholders = ",".join("?" for _ in ids)
+            rows = conn.execute(TRACK_SELECT + f" WHERE t.id IN ({placeholders})", ids).fetchall()
+            by_id = {int(item["id"]): track_dict(item) for item in rows}
+            tracks = [by_id[value] for value in ids if value in by_id]
+        state["queue"] = tracks
+        state["shuffle"] = bool(state["shuffle"])
+        state["playing"] = bool(state["playing"])
+        return json_response(handler, {"ok": True, "state": state})
     finally:
         conn.close()
 
@@ -664,7 +734,91 @@ document.body.onclick=async e=>{let n=e.target.closest('[data-nav],[data-go],[da
 </script></body></html>'''
 
 
-MUSIC_PAGE = MUSIC_PAGE_V2
+MUSIC_PAGE_V3 = MUSIC_PAGE_V2.replace('</style>', r'''
+.mini>div{min-width:0}.mini-info{cursor:pointer}.now-player{position:fixed;z-index:30;inset:0;display:none;overflow:auto;background:radial-gradient(circle at 50% 15%,rgba(120,45,27,.78),transparent 48%),linear-gradient(180deg,#241619,#100b19 78%);padding:18px 20px 34px}.now-player.open{display:block}.now-shell{max-width:620px;margin:auto;text-align:center}.now-close{display:block;margin-left:auto;background:rgba(255,255,255,.1);border-radius:50%;width:44px;height:44px;font-size:25px}.now-art{width:min(82vw,520px);aspect-ratio:1;object-fit:cover;border-radius:18px;margin:10px auto 22px;display:block;box-shadow:0 24px 60px rgba(0,0,0,.42)}.now-seek{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:10px}.now-seek input{width:100%;accent-color:#f4bd55}.now-track{font-size:24px;margin:25px 0 4px}.now-album{color:var(--muted);margin:4px 0}.transport{display:flex;align-items:center;justify-content:center;gap:26px;margin:25px 0}.transport button{background:rgba(255,255,255,.08);border-radius:50%;width:58px;height:58px;font-size:25px}.transport .main-play{width:76px;height:76px;background:#74342d;font-size:31px}.player-tools{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.player-tools button,.player-tools google-cast-launcher{display:flex;align-items:center;justify-content:center;margin:auto;background:rgba(255,255,255,.07);border-radius:50%;width:52px;height:52px;font-size:22px}.player-tools .active{color:var(--accent);outline:2px solid var(--accent)}.queue-panel{margin-top:28px;text-align:left;border-top:1px solid var(--line);padding-top:18px}.queue-row{display:grid;grid-template-columns:42px 1fr auto;gap:10px;align-items:center;width:100%;padding:8px;background:none;text-align:left;border-bottom:1px solid var(--line)}.queue-row.current{color:var(--accent)}.queue-row img{width:42px;height:42px;object-fit:cover;border-radius:5px}.queue-row strong,.queue-row small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.queue-row small{color:var(--muted)}.resume-chip{display:none;position:fixed;z-index:13;left:14px;right:14px;bottom:146px;background:#27202f;border:1px solid var(--line);border-radius:12px;padding:12px 15px;text-align:left}.resume-ready .resume-chip{display:block}.playing.resume-ready .resume-chip{display:none}@media(min-width:700px){.resume-chip{left:auto;width:420px}.now-player{padding-top:30px}}
+</style>''').replace(
+    '<div class="mini"><img id="miniArt"><div><strong id="miniTitle"></strong><small id="miniArtist"></small></div><button id="miniPlay">&#10074;&#10074;</button><button id="miniNext">&#9197;</button></div>',
+    '<button id="resumeChip" class="resume-chip"><strong id="resumeTitle">Resume music</strong><small id="resumeTime"></small></button><div class="mini"><img id="miniArt"><div id="miniInfo" class="mini-info"><strong id="miniTitle"></strong><small id="miniArtist"></small></div><button id="miniPlay">&#10074;&#10074;</button><button id="miniNext">&#9197;</button></div><section id="nowPlayer" class="now-player" aria-hidden="true"><div class="now-shell"><button id="nowClose" class="now-close" aria-label="Close player">&#215;</button><img id="nowArt" class="now-art" alt=""><div class="now-seek"><span id="nowElapsed">0:00</span><input id="nowSeek" type="range" min="0" max="1000" value="0"><span id="nowDuration">0:00</span></div><h1 id="nowTitle" class="now-track">Nothing playing</h1><p id="nowArtist"></p><p id="nowAlbum" class="now-album"></p><div class="transport"><button id="nowPrev" aria-label="Previous">&#9198;</button><button id="nowPlay" class="main-play" aria-label="Play or pause">&#9654;</button><button id="nowNext" aria-label="Next">&#9197;</button></div><div class="player-tools"><button id="nowQueue" aria-label="Queue">&#9776;</button><button id="nowShuffle" aria-label="Shuffle">&#128256;</button><button id="nowRepeat" aria-label="Repeat">&#128257;</button><button id="nowCast" aria-label="Cast">&#128250;</button></div><div id="queuePanel" class="queue-panel"><h2>Up Next</h2><div id="queueRows"></div></div></div></section>'
+).replace('</body>', r'''
+<script src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1" async></script>
+<script>
+(()=>{
+const fmtTime=value=>{value=Math.max(0,Math.floor(Number(value)||0));return Math.floor(value/60)+':'+String(value%60).padStart(2,'0')};
+const nativeMusic=()=>window.CineVaultNativeMusic&&typeof window.CineVaultNativeMusic.playQueue==='function';
+let currentTrack=null,lastSnapshot=0,restoring=false,nativePosition=0;
+state.shuffle=false;state.repeatMode='off';
+function updateButtons(){
+  const paused=nativeMusic()?false:audio.paused;
+  const icon=paused?'&#9654;':'&#10074;&#10074;';
+  $('#miniPlay').innerHTML=icon;$('#nowPlay').innerHTML=icon;
+  $('#nowShuffle').classList.toggle('active',state.shuffle);
+  $('#nowRepeat').classList.toggle('active',state.repeatMode!=='off');
+  $('#nowRepeat').title='Repeat: '+state.repeatMode;
+}
+function renderQueue(){
+  $('#queueRows').innerHTML=(state.queue||[]).map((t,i)=>`<button class="queue-row ${i===state.index?'current':''}" data-queue-play="${i}"><img src="${t.artwork}"><span><strong>${esc(t.title)}</strong><small>${esc(t.artist)} · ${esc(t.album)}</small></span><b>${i===state.index?'Playing':'&#9654;'}</b></button>`).join('')||'<p class="empty">Queue is empty.</p>';
+}
+function setNowPlaying(t){
+  currentTrack=t;$('#miniArt').src=t.artwork;$('#miniTitle').textContent=t.title;$('#miniArtist').textContent=t.artist;
+  $('#nowArt').src=t.artwork;$('#nowTitle').textContent=t.title;$('#nowArtist').textContent=t.artist;$('#nowAlbum').textContent=t.album+(t.year?' · '+t.year:'');
+  document.body.classList.add('playing');document.body.classList.remove('resume-ready');renderQueue();setMediaSession(t);updateButtons();
+}
+function setMediaSession(t){
+  if(!('mediaSession' in navigator))return;
+  try{navigator.mediaSession.metadata=new MediaMetadata({title:t.title,artist:t.artist,album:t.album,artwork:[{src:new URL(t.artwork,location.href).href,sizes:'700x700',type:'image/jpeg'}]})}catch(e){}
+}
+function sendNative(position=0){
+  if(!nativeMusic())return false;
+  try{window.CineVaultNativeMusic.playQueue(JSON.stringify(state.queue),state.index,Number(position)||0,!!state.shuffle,state.repeatMode);return true}catch(e){return false}
+}
+const originalPlay=play;
+play=function(i,autoplay=true,position=0){
+  if(!state.queue.length)return;state.index=(i+state.queue.length)%state.queue.length;const t=state.queue[state.index];setNowPlaying(t);
+  if(sendNative(position)){persistState(true,position);return}
+  audio.src=t.stream;audio.load();if(position>0)audio.addEventListener('loadedmetadata',()=>{audio.currentTime=Math.min(position,Math.max(0,(audio.duration||position)-1))},{once:true});
+  if(autoplay)audio.play().catch(()=>{});persistState(autoplay,position);
+};
+function previous(){if(!state.queue.length)return;if(!nativeMusic()&&audio.currentTime>5){audio.currentTime=0;return persistState(!audio.paused,0)}play(state.index-1)}
+function next(){if(!state.queue.length)return;play(state.shuffle?Math.floor(Math.random()*state.queue.length):state.index+1)}
+function togglePlay(){
+  if(!currentTrack&&state.queue.length)return play(Math.max(0,state.index));
+  if(nativeMusic()){window.CineVaultNativeMusic.toggle();return}
+  if(audio.paused)audio.play().catch(()=>{});else audio.pause();
+}
+function cycleRepeat(){state.repeatMode=state.repeatMode==='off'?'all':state.repeatMode==='all'?'one':'off';if(nativeMusic())window.CineVaultNativeMusic.setRepeatMode(state.repeatMode);updateButtons();persistState(!audio.paused)}
+function toggleShuffle(){state.shuffle=!state.shuffle;if(nativeMusic())window.CineVaultNativeMusic.setShuffle(state.shuffle);updateButtons();persistState(!audio.paused)}
+async function persistState(playing,position){
+  if(!currentTrack||restoring)return;const now=Date.now();if(position==null&&now-lastSnapshot<9000)return;lastSnapshot=now;
+  const pos=position==null?(nativeMusic()?nativePosition:audio.currentTime):position;
+  fetch('/api/music/now-playing',{method:'POST',headers:{'Content-Type':'application/json'},keepalive:true,body:JSON.stringify({track_id:currentTrack.id,position_seconds:Number(pos)||0,queue:state.queue.map(t=>t.id),queue_index:state.index,shuffle:state.shuffle,repeat_mode:state.repeatMode,playing:!!playing})}).catch(()=>{});
+}
+async function restoreState(){
+  try{const data=await fetch('/api/music/now-playing').then(r=>r.json()),saved=data.state;if(!saved||!saved.queue?.length)return;
+    restoring=true;state.queue=saved.queue;state.index=Math.max(0,Math.min(Number(saved.queue_index)||0,state.queue.length-1));state.shuffle=!!saved.shuffle;state.repeatMode=saved.repeat_mode||'off';currentTrack=state.queue[state.index];
+    setNowPlaying(currentTrack);document.body.classList.remove('playing');document.body.classList.add('resume-ready');$('#resumeTitle').textContent='Resume '+currentTrack.title;$('#resumeTime').textContent=' at '+fmtTime(saved.position_seconds);$('#resumeChip').dataset.position=String(saved.position_seconds||0);updateButtons();restoring=false;
+  }catch(e){restoring=false}
+}
+function updateProgress(position,duration){
+  position=Number(position)||0;duration=Number(duration)||0;nativePosition=position;const value=duration?position/duration*1000:0;
+  $('#nowSeek').value=value;$('#nowElapsed').textContent=fmtTime(position);$('#nowDuration').textContent=fmtTime(duration);
+  if('mediaSession' in navigator&&duration>0)try{navigator.mediaSession.setPositionState({duration,playbackRate:1,position:Math.min(position,duration)})}catch(e){}
+}
+audio.onplay=()=>{updateButtons();persistState(true)};audio.onpause=()=>{updateButtons();persistState(false)};audio.ontimeupdate=()=>{updateProgress(audio.currentTime,audio.duration);persistState(!audio.paused)};audio.onended=()=>state.repeatMode==='one'?(audio.currentTime=0,audio.play()):next();
+$('#miniPlay').onclick=togglePlay;$('#miniNext').onclick=next;$('#miniInfo').onclick=()=>{$('#nowPlayer').classList.add('open');$('#nowPlayer').setAttribute('aria-hidden','false')};
+$('#nowClose').onclick=()=>{$('#nowPlayer').classList.remove('open');$('#nowPlayer').setAttribute('aria-hidden','true')};$('#nowPrev').onclick=previous;$('#nowPlay').onclick=togglePlay;$('#nowNext').onclick=next;$('#nowShuffle').onclick=toggleShuffle;$('#nowRepeat').onclick=cycleRepeat;$('#nowQueue').onclick=()=>$('#queuePanel').scrollIntoView({behavior:'smooth'});
+$('#queueRows').onclick=e=>{const row=e.target.closest('[data-queue-play]');if(row)play(+row.dataset.queuePlay)};
+$('#nowSeek').oninput=e=>{const duration=nativeMusic()?Number(window.CineVaultNativeMusic.getDuration()||0):audio.duration;if(!duration)return;const position=duration*Number(e.target.value)/1000;if(nativeMusic())window.CineVaultNativeMusic.seekTo(position);else audio.currentTime=position;updateProgress(position,duration);persistState(true,position)};
+$('#resumeChip').onclick=()=>play(state.index,true,Number($('#resumeChip').dataset.position)||0);
+$('#nowCast').onclick=()=>{if(window.CineVaultNativeMusic&&window.CineVaultNativeMusic.castCurrent){window.CineVaultNativeMusic.castCurrent();return}if(window.chrome?.cast?.requestSession)window.chrome.cast.requestSession(()=>{},()=>{});else alert('Cast is available in the CineVault app or a Cast-enabled Chrome browser.')};
+if('mediaSession' in navigator){for(const [name,handler] of Object.entries({play:togglePlay,pause:togglePlay,previoustrack:previous,nexttrack:next,stop:()=>{if(nativeMusic())window.CineVaultNativeMusic.stop();else{audio.pause();audio.currentTime=0}},seekto:e=>{if(e.seekTime!=null){if(nativeMusic())window.CineVaultNativeMusic.seekTo(e.seekTime);else audio.currentTime=e.seekTime}},seekbackward:e=>{const p=Math.max(0,(audio.currentTime||0)-(e.seekOffset||10));if(nativeMusic())window.CineVaultNativeMusic.seekTo(p);else audio.currentTime=p},seekforward:e=>{const p=(audio.currentTime||0)+(e.seekOffset||10);if(nativeMusic())window.CineVaultNativeMusic.seekTo(p);else audio.currentTime=p}})){try{navigator.mediaSession.setActionHandler(name,handler)}catch(e){}}}
+document.addEventListener('visibilitychange',()=>{if(document.hidden)persistState(nativeMusic()||!audio.paused)});window.addEventListener('pagehide',()=>persistState(nativeMusic()||!audio.paused));
+window.cineVaultNativeState=raw=>{try{const s=typeof raw==='string'?JSON.parse(raw):raw;nativePosition=Number(s.position)||0;updateProgress(nativePosition,Number(s.duration)||0);$('#miniPlay').innerHTML=s.playing?'&#10074;&#10074;':'&#9654;';$('#nowPlay').innerHTML=$('#miniPlay').innerHTML;if(s.index!=null&&s.index!==state.index&&state.queue[s.index]){state.index=s.index;setNowPlaying(state.queue[state.index])}}catch(e){}};
+restoreState();
+})();
+</script>
+</body>''')
+
+MUSIC_PAGE = MUSIC_PAGE_V3
 
 
 def handle_get(handler, user, path, head=False):
@@ -672,6 +826,7 @@ def handle_get(handler, user, path, head=False):
         data=MUSIC_PAGE.encode(); handler.send_response(200); handler.send_header("Content-Type","text/html; charset=utf-8"); handler.send_header("Content-Length",str(len(data))); handler.end_headers(); return handler.wfile.write(data)
     if path == "/api/music/library": return api_library(handler)
     if path == "/api/music/explore": return api_music_explore(handler,user)
+    if path == "/api/music/now-playing": return playback_state_api(handler,user)
     if path == "/api/music/scan-status": return json_response(handler,{"ok":True,"scan":dict(SCAN_STATE)})
     match=re.match(r"^/music/(stream|download|art)/(\d+)$",path)
     if match:
@@ -692,6 +847,7 @@ def handle_get(handler, user, path, head=False):
 def handle_post(handler, user, path):
     if path == "/api/music/scan": start_scan(); return json_response(handler,{"ok":True,"scan":dict(SCAN_STATE)})
     if path == "/api/music/playlists": return playlist_api(handler,user)
+    if path == "/api/music/now-playing": return playback_state_api(handler,user,save=True)
     return False
 
 
