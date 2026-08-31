@@ -24,6 +24,8 @@ LIVE_CACHE = Path(os.environ.get("MOVIE_LIVE_CACHE", "/mnt/c/DATA/media-download
 POSTER_MAP = Path(os.environ.get("MOVIE_POSTER_MAP", "/mnt/c/DATA/media-download-library/poster-map.json")).resolve()
 POSTER_DIR = Path(os.environ.get("MOVIE_POSTER_DIR", "/mnt/c/DATA/media-download-library/posters")).resolve()
 METADATA_MAP = Path(os.environ.get("MOVIE_METADATA_MAP", "/mnt/c/DATA/media-download-library/movie-metadata-map.json")).resolve()
+MANUAL_METADATA_OVERRIDES = Path(os.environ.get("MOVIE_MANUAL_METADATA_OVERRIDES", METADATA_MAP.parent / "manual-metadata-overrides.json")).resolve()
+MANUAL_POSTER_OVERRIDES = Path(os.environ.get("MOVIE_MANUAL_POSTER_OVERRIDES", POSTER_MAP.parent / "manual-poster-overrides.json")).resolve()
 TMDB_CONFIG_FILE = Path(os.environ.get("TMDB_CONFIG_FILE", METADATA_MAP.parent / "tmdb_config.json")).resolve()
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".m4v", ".avi", ".mov", ".mpeg", ".mpg", ".m2ts", ".ts", ".webm"}
 RECENTLY_ADDED_LIMIT = int(os.environ.get("MOVIE_RECENTLY_ADDED_LIMIT", "20"))
@@ -276,24 +278,24 @@ def slugify(value: str) -> str:
 
 def load_poster_map() -> None:
     global poster_map
-    if not POSTER_MAP.is_file():
-        poster_map = {}
-        return
     try:
-        poster_map = json.loads(POSTER_MAP.read_text(encoding="utf-8"))
+        poster_map = json.loads(POSTER_MAP.read_text(encoding="utf-8")) if POSTER_MAP.is_file() else {}
     except Exception:
         poster_map = {}
+    overrides = load_json_file(MANUAL_POSTER_OVERRIDES, {})
+    if isinstance(overrides, dict):
+        poster_map.update(overrides)
 
 
 def load_metadata_map() -> None:
     global metadata_map
-    if not METADATA_MAP.is_file():
-        metadata_map = {}
-        return
     try:
-        metadata_map = json.loads(METADATA_MAP.read_text(encoding="utf-8"))
+        metadata_map = json.loads(METADATA_MAP.read_text(encoding="utf-8")) if METADATA_MAP.is_file() else {}
     except Exception:
         metadata_map = {}
+    overrides = load_json_file(MANUAL_METADATA_OVERRIDES, {})
+    if isinstance(overrides, dict):
+        metadata_map.update(overrides)
 
 
 def poster_url_for(item: MovieItem) -> str:
@@ -400,7 +402,7 @@ def apply_tmdb_match(item: MovieItem, tmdb_id: int) -> dict:
     detail = tmdb_request_json(f"/movie/{tmdb_id}", {})
     actors = tmdb_movie_credits(tmdb_id)
     metadata = load_json_file(METADATA_MAP, {})
-    metadata[item.rel_path] = {
+    matched_metadata = {
         "tmdb_id": detail.get("id"),
         "title": detail.get("title") or item.title,
         "release_date": detail.get("release_date") or "",
@@ -413,14 +415,23 @@ def apply_tmdb_match(item: MovieItem, tmdb_id: int) -> dict:
         "poster_path": detail.get("poster_path") or "",
         "backdrop_path": detail.get("backdrop_path") or "",
     }
+    metadata[item.rel_path] = matched_metadata
     save_json_file(METADATA_MAP, metadata)
+    metadata_overrides = load_json_file(MANUAL_METADATA_OVERRIDES, {})
+    metadata_overrides[item.rel_path] = matched_metadata
+    save_json_file(MANUAL_METADATA_OVERRIDES, metadata_overrides)
     metadata_map = metadata
+    metadata_map.update(metadata_overrides)
     rel_poster = download_tmdb_poster(item, detail)
     if rel_poster:
         poster_data = load_json_file(POSTER_MAP, {})
         poster_data[item.rel_path] = rel_poster
         save_json_file(POSTER_MAP, poster_data)
+        poster_overrides = load_json_file(MANUAL_POSTER_OVERRIDES, {})
+        poster_overrides[item.rel_path] = rel_poster
+        save_json_file(MANUAL_POSTER_OVERRIDES, poster_overrides)
         poster_map = poster_data
+        poster_map.update(poster_overrides)
     return metadata[item.rel_path]
 
 
@@ -481,7 +492,11 @@ def save_uploaded_art(item: MovieItem, filename: str, data: bytes, mime: str) ->
     poster_data = load_json_file(POSTER_MAP, {})
     poster_data[item.rel_path] = f"posters/{destination.name}"
     save_json_file(POSTER_MAP, poster_data)
+    poster_overrides = load_json_file(MANUAL_POSTER_OVERRIDES, {})
+    poster_overrides[item.rel_path] = poster_data[item.rel_path]
+    save_json_file(MANUAL_POSTER_OVERRIDES, poster_overrides)
     poster_map = poster_data
+    poster_map.update(poster_overrides)
     return poster_data[item.rel_path]
 
 
@@ -525,6 +540,144 @@ def tmdb_score_html(metadata: dict) -> str:
 def genres_for(metadata: dict) -> list[str]:
     genres = metadata.get("genres") or []
     return [str(genre) for genre in genres if str(genre).strip()]
+
+
+RECOMMENDATION_STOP_WORDS = {
+    "about", "after", "again", "against", "among", "another", "around", "because", "before", "being",
+    "between", "both", "could", "during", "each", "from", "have", "having", "into", "more", "most",
+    "other", "over", "same", "some", "such", "than", "that", "their", "them", "then", "there", "these",
+    "they", "this", "those", "through", "under", "very", "when", "where", "which", "while", "with", "would",
+    "young", "must", "find", "life", "world", "story", "film", "movie", "woman", "man", "family",
+}
+
+
+def recommendation_actor_names(metadata: dict) -> list[str]:
+    values = metadata.get("actors") or metadata.get("cast") or []
+    names: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if isinstance(value, dict):
+            value = value.get("name") or value.get("original_name") or ""
+        name = re.sub(r"\s+", " ", str(value or "")).strip()
+        key = name.casefold()
+        if name and key not in seen:
+            seen.add(key)
+            names.append(name)
+    return names
+
+
+def recommendation_plot_terms(metadata: dict) -> set[str]:
+    overview = str(metadata.get("overview") or metadata.get("summary") or "").casefold()
+    return {
+        token for token in re.findall(r"[a-z0-9']+", overview)
+        if len(token) >= 4 and token not in RECOMMENDATION_STOP_WORDS
+    }
+
+
+def recommendation_rating(metadata: dict) -> tuple[float, int]:
+    try:
+        rating = float(metadata.get("vote_average") or 0)
+    except (TypeError, ValueError):
+        rating = 0.0
+    try:
+        votes = int(metadata.get("vote_count") or 0)
+    except (TypeError, ValueError):
+        votes = 0
+    return rating, votes
+
+
+def recommendation_identity(item: MovieItem, metadata: dict | None = None) -> str:
+    metadata = metadata if metadata is not None else metadata_for(item)
+    tmdb_id = str(metadata.get("tmdb_id") or metadata.get("id") or "").strip()
+    if tmdb_id:
+        return f"tmdb:{tmdb_id}"
+    title = re.sub(r"[^a-z0-9]+", " ", str(metadata.get("title") or item.title).casefold()).strip()
+    year = str(metadata.get("year") or metadata.get("release_date") or "")[:4]
+    return f"title:{title}:{year}"
+
+
+def recommendation_card_html(item: MovieItem) -> str:
+    metadata = metadata_for(item)
+    title = str(metadata.get("title") or item.title)
+    year = str(metadata.get("year") or "")
+    rating, _ = recommendation_rating(metadata)
+    poster = poster_url_for(item)
+    poster_html = f"<img loading='lazy' src='{html.escape(poster)}' alt=''>" if poster else "<span>No Poster</span>"
+    rating_label = f"TMDb {rating:.1f}" if rating > 0 else "Not rated"
+    return (
+        f"<a class='recommendation-card' href='/movie/{item.id}'>"
+        f"<div class='recommendation-poster'>{poster_html}</div>"
+        f"<div class='recommendation-title'>{html.escape(title)}</div>"
+        f"<div class='recommendation-meta'>{html.escape(year)}<span>{html.escape(rating_label)}</span></div>"
+        "</a>"
+    )
+
+
+def recommendation_rail_html(title: str, items: list[MovieItem]) -> str:
+    if not items:
+        return ""
+    unique_items: list[MovieItem] = []
+    seen: set[str] = set()
+    for item in items:
+        identity = recommendation_identity(item)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique_items.append(item)
+        if len(unique_items) >= 14:
+            break
+    cards = "".join(recommendation_card_html(item) for item in unique_items)
+    return (
+        "<section class='recommendation-row'>"
+        f"<h2>{html.escape(title)} <span aria-hidden='true'>&rsaquo;</span></h2>"
+        f"<div class='recommendation-rail'>{cards}</div>"
+        "</section>"
+    )
+
+
+def movie_recommendations_html(current: MovieItem) -> str:
+    current_metadata = metadata_for(current)
+    current_identity = recommendation_identity(current, current_metadata)
+    current_genres = {genre.casefold() for genre in genres_for(current_metadata)}
+    current_terms = recommendation_plot_terms(current_metadata)
+    related: list[tuple[float, float, int, str, MovieItem]] = []
+
+    for candidate in movie_index.items:
+        metadata = metadata_for(candidate)
+        if candidate.id == current.id or recommendation_identity(candidate, metadata) == current_identity:
+            continue
+        candidate_genres = {genre.casefold() for genre in genres_for(metadata)}
+        candidate_terms = recommendation_plot_terms(metadata)
+        shared_genres = current_genres & candidate_genres
+        genre_union = current_genres | candidate_genres
+        plot_union = current_terms | candidate_terms
+        genre_similarity = len(shared_genres) / len(genre_union) if genre_union else 0.0
+        plot_similarity = len(current_terms & candidate_terms) / len(plot_union) if plot_union else 0.0
+        if not shared_genres and plot_similarity < 0.035:
+            continue
+        rating, votes = recommendation_rating(metadata)
+        score = len(shared_genres) * 4.0 + genre_similarity * 3.0 + plot_similarity * 10.0
+        related.append((score, rating, votes, str(metadata.get("title") or candidate.title).casefold(), candidate))
+
+    related.sort(key=lambda row: (-row[0], -row[1], -row[2], row[3]))
+    sections = [recommendation_rail_html("Related Movies", [row[4] for row in related[:14]])]
+
+    for actor in recommendation_actor_names(current_metadata)[:3]:
+        actor_key = actor.casefold()
+        matches: list[tuple[float, int, str, MovieItem]] = []
+        for candidate in movie_index.items:
+            metadata = metadata_for(candidate)
+            if candidate.id == current.id or recommendation_identity(candidate, metadata) == current_identity:
+                continue
+            if actor_key not in {name.casefold() for name in recommendation_actor_names(metadata)}:
+                continue
+            rating, votes = recommendation_rating(metadata)
+            matches.append((rating, votes, str(metadata.get("title") or candidate.title).casefold(), candidate))
+        matches.sort(key=lambda row: (-row[0], -row[1], row[2]))
+        sections.append(recommendation_rail_html(f"More with {actor}", [row[3] for row in matches[:14]]))
+
+    rendered = "".join(section for section in sections if section)
+    return f"<div class='recommendations'>{rendered}</div>" if rendered else ""
 
 
 def release_label_for(metadata: dict) -> str:
@@ -839,7 +992,12 @@ class Handler(BaseHTTPRequestHandler):
             detail_mode = ""
         mode_query = f"?mode={detail_mode}&play=1" if detail_mode else "?play=1"
         current_user = getattr(self, "current_user", lambda: None)()
-        admin_action = f'<a class="action" href="/admin/media/movie/{item.id}"><span>A</span>Admin</a>' if current_user and current_user["is_admin"] else ""
+        more_menu = (
+            f"<a href='/movie/fix-match/{item.id}'><span class='menu-icon'>&#127916;</span><span><strong>Fix Match</strong><small>Correct title, year, or poster</small></span></a>"
+            f"<a href='#cast' data-cast-toggle='1'><span class='menu-icon'>&#128101;</span><span><strong>Cast &amp; Crew</strong><small>View people in this movie</small></span></a>"
+        )
+        if current_user and current_user["is_admin"]:
+            more_menu += f"<a href='/admin/media/movie/{item.id}'><span class='menu-icon'>A</span><span><strong>Admin</strong><small>File details and administrative controls</small></span></a>"
         poster = poster_url_for(item)
         metadata = metadata_for(item)
         display_title = metadata.get("title") or item.title
@@ -858,6 +1016,18 @@ class Handler(BaseHTTPRequestHandler):
             else "<div class='detail-poster missing'></div>"
         )
         background_style = f" style=\"--poster-bg:url('{html.escape(poster)}')\"" if poster else ""
+        subtitle_summary = globals().get("subtitle_summary_for_path", lambda path: "None found")(item.path)
+        recommendations = movie_recommendations_html(item)
+        detail_item = {
+            "key": f"movie:{item.id}",
+            "kind": "movie",
+            "mediaId": int(item.id),
+            "title": display_title,
+            "subtitle": release_label or human_size(item.size),
+            "poster": poster,
+            "href": f"/player/movie/{item.id}",
+            "detailHref": f"/movie/{item.id}",
+        }
         body = (
             DETAIL_TEMPLATE
             .replace("{{BACKGROUND_STYLE}}", background_style)
@@ -871,14 +1041,17 @@ class Handler(BaseHTTPRequestHandler):
             .replace("{{ACTORS}}", actor_items)
             .replace("{{TMDB_SCORE}}", rating_html)
             .replace("{{SIZE}}", human_size(item.size))
+            .replace("{{SUBTITLE_SUMMARY}}", html.escape(subtitle_summary))
             .replace("{{ITEM_KEY}}", f"movie:{item.id}")
+            .replace("{{ITEM_JSON}}", json.dumps(detail_item))
             .replace("{{PLAY}}", f"/player/movie/{item.id}{mode_query}")
             .replace("{{PLAY_DIRECT}}", f"/movie/{item.id}?mode=direct")
             .replace("{{PLAY_HLS}}", f"/movie/{item.id}?mode=hls")
             .replace("{{DIRECT_CLASS}}", "active" if detail_mode == "direct" else "")
             .replace("{{HLS_CLASS}}", "active" if detail_mode == "hls" else "")
             .replace("{{DOWNLOAD}}", f"/download/{item.id}")
-            .replace("{{ADMIN_ACTION}}", admin_action)
+            .replace("{{MORE_MENU}}", more_menu)
+            .replace("{{RECOMMENDATIONS}}", recommendations)
         )
         data = body.encode("utf-8")
         self.send_response(200)
@@ -1347,7 +1520,7 @@ DETAIL_TEMPLATE = """<!doctype html>
     :root { color-scheme: dark; --bg:#070a0f; --text:#f7fbff; --muted:#c9d2df; --soft:rgba(255,255,255,.16); --line:rgba(255,255,255,.18); --green:#2ee66b; --gold:#f5a524; }
     * { box-sizing:border-box; }
     body { margin:0; min-height:100vh; font-family:Arial, Helvetica, sans-serif; background:var(--bg); color:var(--text); }
-    .detail-page { position:relative; min-height:100vh; overflow:hidden; padding:22px clamp(22px,4vw,56px); }
+    .detail-page { position:relative; min-height:100vh; overflow-x:hidden; padding:22px clamp(22px,4vw,56px) 54px; }
     .detail-page::before { content:""; position:fixed; inset:-26px; background-image:var(--poster-bg); background-size:cover; background-position:center top; opacity:.66; filter:blur(7px) saturate(1.25); transform:scale(1.08); }
     .detail-page::after { content:""; position:fixed; inset:0; background:linear-gradient(180deg,rgba(0,0,0,.12) 0%,rgba(0,0,0,.38) 28%,rgba(18,34,13,.82) 100%), linear-gradient(90deg,rgba(0,0,0,.88) 0%,rgba(0,0,0,.50) 48%,rgba(0,0,0,.76) 100%); }
     .topbar { position:relative; z-index:2; display:flex; justify-content:space-between; align-items:center; max-width:1220px; margin:0 auto; }
@@ -1367,11 +1540,10 @@ DETAIL_TEMPLATE = """<!doctype html>
     .score-row { display:flex; flex-wrap:wrap; gap:12px; align-items:center; margin:0 0 26px; color:#fff; }
     .score { display:inline-flex; align-items:center; gap:6px; min-height:34px; padding:0 10px; border-radius:999px; background:rgba(255,255,255,.12); border:1px solid rgba(255,255,255,.08); font-weight:800; }
     .score-badge { color:#8ed4ff; font-size:11px; font-weight:900; letter-spacing:.02em; }
-    .playbar { display:grid; grid-template-columns:minmax(210px, 400px) 44px; gap:10px; align-items:center; margin:10px 0 20px; }
+    .playbar { display:grid; grid-template-columns:minmax(210px, 400px) 104px; gap:10px; align-items:center; margin:10px 0 20px; }
     .play { min-height:50px; display:flex; align-items:center; justify-content:center; border-radius:999px; background:#fff; color:#111; text-decoration:none; font-size:20px; font-weight:900; box-shadow:0 16px 40px rgba(0,0,0,.28); }
-    .quick-play { width:44px; height:44px; display:grid; place-items:center; border-radius:50%; background:rgba(122,54,70,.50); border:1px solid rgba(255,255,255,.12); color:#fff; text-decoration:none; font-size:0; position:relative; }
-    .quick-play::before { content:"\\21BB"; font-size:23px; line-height:1; transform:translateX(-2px); }
-    .quick-play::after { content:"\\25B6"; position:absolute; font-size:11px; line-height:1; transform:translate(5px,1px); }
+    .quick-play { min-width:104px; height:44px; display:flex; align-items:center; justify-content:center; gap:7px; padding:0 14px; border-radius:999px; background:rgba(122,54,70,.58); border:1px solid rgba(255,255,255,.16); color:#fff; text-decoration:none; font-size:13px; font-weight:900; }
+    .quick-play .restart-icon { font-size:21px; line-height:1; }
     .play-mode-row { display:flex; gap:8px; flex-wrap:wrap; margin:-8px 0 18px; }
     .play-mode-row a { min-height:30px; display:inline-flex; align-items:center; justify-content:center; padding:0 11px; border-radius:999px; background:rgba(255,255,255,.12); border:1px solid rgba(255,255,255,.14); color:#fff; text-decoration:none; font-size:12px; font-weight:900; }
     .play-mode-row a.active { color:#071018; background:#fff; border-color:#fff; }
@@ -1382,11 +1554,23 @@ DETAIL_TEMPLATE = """<!doctype html>
     .mobile-ready { display:none; color:#04110a; background:#26e86b; border-radius:999px; padding:8px 12px; text-decoration:none; font-size:12px; font-weight:900; }
     .mobile-ready.ready { display:inline-flex; }
     .mobile-status { color:rgba(239,245,255,.78); font-size:12px; min-height:16px; }
-    .action-row { display:grid; grid-template-columns:repeat(5, minmax(76px,100px)); gap:14px; margin:0 0 26px; }
+    .action-row { display:grid; grid-template-columns:repeat(3, minmax(76px,100px)); gap:14px; margin:0 0 26px; }
     .action { color:#dfe8f4; text-align:center; text-decoration:none; font-size:12px; line-height:1.25; }
     .action span { width:50px; height:50px; display:grid; place-items:center; margin:0 auto 7px; border-radius:50%; background:rgba(255,255,255,.12); border:1px solid rgba(255,255,255,.10); font-size:21px; }
     .download span, .mark-watched span { background:rgba(255,255,255,.10); border:3px solid rgba(255,255,255,.92); color:#fff; font-size:25px; }
     .download span { font-size:27px; }
+    .more-sheet { position:fixed; inset:0; z-index:40; display:none; align-items:end; justify-content:center; padding-top:80px; background:rgba(0,0,0,.66); backdrop-filter:blur(4px); }
+    .more-sheet.open { display:flex; }
+    .more-card { width:min(560px,100%); max-height:calc(100svh - 80px); overflow:auto; padding:18px 18px calc(24px + env(safe-area-inset-bottom)); border-radius:24px 24px 0 0; background:#101114; border:1px solid rgba(255,255,255,.13); box-shadow:0 -24px 70px rgba(0,0,0,.60); }
+    .more-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
+    .more-head h2 { margin:0; font-size:22px; }
+    .more-close { width:40px; height:40px; border:0; border-radius:999px; background:rgba(255,255,255,.10); color:#fff; font-size:28px; cursor:pointer; }
+    .more-menu { display:grid; gap:8px; }
+    .more-menu a { min-height:58px; display:grid; grid-template-columns:42px minmax(0,1fr); gap:12px; align-items:center; padding:8px 14px; border-radius:15px; background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.10); color:#fff; text-decoration:none; text-align:left; }
+    .more-menu a:hover,.more-menu a:focus { background:rgba(255,255,255,.14); }
+    .more-menu .menu-icon { width:38px; height:38px; display:grid; place-items:center; border-radius:12px; background:rgba(255,255,255,.09); font-size:20px; }
+    .more-menu strong { display:block; font-size:16px; }
+    .more-menu small { display:block; margin-top:2px; color:#adb5c2; font-size:12px; }
     .summary { max-width:760px; color:#f2f5fa; line-height:1.5; font-size:18px; margin:0 0 16px; text-shadow:0 2px 14px rgba(0,0,0,.42); }
     .cast-panel { display:none; margin-top:18px; }
     .cast-panel.open { display:block; }
@@ -1397,6 +1581,18 @@ DETAIL_TEMPLATE = """<!doctype html>
     h2 { margin:26px 0 14px; font-size:24px; color:#fff; }
     ul { display:flex; flex-wrap:wrap; gap:10px; padding:0; margin:0; list-style:none; }
     li { border:1px solid rgba(255,255,255,.16); background:rgba(255,255,255,.11); border-radius:999px; padding:9px 12px; color:#eef5ff; font-size:14px; }
+    .recommendations { position:relative; z-index:2; max-width:1220px; margin:0 auto; padding:8px 0 24px; }
+    .recommendation-row { margin:0 0 34px; }
+    .recommendation-row h2 { display:flex; align-items:center; gap:9px; margin:0 0 15px; font-size:28px; }
+    .recommendation-row h2 span { color:rgba(255,255,255,.82); font-size:34px; font-weight:400; line-height:.8; }
+    .recommendation-rail { display:flex; gap:14px; overflow-x:auto; padding:0 1px 10px; scroll-snap-type:x proximity; scrollbar-width:none; }
+    .recommendation-rail::-webkit-scrollbar { display:none; }
+    .recommendation-card { flex:0 0 152px; min-width:0; color:#fff; text-decoration:none; scroll-snap-align:start; }
+    .recommendation-poster { width:100%; aspect-ratio:2/3; overflow:hidden; display:grid; place-items:center; border-radius:9px; background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.12); color:var(--muted); font-size:12px; font-weight:800; box-shadow:0 13px 30px rgba(0,0,0,.42); }
+    .recommendation-poster img { width:100%; height:100%; object-fit:cover; display:block; }
+    .recommendation-title { margin-top:9px; overflow:hidden; color:#fff; font-size:17px; font-weight:800; line-height:1.15; white-space:nowrap; text-overflow:ellipsis; }
+    .recommendation-meta { display:flex; justify-content:space-between; gap:8px; margin-top:4px; color:rgba(231,238,248,.72); font-size:13px; }
+    .recommendation-meta span { color:rgba(142,212,255,.86); white-space:nowrap; }
     @media (min-width: 1080px) {
       .poster-wrap { transform:translateY(20px); }
     }
@@ -1413,18 +1609,19 @@ DETAIL_TEMPLATE = """<!doctype html>
       h1 { text-align:center; font-size:clamp(42px, 12vw, 70px); }
       .meta-row, .score-row { justify-content:center; }
       .playbar { grid-template-columns:1fr auto; }
-      .action-row { grid-template-columns:repeat(5, minmax(64px,1fr)); gap:10px; }
+      .action-row { grid-template-columns:repeat(3, minmax(64px,1fr)); gap:10px; }
       .action span { width:50px; height:50px; }
       .summary { font-size:17px; }
+      .recommendations { padding-top:28px; }
     }
     @media (max-width: 520px) {
       .detail-page { padding:14px 20px 28px; }
       .poster-wrap { min-height:180px; }
       .detail-poster { width:min(210px, 54vw); }
-      .playbar { grid-template-columns:1fr 42px; gap:9px; }
+      .playbar { grid-template-columns:minmax(0,1fr) 104px; gap:9px; }
       .play { min-height:46px; font-size:18px; }
-      .quick-play { width:42px; height:42px; }
-      .action-row { grid-template-columns:repeat(5, 1fr); }
+      .quick-play { min-width:104px; height:42px; }
+      .action-row { grid-template-columns:repeat(3, 1fr); }
       .action { font-size:12px; }
       .action span { width:46px; height:46px; font-size:20px; }
       .download span, .mark-watched span { width:46px; height:46px; font-size:24px; border-width:3px; }
@@ -1432,6 +1629,10 @@ DETAIL_TEMPLATE = """<!doctype html>
       .meta-row { font-size:15px; gap:8px 12px; }
       .score-row { gap:8px; }
       .score { min-height:30px; font-size:13px; }
+      .recommendation-row { margin-bottom:30px; }
+      .recommendation-row h2 { font-size:24px; }
+      .recommendation-card { flex-basis:142px; }
+      .recommendation-title { font-size:16px; }
     }
   </style>
 </head>
@@ -1449,7 +1650,7 @@ DETAIL_TEMPLATE = """<!doctype html>
         <div class="score-row"><span class="score">CineVault</span><span class="score">Ready to play</span><span class="score">Summary details</span>{{TMDB_SCORE}}</div>
         <div class="playbar">
           <a class="play" id="playLink" href="{{PLAY}}">▶ Play</a>
-          <a class="quick-play" href="{{PLAY}}" aria-label="Start from beginning">Start over</a>
+          <a class="quick-play" href="{{PLAY}}" aria-label="Restart from beginning"><span class="restart-icon" aria-hidden="true">&#8634;</span>Restart</a>
         </div>
         <div class="play-mode-row"><a class="{{DIRECT_CLASS}}" href="{{PLAY_DIRECT}}">Direct</a><a class="hls {{HLS_CLASS}}" href="{{PLAY_HLS}}">HLS</a></div>
         <div class="mobile-download-row" data-mobile-scope="movie" data-mobile-item="{{ITEM_ID}}">
@@ -1458,18 +1659,17 @@ DETAIL_TEMPLATE = """<!doctype html>
           <span class="mobile-status" data-mobile-status></span>
         </div>
         <div class="action-row">
-          <a class="action mark-watched" href="/movies"><span>✓</span>Mark Watched</a>
+          <a class="action mark-watched" href="#watched" data-mark-watched="1"><span>✓</span><b>Mark Watched</b></a>
           <a class="action download" href="{{DOWNLOAD}}"><span>↓</span>Download</a>
-          <a class="action" href="/movie/fix-match/{{ITEM_ID}}"><span>⌕</span>Fix Match</a>
-          <a class="action more-toggle" href="#cast" data-more-toggle="1"><span>⋮</span>More</a>
-          {{ADMIN_ACTION}}
+          <a class="action more-toggle" href="#more" data-more-toggle="1"><span>⋮</span>More</a>
         </div>
+        <div class="more-sheet" id="moreSheet" aria-hidden="true"><section class="more-card" role="dialog" aria-modal="true" aria-labelledby="moreTitle"><div class="more-head"><h2 id="moreTitle">More options</h2><button class="more-close" id="moreClose" type="button" aria-label="Close more options">&times;</button></div><nav class="more-menu">{{MORE_MENU}}</nav></section></div>
         <p class="summary">{{SUMMARY}}</p>
         <div class="library-title">{{LIBRARY_TITLE}}</div>
         <div class="file-grid">
           <div class="label">Video</div><div>Local file stream</div>
           <div class="label">Audio</div><div>Original audio</div>
-          <div class="label">Subtitles</div><div>Off</div>
+          <div class="label">Subtitles</div><div>{{SUBTITLE_SUMMARY}}</div>
           <div class="label">Size</div><div>{{SIZE}}</div>
         </div>
         <section class="cast-panel" id="cast">
@@ -1478,20 +1678,50 @@ DETAIL_TEMPLATE = """<!doctype html>
         </section>
       </section>
     </div>
+    {{RECOMMENDATIONS}}
   </main>
   <script>
+    const moreSheet = document.getElementById("moreSheet");
+    const closeMoreSheet = () => {
+      if (!moreSheet) return;
+      moreSheet.classList.remove("open");
+      moreSheet.setAttribute("aria-hidden", "true");
+      document.body.style.overflow = "";
+    };
     document.querySelectorAll("[data-more-toggle]").forEach(link => {
       link.addEventListener("click", event => {
         event.preventDefault();
+        if (!moreSheet) return;
+        moreSheet.classList.add("open");
+        moreSheet.setAttribute("aria-hidden", "false");
+        document.body.style.overflow = "hidden";
+        document.getElementById("moreClose")?.focus();
+      });
+    });
+    document.getElementById("moreClose")?.addEventListener("click", closeMoreSheet);
+    moreSheet?.addEventListener("click", event => { if (event.target === moreSheet) closeMoreSheet(); });
+    document.addEventListener("keydown", event => { if (event.key === "Escape") closeMoreSheet(); });
+    document.querySelectorAll("[data-cast-toggle]").forEach(link => {
+      link.addEventListener("click", event => {
+        event.preventDefault();
+        closeMoreSheet();
         const panel = document.getElementById("cast");
         if (!panel) return;
-        const isOpen = panel.classList.toggle("open");
-        link.classList.toggle("active", isOpen);
-        if (isOpen) panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        panel.classList.add("open");
+        panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
       });
     });
     const itemKey = "{{ITEM_KEY}}";
+    const mediaItem = {{ITEM_JSON}};
     const playLink = document.getElementById("playLink");
+    const watchedLink = document.querySelector("[data-mark-watched]");
+    let watchedState = false;
+    function updateWatchedAction() {
+      if (!watchedLink) return;
+      watchedLink.classList.toggle("watched", watchedState);
+      const label = watchedLink.querySelector("b");
+      if (label) label.textContent = watchedState ? "Mark Unwatched" : "Mark Watched";
+    }
     function formatRemaining(seconds) {
       const minutes = Math.max(1, Math.round(seconds / 60));
       return `Resume - ${minutes}m left`;
@@ -1502,6 +1732,8 @@ DETAIL_TEMPLATE = """<!doctype html>
         const response = await fetch(`/api/watch/state?key=${encodeURIComponent(itemKey)}`, {cache:"no-store"});
         const payload = await response.json();
         const item = payload.item || null;
+        watchedState = Boolean(item && item.watched);
+        updateWatchedAction();
         if (item && item.duration && item.position > 10 && item.position < item.duration * 0.92) {
           playLink.textContent = formatRemaining(item.duration - item.position);
         } else {
@@ -1509,6 +1741,21 @@ DETAIL_TEMPLATE = """<!doctype html>
         }
       } catch (_) {}
     }
+    watchedLink?.addEventListener("click", async event => {
+      event.preventDefault();
+      try {
+        const response = await fetch("/api/watch/watched", {
+          method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({item:mediaItem, watched:!watchedState})
+        });
+        const payload = await response.json();
+        if (payload.ok) {
+          watchedState = !watchedState;
+          updateWatchedAction();
+        }
+      } catch (_) {}
+    });
     window.addEventListener("pageshow", refreshWatchState);
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden) refreshWatchState();

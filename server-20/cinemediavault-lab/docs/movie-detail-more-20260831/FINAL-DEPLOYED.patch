@@ -1,0 +1,219 @@
+--- /home/jnicolas/cinemediavault-lab/backups/movie-detail-more-pre-20260831-111606/media_download_server.py	2026-08-30 11:32:58.696983938 -0600
++++ /home/jnicolas/cinemediavault-lab/backups/movie-detail-more-post-20260831-111654/media_download_server.py	2026-08-31 11:15:55.802342625 -0600
+@@ -992,7 +992,12 @@
+             detail_mode = ""
+         mode_query = f"?mode={detail_mode}&play=1" if detail_mode else "?play=1"
+         current_user = getattr(self, "current_user", lambda: None)()
+-        admin_action = f'<a class="action" href="/admin/media/movie/{item.id}"><span>A</span>Admin</a>' if current_user and current_user["is_admin"] else ""
++        more_menu = (
++            f"<a href='/movie/fix-match/{item.id}'><span class='menu-icon'>&#127916;</span><span><strong>Fix Match</strong><small>Correct title, year, or poster</small></span></a>"
++            f"<a href='#cast' data-cast-toggle='1'><span class='menu-icon'>&#128101;</span><span><strong>Cast &amp; Crew</strong><small>View people in this movie</small></span></a>"
++        )
++        if current_user and current_user["is_admin"]:
++            more_menu += f"<a href='/admin/media/movie/{item.id}'><span class='menu-icon'>A</span><span><strong>Admin</strong><small>File details and administrative controls</small></span></a>"
+         poster = poster_url_for(item)
+         metadata = metadata_for(item)
+         display_title = metadata.get("title") or item.title
+@@ -1013,6 +1018,16 @@
+         background_style = f" style=\"--poster-bg:url('{html.escape(poster)}')\"" if poster else ""
+         subtitle_summary = globals().get("subtitle_summary_for_path", lambda path: "None found")(item.path)
+         recommendations = movie_recommendations_html(item)
++        detail_item = {
++            "key": f"movie:{item.id}",
++            "kind": "movie",
++            "mediaId": int(item.id),
++            "title": display_title,
++            "subtitle": release_label or human_size(item.size),
++            "poster": poster,
++            "href": f"/player/movie/{item.id}",
++            "detailHref": f"/movie/{item.id}",
++        }
+         body = (
+             DETAIL_TEMPLATE
+             .replace("{{BACKGROUND_STYLE}}", background_style)
+@@ -1028,13 +1043,14 @@
+             .replace("{{SIZE}}", human_size(item.size))
+             .replace("{{SUBTITLE_SUMMARY}}", html.escape(subtitle_summary))
+             .replace("{{ITEM_KEY}}", f"movie:{item.id}")
++            .replace("{{ITEM_JSON}}", json.dumps(detail_item))
+             .replace("{{PLAY}}", f"/player/movie/{item.id}{mode_query}")
+             .replace("{{PLAY_DIRECT}}", f"/movie/{item.id}?mode=direct")
+             .replace("{{PLAY_HLS}}", f"/movie/{item.id}?mode=hls")
+             .replace("{{DIRECT_CLASS}}", "active" if detail_mode == "direct" else "")
+             .replace("{{HLS_CLASS}}", "active" if detail_mode == "hls" else "")
+             .replace("{{DOWNLOAD}}", f"/download/{item.id}")
+-            .replace("{{ADMIN_ACTION}}", admin_action)
++            .replace("{{MORE_MENU}}", more_menu)
+             .replace("{{RECOMMENDATIONS}}", recommendations)
+         )
+         data = body.encode("utf-8")
+@@ -1524,11 +1540,10 @@
+     .score-row { display:flex; flex-wrap:wrap; gap:12px; align-items:center; margin:0 0 26px; color:#fff; }
+     .score { display:inline-flex; align-items:center; gap:6px; min-height:34px; padding:0 10px; border-radius:999px; background:rgba(255,255,255,.12); border:1px solid rgba(255,255,255,.08); font-weight:800; }
+     .score-badge { color:#8ed4ff; font-size:11px; font-weight:900; letter-spacing:.02em; }
+-    .playbar { display:grid; grid-template-columns:minmax(210px, 400px) 44px; gap:10px; align-items:center; margin:10px 0 20px; }
++    .playbar { display:grid; grid-template-columns:minmax(210px, 400px) 104px; gap:10px; align-items:center; margin:10px 0 20px; }
+     .play { min-height:50px; display:flex; align-items:center; justify-content:center; border-radius:999px; background:#fff; color:#111; text-decoration:none; font-size:20px; font-weight:900; box-shadow:0 16px 40px rgba(0,0,0,.28); }
+-    .quick-play { width:44px; height:44px; display:grid; place-items:center; border-radius:50%; background:rgba(122,54,70,.50); border:1px solid rgba(255,255,255,.12); color:#fff; text-decoration:none; font-size:0; position:relative; }
+-    .quick-play::before { content:"\\21BB"; font-size:23px; line-height:1; transform:translateX(-2px); }
+-    .quick-play::after { content:"\\25B6"; position:absolute; font-size:11px; line-height:1; transform:translate(5px,1px); }
++    .quick-play { min-width:104px; height:44px; display:flex; align-items:center; justify-content:center; gap:7px; padding:0 14px; border-radius:999px; background:rgba(122,54,70,.58); border:1px solid rgba(255,255,255,.16); color:#fff; text-decoration:none; font-size:13px; font-weight:900; }
++    .quick-play .restart-icon { font-size:21px; line-height:1; }
+     .play-mode-row { display:flex; gap:8px; flex-wrap:wrap; margin:-8px 0 18px; }
+     .play-mode-row a { min-height:30px; display:inline-flex; align-items:center; justify-content:center; padding:0 11px; border-radius:999px; background:rgba(255,255,255,.12); border:1px solid rgba(255,255,255,.14); color:#fff; text-decoration:none; font-size:12px; font-weight:900; }
+     .play-mode-row a.active { color:#071018; background:#fff; border-color:#fff; }
+@@ -1539,11 +1554,23 @@
+     .mobile-ready { display:none; color:#04110a; background:#26e86b; border-radius:999px; padding:8px 12px; text-decoration:none; font-size:12px; font-weight:900; }
+     .mobile-ready.ready { display:inline-flex; }
+     .mobile-status { color:rgba(239,245,255,.78); font-size:12px; min-height:16px; }
+-    .action-row { display:grid; grid-template-columns:repeat(5, minmax(76px,100px)); gap:14px; margin:0 0 26px; }
++    .action-row { display:grid; grid-template-columns:repeat(3, minmax(76px,100px)); gap:14px; margin:0 0 26px; }
+     .action { color:#dfe8f4; text-align:center; text-decoration:none; font-size:12px; line-height:1.25; }
+     .action span { width:50px; height:50px; display:grid; place-items:center; margin:0 auto 7px; border-radius:50%; background:rgba(255,255,255,.12); border:1px solid rgba(255,255,255,.10); font-size:21px; }
+     .download span, .mark-watched span { background:rgba(255,255,255,.10); border:3px solid rgba(255,255,255,.92); color:#fff; font-size:25px; }
+     .download span { font-size:27px; }
++    .more-sheet { position:fixed; inset:0; z-index:40; display:none; align-items:end; justify-content:center; padding-top:80px; background:rgba(0,0,0,.66); backdrop-filter:blur(4px); }
++    .more-sheet.open { display:flex; }
++    .more-card { width:min(560px,100%); max-height:calc(100svh - 80px); overflow:auto; padding:18px 18px calc(24px + env(safe-area-inset-bottom)); border-radius:24px 24px 0 0; background:#101114; border:1px solid rgba(255,255,255,.13); box-shadow:0 -24px 70px rgba(0,0,0,.60); }
++    .more-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
++    .more-head h2 { margin:0; font-size:22px; }
++    .more-close { width:40px; height:40px; border:0; border-radius:999px; background:rgba(255,255,255,.10); color:#fff; font-size:28px; cursor:pointer; }
++    .more-menu { display:grid; gap:8px; }
++    .more-menu a { min-height:58px; display:grid; grid-template-columns:42px minmax(0,1fr); gap:12px; align-items:center; padding:8px 14px; border-radius:15px; background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.10); color:#fff; text-decoration:none; text-align:left; }
++    .more-menu a:hover,.more-menu a:focus { background:rgba(255,255,255,.14); }
++    .more-menu .menu-icon { width:38px; height:38px; display:grid; place-items:center; border-radius:12px; background:rgba(255,255,255,.09); font-size:20px; }
++    .more-menu strong { display:block; font-size:16px; }
++    .more-menu small { display:block; margin-top:2px; color:#adb5c2; font-size:12px; }
+     .summary { max-width:760px; color:#f2f5fa; line-height:1.5; font-size:18px; margin:0 0 16px; text-shadow:0 2px 14px rgba(0,0,0,.42); }
+     .cast-panel { display:none; margin-top:18px; }
+     .cast-panel.open { display:block; }
+@@ -1582,7 +1609,7 @@
+       h1 { text-align:center; font-size:clamp(42px, 12vw, 70px); }
+       .meta-row, .score-row { justify-content:center; }
+       .playbar { grid-template-columns:1fr auto; }
+-      .action-row { grid-template-columns:repeat(5, minmax(64px,1fr)); gap:10px; }
++      .action-row { grid-template-columns:repeat(3, minmax(64px,1fr)); gap:10px; }
+       .action span { width:50px; height:50px; }
+       .summary { font-size:17px; }
+       .recommendations { padding-top:28px; }
+@@ -1591,10 +1618,10 @@
+       .detail-page { padding:14px 20px 28px; }
+       .poster-wrap { min-height:180px; }
+       .detail-poster { width:min(210px, 54vw); }
+-      .playbar { grid-template-columns:1fr 42px; gap:9px; }
++      .playbar { grid-template-columns:minmax(0,1fr) 104px; gap:9px; }
+       .play { min-height:46px; font-size:18px; }
+-      .quick-play { width:42px; height:42px; }
+-      .action-row { grid-template-columns:repeat(5, 1fr); }
++      .quick-play { min-width:104px; height:42px; }
++      .action-row { grid-template-columns:repeat(3, 1fr); }
+       .action { font-size:12px; }
+       .action span { width:46px; height:46px; font-size:20px; }
+       .download span, .mark-watched span { width:46px; height:46px; font-size:24px; border-width:3px; }
+@@ -1623,7 +1650,7 @@
+         <div class="score-row"><span class="score">CineVault</span><span class="score">Ready to play</span><span class="score">Summary details</span>{{TMDB_SCORE}}</div>
+         <div class="playbar">
+           <a class="play" id="playLink" href="{{PLAY}}">▶ Play</a>
+-          <a class="quick-play" href="{{PLAY}}" aria-label="Start from beginning">Start over</a>
++          <a class="quick-play" href="{{PLAY}}" aria-label="Restart from beginning"><span class="restart-icon" aria-hidden="true">&#8634;</span>Restart</a>
+         </div>
+         <div class="play-mode-row"><a class="{{DIRECT_CLASS}}" href="{{PLAY_DIRECT}}">Direct</a><a class="hls {{HLS_CLASS}}" href="{{PLAY_HLS}}">HLS</a></div>
+         <div class="mobile-download-row" data-mobile-scope="movie" data-mobile-item="{{ITEM_ID}}">
+@@ -1632,12 +1659,11 @@
+           <span class="mobile-status" data-mobile-status></span>
+         </div>
+         <div class="action-row">
+-          <a class="action mark-watched" href="/movies"><span>✓</span>Mark Watched</a>
++          <a class="action mark-watched" href="#watched" data-mark-watched="1"><span>✓</span><b>Mark Watched</b></a>
+           <a class="action download" href="{{DOWNLOAD}}"><span>↓</span>Download</a>
+-          <a class="action" href="/movie/fix-match/{{ITEM_ID}}"><span>⌕</span>Fix Match</a>
+-          <a class="action more-toggle" href="#cast" data-more-toggle="1"><span>⋮</span>More</a>
+-          {{ADMIN_ACTION}}
++          <a class="action more-toggle" href="#more" data-more-toggle="1"><span>⋮</span>More</a>
+         </div>
++        <div class="more-sheet" id="moreSheet" aria-hidden="true"><section class="more-card" role="dialog" aria-modal="true" aria-labelledby="moreTitle"><div class="more-head"><h2 id="moreTitle">More options</h2><button class="more-close" id="moreClose" type="button" aria-label="Close more options">&times;</button></div><nav class="more-menu">{{MORE_MENU}}</nav></section></div>
+         <p class="summary">{{SUMMARY}}</p>
+         <div class="library-title">{{LIBRARY_TITLE}}</div>
+         <div class="file-grid">
+@@ -1655,18 +1681,47 @@
+     {{RECOMMENDATIONS}}
+   </main>
+   <script>
++    const moreSheet = document.getElementById("moreSheet");
++    const closeMoreSheet = () => {
++      if (!moreSheet) return;
++      moreSheet.classList.remove("open");
++      moreSheet.setAttribute("aria-hidden", "true");
++      document.body.style.overflow = "";
++    };
+     document.querySelectorAll("[data-more-toggle]").forEach(link => {
+       link.addEventListener("click", event => {
+         event.preventDefault();
++        if (!moreSheet) return;
++        moreSheet.classList.add("open");
++        moreSheet.setAttribute("aria-hidden", "false");
++        document.body.style.overflow = "hidden";
++        document.getElementById("moreClose")?.focus();
++      });
++    });
++    document.getElementById("moreClose")?.addEventListener("click", closeMoreSheet);
++    moreSheet?.addEventListener("click", event => { if (event.target === moreSheet) closeMoreSheet(); });
++    document.addEventListener("keydown", event => { if (event.key === "Escape") closeMoreSheet(); });
++    document.querySelectorAll("[data-cast-toggle]").forEach(link => {
++      link.addEventListener("click", event => {
++        event.preventDefault();
++        closeMoreSheet();
+         const panel = document.getElementById("cast");
+         if (!panel) return;
+-        const isOpen = panel.classList.toggle("open");
+-        link.classList.toggle("active", isOpen);
+-        if (isOpen) panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
++        panel.classList.add("open");
++        panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+       });
+     });
+     const itemKey = "{{ITEM_KEY}}";
++    const mediaItem = {{ITEM_JSON}};
+     const playLink = document.getElementById("playLink");
++    const watchedLink = document.querySelector("[data-mark-watched]");
++    let watchedState = false;
++    function updateWatchedAction() {
++      if (!watchedLink) return;
++      watchedLink.classList.toggle("watched", watchedState);
++      const label = watchedLink.querySelector("b");
++      if (label) label.textContent = watchedState ? "Mark Unwatched" : "Mark Watched";
++    }
+     function formatRemaining(seconds) {
+       const minutes = Math.max(1, Math.round(seconds / 60));
+       return `Resume - ${minutes}m left`;
+@@ -1677,6 +1732,8 @@
+         const response = await fetch(`/api/watch/state?key=${encodeURIComponent(itemKey)}`, {cache:"no-store"});
+         const payload = await response.json();
+         const item = payload.item || null;
++        watchedState = Boolean(item && item.watched);
++        updateWatchedAction();
+         if (item && item.duration && item.position > 10 && item.position < item.duration * 0.92) {
+           playLink.textContent = formatRemaining(item.duration - item.position);
+         } else {
+@@ -1684,6 +1741,21 @@
+         }
+       } catch (_) {}
+     }
++    watchedLink?.addEventListener("click", async event => {
++      event.preventDefault();
++      try {
++        const response = await fetch("/api/watch/watched", {
++          method:"POST",
++          headers:{"Content-Type":"application/json"},
++          body:JSON.stringify({item:mediaItem, watched:!watchedState})
++        });
++        const payload = await response.json();
++        if (payload.ok) {
++          watchedState = !watchedState;
++          updateWatchedAction();
++        }
++      } catch (_) {}
++    });
+     window.addEventListener("pageshow", refreshWatchState);
+     document.addEventListener("visibilitychange", () => {
+       if (!document.hidden) refreshWatchState();
