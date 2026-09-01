@@ -241,3 +241,38 @@ Recommended scope:
 - Live service restarted successfully after the web deployment and returned HTTP
   200 at `/login`. Python, API state tests, JavaScript syntax, Android Gradle build,
   APK metadata, signature, and copied checksum were verified.
+
+## Update - 2026-09-01: HDHomeRun Grid Guide and DVR
+
+- HDHomeRun EXTEND `105935AB` is at `192.168.1.213` and has two tuners.
+- CineVault Live TV at `/live-tv` is now a six-hour horizontal grid with XMLTV
+  channel logos, current-time marker, earlier/later navigation, program details,
+  Watch Live, Record, Record Series, and New Episodes Only controls.
+- DVR pages: `/dvr/schedule`, `/dvr/recordings`, `/dvr/series`,
+  `/dvr/conflicts`, and `/dvr/settings`. The prior vertical guide is retained at
+  `/live-tv/simple`.
+- DVR module: `/home/jnicolas/cinemediavault-lab/dvr_module.py`.
+- Active wrapper: `/home/jnicolas/cinemediavault-lab/cinemediavault-lab-5000.py`.
+- Active database:
+  `/home/jnicolas/cinemediavault-lab/cinevault-data/cinemediavault-lab.db`.
+- DVR tables: `dvr_settings`, `dvr_series_rules`, `dvr_recordings`,
+  `dvr_tuner_sessions`, and `dvr_events`.
+- Default recording root: `/media/jnicolas/Expansion/CineVault DVR`, on the share
+  that had approximately 9.8 TB free at implementation time.
+- Recordings are direct MPEG-TS copies through ffmpeg (`-map 0 -c copy`) with
+  default 60-second start and 120-second end padding. Automatic deletion is off.
+- The scheduler checks both its own active sessions and the HDHomeRun
+  `/status.json`; with two tuners it prevents a third recording/live conflict.
+- Completed recordings have HLS Play, original-file Download and explicit Delete.
+- Series rules support all episodes or XMLTV `<new>` episodes only, with durable
+  duplicate suppression and service-restart recovery.
+- Optional Webex notifications use `CINEVAULT_WEBEX_WEBHOOK_URL` if configured.
+- The guide parser now preserves XMLTV `new`, episode number, date, program icon,
+  and channel logo fields. Last verified feed: 7,511 programs, 940 marked new,
+  and 111 channel logos.
+- A real scheduler lifecycle test recorded 7.5 MB from channel 4.1, completed,
+  opened through the recording player, and released the tuner. All test files and
+  database/event rows were then removed.
+- Pre-change backup:
+  `/home/jnicolas/cinemediavault-lab/backups/20260901-dvr-pre`.
+- Detailed README: `C:\Data\CineVault-DVR\README-CINEVAULT-DVR.md`.

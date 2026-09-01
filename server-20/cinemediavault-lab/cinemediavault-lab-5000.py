@@ -33,6 +33,7 @@ import urllib.request
 import zipfile
 import xml.etree.ElementTree as ET
 import music_module
+import dvr_module
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -778,11 +779,16 @@ def refresh_hdhr_guide(force: bool = False) -> dict:
             raw = gzip.decompress(raw)
         root = ET.fromstring(raw)
         channel_numbers = {}
+        channel_icons = {}
         for channel in root.findall("channel"):
             names = [str(item.text or "").strip() for item in channel.findall("display-name")]
             number = next((name for name in names if re.fullmatch(r"\d+(?:\.\d+)?", name)), "")
             if number:
-                channel_numbers[str(channel.get("id") or "")] = number
+                channel_id = str(channel.get("id") or "")
+                channel_numbers[channel_id] = number
+                channel_icon = channel.find("icon")
+                if channel_icon is not None and channel_icon.get("src"):
+                    channel_icons[number] = str(channel_icon.get("src"))
         programmes = {}
         count = 0
         for item in root.findall("programme"):
@@ -798,6 +804,10 @@ def refresh_hdhr_guide(force: bool = False) -> dict:
                 "subtitle": str(item.findtext("sub-title") or "").strip(),
                 "description": str(item.findtext("desc") or "").strip(),
                 "category": str(item.findtext("category") or "").strip(),
+                "episode_num": str(item.findtext("episode-num") or "").strip(),
+                "is_new": item.find("new") is not None,
+                "date": str(item.findtext("date") or "").strip(),
+                "icon": str(item.find("icon").get("src") or "") if item.find("icon") is not None else "",
                 "start": start,
                 "stop": stop,
             }
@@ -805,7 +815,7 @@ def refresh_hdhr_guide(force: bool = False) -> dict:
             count += 1
         for values in programmes.values():
             values.sort(key=lambda entry: entry["start"])
-        payload = {"updated_at": int(time.time()), "programme_count": count, "programmes": programmes}
+        payload = {"updated_at": int(time.time()), "programme_count": count, "programmes": programmes, "channel_icons": channel_icons}
         HDHR_GUIDE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
         temporary = HDHR_GUIDE_CACHE_FILE.with_suffix(".tmp")
         temporary.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
@@ -4281,6 +4291,13 @@ class CombinedHandler(VideoListsMixin, BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?", 1)[0]
+        if path.startswith("/api/dvr/"):
+            user = self.current_user()
+            if not user:
+                return self.require_auth(path)
+            handled = dvr_module.handle_post(self, user, path)
+            if handled is not False:
+                return handled
         if path.startswith("/api/music/"):
             user = self.current_user()
             if not user:
@@ -5483,7 +5500,20 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
                 return handled
         if path == "/wall":
             return self.video_wall_page()
-        if path == "/live-tv":
+        if path.startswith("/watch/tuner/"):
+            return self.watch_tuner(path.rsplit("/", 1)[-1])
+        if path.startswith("/dvr/play/"):
+            return self.watch_dvr(user, path.rsplit("/", 1)[-1])
+        if path.startswith("/dvr/download/"):
+            media = dvr_module.recording_media(path.rsplit("/", 1)[-1], int(user["id"]))
+            if not media:
+                return self.send_error(404, "Recording not found")
+            return self.serve_file(media["path"], disposition="attachment")
+        if path == "/live-tv" or path == "/dvr" or path.startswith("/dvr/") or path.startswith("/api/dvr/"):
+            handled = dvr_module.handle_get(self, user, path)
+            if handled is not False:
+                return handled
+        if path == "/live-tv/simple":
             return self.live_tv_page()
         if path == "/actor":
             return self.actor_page()
@@ -6719,6 +6749,23 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
         self.end_headers()
         self.wfile.write(data)
 
+    def watch_tuner(self, item_id: str):
+        channel = hdhr_channel(int(item_id))
+        if not channel:
+            return self.send_error(404, "Tuner channel missing")
+        stream = ensure_live_hls(item_id, channel["stream_url"])
+        title = f"{channel['guide_number']} {channel['guide_name']}"
+        body = PLAYER_PAGE.replace("{{TITLE}}", html.escape(title)).replace("{{BACK}}", "/live-tv").replace("{{PLAYLIST}}", stream["playlist_url"])
+        return self.render_html(body)
+
+    def watch_dvr(self, user, item_id: str):
+        media = dvr_module.recording_media(item_id, int(user["id"]))
+        if not media:
+            return self.send_error(404, "Recording not found")
+        stream = ensure_hls_stream("dvr", str(media["id"]), media["path"])
+        body = PLAYER_PAGE.replace("{{TITLE}}", html.escape(media["title"])).replace("{{BACK}}", "/dvr/recordings").replace("{{PLAYLIST}}", stream["playlist_url"])
+        return self.render_html(body)
+
     def direct_player(self, kind: str, item_id: str):
         user = self.current_user()
         parsed = urllib.parse.urlparse(self.path)
@@ -6820,7 +6867,7 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
                 shutil.copyfileobj(handle, self.wfile)
 
     def serve_hls(self, request_path: str):
-        match = re.match(r"^/hls/(movie|tv|tuner)/([^/]+)/([^/]+)$", request_path)
+        match = re.match(r"^/hls/(movie|tv|tuner|dvr)/([^/]+)/([^/]+)$", request_path)
         if not match:
             self.send_error(404, "Invalid HLS path")
             return
@@ -6834,6 +6881,14 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
                 return self.send_error(404, "Tuner channel missing")
             item = {"path": channel["stream_url"], "duration": 0}
             stream = ensure_live_hls(item_id, channel["stream_url"])
+        elif kind == "dvr":
+            user = self.current_user()
+            if not user:
+                return self.send_error(401, "Sign in required")
+            item = dvr_module.recording_media(item_id, int(user["id"]))
+            if not item:
+                return self.send_error(404, "Recording missing")
+            stream = ensure_hls_stream(kind, item_id, item["path"])
         else:
             item = media_for_kind(kind, item_id)
             stream = ensure_hls_stream(kind, item_id, item["path"])
@@ -7491,6 +7546,7 @@ def main():
     tv_app.tv_index.refresh_background()
     start_hls_cleanup_thread()
     start_hdhr_guide_thread()
+    dvr_module.initialize()
     start_upstream_media_sync_thread()
 
     print(f"Loaded {len(movie_app.movie_index.items)} movies", flush=True)
