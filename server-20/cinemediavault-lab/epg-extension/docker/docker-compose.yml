@@ -1,0 +1,53 @@
+# CineVault extended EPG collector (iptv-org/epg).
+#
+# Grabs a 14-day XMLTV guide for the 86 verified Denver OTA channels received by
+# HDHomeRun EXTEND 105935AB and serves it read-only on the LAN for CineVault on
+# 192.168.1.20 to merge behind the authoritative HDHomeRun guide.
+#
+# Isolated compose project: it shares nothing with /home/jnicolas/docker-compose.yml.
+
+services:
+  cinevault-epg:
+    build:
+      context: ./build
+      dockerfile: Dockerfile
+    image: cinevault-epg:local
+    container_name: cinevault-epg
+    restart: unless-stopped
+    # LAN-only. Bound to the host's private address, never 0.0.0.0, so the guide
+    # is not reachable from outside the home network.
+    ports:
+      - "192.168.1.134:3010:3000"
+    environment:
+      TZ: America/Denver
+      # The grabber holds every parsed programme in memory until the final write.
+      # 86 channels x 14 days needs more than Node's default heap, which it sizes
+      # from the container limit at startup; without this it dies at ~60% with
+      # "JavaScript heap out of memory".
+      NODE_OPTIONS: "--max-old-space-size=2048"
+      # tvpassport.com genuinely publishes D+0..D+13 for these stations. Requesting
+      # more silently returns today's listings again, so 14 is a hard ceiling.
+      DAYS: "14"
+      # Conservative: one request at a time, 2.5s apart (~50 min for 1204 requests).
+      MAX_CONNECTIONS: "1"
+      DELAY: "2500"
+      TIMEOUT: "45000"
+      # Daily, offset away from the 01:00 CineVault database backup on .20.
+      CRON_SCHEDULE: "20 3 * * *"
+      RUN_AT_STARTUP: "true"
+    volumes:
+      - ./public:/epg/public
+    healthcheck:
+      # Healthy once a non-trivial guide is being served over HTTP.
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:3000/guide.xml | head -c 200 | grep -q '<tv' || exit 1"]
+      interval: 5m
+      timeout: 30s
+      retries: 3
+      start_period: 90m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    mem_limit: 3g
+    cpus: 1.5

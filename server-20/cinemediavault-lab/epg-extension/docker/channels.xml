@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- CineVault Denver OTA lineup for HDHomeRun EXTEND 105935AB (192.168.1.213).
+     Generated 2026-09-01 from iptv-org/epg sites/tvpassport.com.
+     Every entry was verified against the live HDHomeRun guide at a zero-hour
+     offset before inclusion; do not hand-edit. -->
+<channels>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-2.1" site_id="cw-kwgn-denver-co-hd/14403">CW (KWGN) Denver, CO HD</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-2.2" site_id="gettv-kwgn-tv2-denver-co/9552">Great (KWGN-TV2) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-2.3" site_id="comet-tv-kwgn-tv3-denver-co/18330">Comet TV (KWGN-TV3) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-2.4" site_id="charge-kwgn-tv4-denver-co/32416">CHARGE! (KWGN-TV4) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-3.1" site_id="local-3-kcdo-sterling-co-hd/13509">Local 3 (KCDO) Sterling, CO HD</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-3.2" site_id="grit-tv-kcdo-tv2-denver-co/17515">Grit TV (KCDO-TV2) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-3.3" site_id="qvc-kcdo-dt3-denver-co/17517">QVC (KCDO-DT3) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-3.4" site_id="shop-lc-kcdo-tv4-denver-co/36934">Shop LC (KCDO-TV4) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-4.1" site_id="cbs-kcnc-denver-co-hd/6674">CBS (KCNC) Denver, CO HD</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-4.2" site_id="start-tv-kcnc-tv2-denver-co/15826">Start TV (KCNC-TV2) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-4.3" site_id="dabl-kcnc-tv3-denver-co/34210">DABL (KCNC-TV3) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-4.4" site_id="metv-kcnc-tv4-denver-co/35861">MeTV (KCNC-TV4) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-4.5" site_id="catchy-comedy-kcnc-tv5-denver-co/37558">Catchy Comedy (KCNC-TV5) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-4.6" site_id="story-kcnc-tv6-denver-co/37559">Story (KCNC-TV6) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-5.1" site_id="cbs-kgwn-cheyenne-wy-hd/7546">CBS (KGWN) Cheyenne, WY HD</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-5.2" site_id="nbc-kgwn-dt2-cheyenne-wy/13511">NBC (KGWN-DT2) Cheyenne, WY</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-5.3" site_id="cw-kgwn-tv3-cheyenne-wy/9202">CW+ (KGWN-TV3) Cheyenne, WY</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-6.1" site_id="pbs-krma-denver-co-hd/6881">PBS (KRMA) Denver, CO HD</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-6.2" site_id="pbs-kids-krma-tv2-denver-co/9547">PBS Kids (KRMA-TV2) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-6.3" site_id="create-krma-tv3-denver-co/9548">Create (KRMA-TV3) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-6.4" site_id="pbs-world-krma-tv4-denver-co/36315">PBS World (KRMA-TV4) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-7.1" site_id="abc-kmgh-denver-co-hd/5723">ABC (KMGH) Denver, CO HD</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-7.2" site_id="ion-mystery-kmgh-tv2-denver-co/11535">ION Mystery (KMGH-TV2) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-7.3" site_id="laff-kmgh-tv3-denc-denver-co/11634">Laff (KMGH-TV3) DENC Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-7.4" site_id="laff-kmgh-tv4-denver-co/15145">Laff (KMGH-TV4) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-9.1" site_id="nbc-kusa-denver-co-hd/8024">NBC (KUSA) Denver, CO HD</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-9.2" site_id="cozi-tv-kusa2-denver-co/14395">Cozi TV (KUSA2) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-9.3" site_id="true-crime-network-kusa-dt3-denver-co/14482">True Crime Network (KUSA-DT3) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-9.5" site_id="quest-kusa5-denver-co/32391">Quest (KUSA5) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-9.6" site_id="circle-kusa6-denver-co/34894">The Nest (KUSA6) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-9.7" site_id="twist-kusa7-denver-co/36787">Twist (KUSA7) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-12.1" site_id="pbs12-kbdi-denver-co-hd/32403">PBS12 (KBDI) Denver, CO HD</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-12.2" site_id="fnx-kbdi-tv2-denver-co/12641">FNX (KBDI-TV2) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-12.3" site_id="dw-english-kbdi-dt3-denver-co/12642">DW English (KBDI-DT3) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-12.4" site_id="nhk-world-kbdi-tv4-denver-co/32372">NHK World (KBDI-TV4) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-14.1" site_id="uni-kcec-denver-co-hd/14402">UNI (KCEC) Denver, CO HD</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-14.3" site_id="gettv-kcec3-denver-co/14700">Great (KCEC3) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-14.4" site_id="ion-mystery-kcec4-denver-co/18426">ION Mystery (KCEC4) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-20.1" site_id="mnt-ktvd-denver-co-hd/6279">MNT (KTVD) Denver, CO HD</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-20.2" site_id="hi-ktvd2-denver-co/11792">H&amp;I (KTVD2) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-22.1" site_id="fox-kfct-fort-collins-co-hd/7556">FOX (KFCT) Fort Collins, CO HD</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-22.2" site_id="antenna-kfct2-denver-co/14701">Antenna (KFCT2) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-22.3" site_id="tbd-tv-kfct3-denver-co/33942">TBD TV (KFCT3) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-25.1" site_id="telemundo-kden-longmont-co/5862">Telemundo (KDEN) Longmont, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-25.2" site_id="telexitos-kden-tv2-denver-co/14397">TeleXitos (KDEN-TV2) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-25.3" site_id="cozi-tv-kden-tv3-longmont-co/17966">Cozi TV (KDEN-TV3) Longmont, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-25.4" site_id="lx-network-kden-tv4-denver-co/35036">LX Network (KDEN-TV4) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-25.5" site_id="oxygen-kden-tv5-denver-co/37134">Oxygen (KDEN-TV5) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-27.1" site_id="fox-klwy-cheyenne-wy-hd/7547">FOX (KLWY) Cheyenne, WY HD</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-27.2" site_id="abc-klwy2-cheyenne-wy/13171">ABC (KLWY2) Cheyenne, WY</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-27.3" site_id="mnt-klwy3-cheyenne-wy/18654">MNT (KLWY3) Cheyenne, WY</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-27.4" site_id="ion-klwy4-cheyenne-wy/36527">ION (KLWY4) Cheyenne, WY</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-27.5" site_id="cozi-tv-klwy5-cheyenne-wy/36528">Cozi TV (KLWY5) Cheyenne, WY</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-27.6" site_id="truereal-klwy6-cheyenne-wy/36529">TrueReal (KLWY6) Cheyenne, WY</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-27.7" site_id="defy-klwy7-cheyenne-wy/36530">Defy (KLWY7) Cheyenne, WY</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-31.1" site_id="fox-kdvr-denver-co-hd/6401">FOX (KDVR) Denver, CO HD</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-31.2" site_id="antenna-kdvr2-denver-colo/9016">Antenna (KDVR2) Denver, Colo</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-31.3" site_id="tbd-tv-kdvr3-denver-co/32826">Roar (KDVR3) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-33.1" site_id="ctn-kqck-denver-co/13174">CTN (KQCK) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-33.2" site_id="ctn-lifestyle-kqck2-cheyenne-wy/18503">CTN LifeStyle (KQCK2) Cheyenne, WY</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-33.3" site_id="ctni-kqck3-cheyenne-wy/18504">CTNi (KQCK3) Cheyenne, WY</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-38.1" site_id="tbn-kpjr-denver-co/13181">TBN (KPJR) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-38.2" site_id="merit-street-kpjr-tv2-greeley-co/13184">Merit Street (KPJR-TV2) Greeley, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-38.3" site_id="tbn-inspire-kpjr-tv3-greeley-co/13182">TBN Inspire (KPJR-TV3) Greeley, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-38.4" site_id="smile-kpjr-dt4-greeley-co/13183">ONTV4U (KPJR-DT4) Greeley, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-38.5" site_id="positiv-kpjr-tv5-greeley-co/13185">PosiTiV (KPJR-TV5) Greeley, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-39.1" site_id="ctn-kqdk-cd-denver-co/14638">CTN (KQDK-CD) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-39.2" site_id="ctn-lifestyle-kqdk-cd2-denver-co/18502">CTN LifeStyle (KQDK-CD2) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-39.3" site_id="ctni-kqdk-cd3-aurora-co/18505">CTNi (KQDK-CD3) Aurora, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-41.1" site_id="daystar-krmt-denver-co/5904">Daystar (KRMT) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-44.1" site_id="daystar-kdnf-ld-fort-collins-co/28091">Daystar (KDNF-LD) Fort Collins, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-50.1" site_id="unimas-ktfd-denver-co-hd/19113">UniMás (KTFD) Denver, CO HD</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-50.2" site_id="latv-ktfd-dt2-denver-co/14699">LATV (KTFD-DT2) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-50.3" site_id="the-nest-ktfd-dt3-denver-co/33536">The Nest (KTFD-DT3) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-52.1" site_id="daystar-kpxh-ld-fort-collins-co/25269">Daystar (KPXH-LD) Fort Collins, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-53.1" site_id="estrella-ketd-centennial-co-hd/6934">Estrella (KETD) Centennial, CO HD</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-53.2" site_id="estrella-tv-news-ketd2-centennial-co/7982">Estrella TV News (KETD2) Centennial, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-53.3" site_id="jewelry-tv-ketd3-denver-co/37560">Jewelry TV (KETD3) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-53.4" site_id="hsn-2-ketd4-centennial-co/36531">HSN 2 (KETD4) Centennial, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-53.5" site_id="buzzr-ketd5-denver-co/37562">Buzzr (KETD5) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-59.1" site_id="ion-kpxc-denver-co-hd/14400">ION (KPXC) Denver, CO HD</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-59.2" site_id="bounce-kpxc-tv2-denver-co/12009">Bounce (KPXC-TV2) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-59.3" site_id="court-tv-kpxc-tv3-denver-co/12068">Court TV (KPXC-TV3) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-59.4" site_id="defy-kpxc-tv4-denver-co/12183">Defy (KPXC-TV4) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-59.5" site_id="truereal-kpxc-tv5-denver-co/12310">Busted (KPXC-TV5) Denver, CO</channel>
+  <channel site="tvpassport.com" lang="en" xmltv_id="hdhr-59.6" site_id="grit-tv-kpxc-tv6-denver-co/12250">Defy (KPXC-TV6) Denver, CO</channel>
+</channels>
