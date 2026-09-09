@@ -106,6 +106,15 @@ TV_CHANNELS = [
     ("t8", "T8", "Family & Kids", "Family"),
     ("t9", "T9", "Documentary", "Documentary"),
     ("t10", "T10", "Western", "Western"),
+    # Five additional channels, added 2026-09-09. Each uses a sentinel
+    # genre_key (never a real TMDb genre string) dispatched by
+    # tv_special_eligible() above instead of plain genre-set membership -
+    # exactly the same pattern M8 Film Noir / M10 International already use.
+    ("t11", "T11", "Knowledge", "Knowledge"),
+    ("t12", "T12", "The Simpsons", "TheSimpsons"),
+    ("t13", "T13", "The Zone", "TheZone"),
+    ("t14", "T14", "Nostalgia", "Nostalgia"),
+    ("t15", "T15", "Sitcom", "Sitcom"),
 ]
 
 
@@ -303,6 +312,125 @@ def international_eligible(path):
     return bool(language) and language not in ENGLISH_LANGUAGE_TAGS
 
 
+# ---------------------------------------------------------------------------
+# Five additional TV channels (T11-T15), added 2026-09-09. Same documented-
+# heuristic pattern as FilmNoir/International above: a sentinel genre_key
+# ("Knowledge"/"TheSimpsons"/"TheZone"/"Nostalgia"/"Sitcom" - none are real
+# TMDb genre strings) triggers one of the eligibility functions below instead
+# of a plain genre-set membership check. Every rule is either a real stored
+# TMDb genre, a real stored release year, or an explicit named show a human
+# asked for by title - never a guessed/invented tag.
+# ---------------------------------------------------------------------------
+
+def _normalize_show_title(title):
+    """Casefold, drop a leading 'The ', collapse punctuation/whitespace - so
+    'The Simpsons' / 'Simpsons' / 'the simpsons!' all normalize identically,
+    while still requiring a full-title match (never a bare substring, which
+    would wrongly pull in e.g. 'Super Friends' when matching 'Friends')."""
+    t = (title or "").strip().casefold()
+    t = re.sub(r"^the\s+", "", t)
+    t = re.sub(r"[^a-z0-9]+", " ", t).strip()
+    return t
+
+
+def _title_matches_any(title, names):
+    norm = _normalize_show_title(title)
+    return any(_normalize_show_title(name) == norm for name in names)
+
+
+def _show_year(metadata):
+    try:
+        return int(str(metadata.get("year") or "").strip()[:4])
+    except (TypeError, ValueError):
+        return 0
+
+
+# Curated by exact (normalized) title. Checked live against the library's own
+# tv-metadata-map.json on 2026-09-09 - titles marked "not in library" are kept
+# anyway (harmless no-ops today) so the channel picks them up automatically if
+# they're ever added, without needing another code change.
+KNOWLEDGE_PRIORITY_TITLES = {"How It's Made", "Modern Marvels"}
+SIMPSONS_TITLES = {"The Simpsons"}
+ZONE_PRIORITY_TITLES = {
+    "The Twilight Zone", "The Outer Limits",  # not in library on 2026-09-09
+    "Amazing Stories", "Black Mirror", "Tales from the Crypt", "Tales from the Darkside",
+    "Creepshow", "Are You Afraid of the Dark", "Goosebumps", "Unsolved Mysteries", "The X-Files",
+}
+NOSTALGIA_PRIORITY_TITLES = {
+    "The Donna Reed Show", "I Love Lucy", "Wonder Woman", "The Incredible Hulk",
+    "The Greatest American Hero", "Knight Rider", "The A-Team",
+}
+SITCOM_PRIORITY_TITLES = {
+    "Seinfeld", "Friends", "The Office", "The Donna Reed Show", "I Love Lucy", "Malcolm in the Middle",
+}
+# Named-priority shows are guaranteed a top-of-lineup weekly ranking (see
+# generate_tv_day()'s prime-time top-third-by-rating selection) regardless of
+# their real TMDb score, which may be low, missing, or simply beaten out by
+# higher-rated genre-fallback titles otherwise.
+PRIORITY_RATING_FLOOR = 9.0
+PRIORITY_TITLES_BY_GENRE_KEY = {
+    "Knowledge": KNOWLEDGE_PRIORITY_TITLES,
+    "TheZone": ZONE_PRIORITY_TITLES,
+    "Nostalgia": NOSTALGIA_PRIORITY_TITLES,
+    "Sitcom": SITCOM_PRIORITY_TITLES,
+}
+SPECIAL_TV_GENRE_KEYS = {"Knowledge", "TheSimpsons", "TheZone", "Nostalgia", "Sitcom"}
+
+
+def knowledge_eligible(canon, title):
+    if _title_matches_any(title, KNOWLEDGE_PRIORITY_TITLES):
+        return True
+    return "Documentary" in canon
+
+
+def simpsons_eligible(title):
+    return _title_matches_any(title, SIMPSONS_TITLES)
+
+
+def zone_eligible(canon, title):
+    # Twilight Zone/Outer Limits aren't locally held (confirmed live, 2026-09-09).
+    # The fallback rule - Science Fiction *and* Mystery both actually tagged -
+    # is a real, already-stored TMDb-genre combination that lands on the same
+    # eerie speculative-anthology neighborhood (The X-Files, Fringe, Black
+    # Mirror, Creepshow: 42 shows on the live library) without pulling in
+    # every Science Fiction or every Mystery show wholesale.
+    if _title_matches_any(title, ZONE_PRIORITY_TITLES):
+        return True
+    return bool({"Science Fiction", "Mystery"} <= canon)
+
+
+def nostalgia_eligible(canon, title, metadata):
+    if _title_matches_any(title, NOSTALGIA_PRIORITY_TITLES):
+        return True
+    year = _show_year(metadata)
+    return bool(year) and 1960 <= year <= 1999
+
+
+def sitcom_eligible(canon, title):
+    if _title_matches_any(title, SITCOM_PRIORITY_TITLES):
+        return True
+    # Comedy minus Animation: keeps this a live-action sitcom lineup instead
+    # of a duplicate of the Comedy movie channel's cartoon-inclusive pool.
+    return "Comedy" in canon and "Animation" not in canon
+
+
+def tv_special_eligible(genre_key, canon, title, metadata):
+    """Single dispatch point for all five new sentinel genre_keys, shared by
+    eligible_tv_pool() (single-channel helper) and _build_all_pools() (the
+    real per-tick batch build) so the two can never drift apart."""
+    if genre_key == "Knowledge":
+        return knowledge_eligible(canon, title)
+    if genre_key == "TheSimpsons":
+        return simpsons_eligible(title)
+    if genre_key == "TheZone":
+        return zone_eligible(canon, title)
+    if genre_key == "Nostalgia":
+        return nostalgia_eligible(canon, title, metadata)
+    if genre_key == "Sitcom":
+        return sitcom_eligible(canon, title)
+    return False
+
+
 def eligible_movie_pool(genre_key, movie_app):
     pool = []
     for item in movie_app.movie_index.items:
@@ -353,10 +481,16 @@ def eligible_tv_pool(genre_key, tv_app):
     for show in tv_app.tv_index.shows:
         metadata = tv_app.metadata_for(show)
         raw_genres = metadata.get("genres") or []
-        if not raw_genres:
-            continue
         canon = _canon_genre_set(raw_genres)
-        if genre_key not in canon:
+        title = show.title
+        if genre_key in SPECIAL_TV_GENRE_KEYS:
+            eligible = tv_special_eligible(genre_key, canon, title, metadata)
+        else:
+            # Titles with missing genres are excluded, never guessed - unless
+            # a special channel above already matched by explicit name, which
+            # is a stronger, human-curated signal than a genre guess.
+            eligible = bool(raw_genres) and genre_key in canon
+        if not eligible:
             continue
         order = show_episode_order(tv_app, show)
         if not order:
@@ -365,6 +499,9 @@ def eligible_tv_pool(genre_key, tv_app):
             rating = float(metadata.get("vote_average") or 0)
         except (TypeError, ValueError):
             rating = 0.0
+        priority_titles = PRIORITY_TITLES_BY_GENRE_KEY.get(genre_key)
+        if priority_titles and _title_matches_any(title, priority_titles):
+            rating = max(rating, PRIORITY_RATING_FLOOR)
         pool.append({"show_key": show.title, "show": show, "rating": rating, "order": order})
     return pool
 
@@ -664,28 +801,34 @@ def _build_all_pools(movie_app, tv_app, movie_defs, tv_defs):
                 entry = {"stable_key": movie_app.stable_asset_key(item), "title": metadata.get("title") or item.title, "path": item.path, "rating": rating}
             movie_pools[ch["id"]].append(entry)
 
-    tv_genre_keys = {ch["genre_key"] for ch in tv_defs}
     tv_pools = {ch["id"]: {} for ch in tv_defs}
     for show in tv_app.tv_index.shows:
         metadata = tv_app.metadata_for(show)
         raw_genres = metadata.get("genres") or []
-        if not raw_genres:
-            continue
         canon = _canon_genre_set(raw_genres)
-        matches = canon & tv_genre_keys
-        if not matches:
-            continue
-        order = show_episode_order(tv_app, show)
-        if not order:
-            continue
+        title = show.title
         try:
             rating = float(metadata.get("vote_average") or 0)
         except (TypeError, ValueError):
             rating = 0.0
-        entry = {"order": order, "rating": rating, "meta": metadata, "tv_app": tv_app, "show_key": show.title}
+        order = None  # computed at most once per show, only if something matches
         for ch in tv_defs:
-            if ch["genre_key"] in matches:
-                tv_pools[ch["id"]][show.title] = entry
+            genre_key = ch["genre_key"]
+            if genre_key in SPECIAL_TV_GENRE_KEYS:
+                eligible = tv_special_eligible(genre_key, canon, title, metadata)
+            else:
+                eligible = bool(raw_genres) and genre_key in canon
+            if not eligible:
+                continue
+            if order is None:
+                order = show_episode_order(tv_app, show)
+                if not order:
+                    break  # no locally-resolvable episodes at all - can't air on any channel
+            entry_rating = rating
+            priority_titles = PRIORITY_TITLES_BY_GENRE_KEY.get(genre_key)
+            if priority_titles and _title_matches_any(title, priority_titles):
+                entry_rating = max(entry_rating, PRIORITY_RATING_FLOOR)
+            tv_pools[ch["id"]][title] = {"order": order, "rating": entry_rating, "meta": metadata, "tv_app": tv_app, "show_key": title}
     return movie_pools, tv_pools
 
 
@@ -733,18 +876,31 @@ def rebuild_schedules(movie_app, tv_app, randomize=True):
         return {"backup": str(backup), "seed": seed, "state": build_state(), **schedule_stats()}
 
 
-def rebuild_tv_schedules(movie_app, tv_app):
-    """Recreate only TV rows, preserving the movie lineup and schedule seed."""
+def rebuild_tv_schedules(movie_app, tv_app, randomize=False):
+    """Recreate only TV rows, preserving the movie lineup (and, by default,
+    the schedule seed - the admin "repair_tv" button uses this default path
+    to fix durations without reshuffling anything). randomize=True additionally
+    rolls a fresh schedule_seed before regenerating, for a genuine TV-wide
+    re-randomize (e.g. after adding new channels). This never touches any
+    already-persisted movie row: both generate_movie_day()/generate_tv_day()
+    only ever extend forward from each channel's own MAX(stop_ts), so a
+    changed seed can only influence *not-yet-generated* future days, and only
+    TV rows are deleted here in the first place - movie rows for
+    already-covered days are untouched byte-for-byte."""
     with LOCK:
         backup = backup_schedule_database("pre-tv-duration-repair")
         init_schema()
+        new_seed = random.SystemRandom().randrange(1, 2_147_483_647) if randomize else schedule_seed()
         c = connect()
         try:
             c.execute("BEGIN IMMEDIATE")
             c.execute("DELETE FROM vchannel_schedule WHERE channel_id IN (SELECT id FROM vchannel_defs WHERE kind='tv')")
             c.execute("DELETE FROM vchannel_show_progress WHERE channel_id IN (SELECT id FROM vchannel_defs WHERE kind='tv')")
             c.execute("DELETE FROM vchannel_show_slot WHERE channel_id IN (SELECT id FROM vchannel_defs WHERE kind='tv')")
-            c.execute("UPDATE vchannel_build_state SET last_build_status='repairing_tv_durations',last_error=NULL,horizon_until_date=NULL,updated_at=? WHERE id=1", (now_text(),))
+            c.execute(
+                "UPDATE vchannel_build_state SET schedule_seed=?,last_build_status='repairing_tv_durations',last_error=NULL,horizon_until_date=NULL,updated_at=? WHERE id=1",
+                (new_seed, now_text()),
+            )
             c.commit()
         except Exception:
             c.rollback()
@@ -752,7 +908,7 @@ def rebuild_tv_schedules(movie_app, tv_app):
         finally:
             c.close()
         generate_horizon(movie_app, tv_app)
-        return {"backup": str(backup), "state": build_state(), **schedule_stats()}
+        return {"backup": str(backup), "seed": new_seed, "state": build_state(), **schedule_stats()}
 
 
 def schedule_stats():
@@ -764,6 +920,7 @@ def schedule_stats():
             result[kind] = {
                 "rows": c.execute("SELECT COUNT(*) FROM vchannel_schedule s JOIN vchannel_defs d ON d.id=s.channel_id WHERE d.kind=?", (kind,)).fetchone()[0],
                 "on_air": c.execute("SELECT COUNT(*) FROM vchannel_schedule s JOIN vchannel_defs d ON d.id=s.channel_id WHERE d.kind=? AND s.start_ts<=? AND s.stop_ts>?", (kind, now, now)).fetchone()[0],
+                "total": len(MOVIE_CHANNELS) if kind == "movie" else len(TV_CHANNELS),
             }
         return result
     finally:
@@ -946,7 +1103,16 @@ def guide_payload(kind, query, movie_app, tv_app):
                 out.append(holding_payload(dict(nxt), cursor, end))
             else:
                 out.append(holding_payload(None, cursor, end))
-        out_channels.append({"id": ch["id"], "number": ch["channel_number"], "name": ch["name"], "slug": ch["slug"], "programmes": out})
+        # "art": a small channel-identity image, reused from whatever
+        # already-resolved programme poster is first available in this
+        # window - no extra catalog lookups. For single-show channels (The
+        # Simpsons) every row is the same series, so this is effectively a
+        # locally-derived channel logo with zero new code/fetching; for
+        # mixed-genre channels it is just today's featured artwork. Never a
+        # scraped/external image - always the same local TMDb poster art the
+        # rest of the site already serves.
+        art = next((p.get("poster") for p in out if not p.get("holding") and p.get("poster")), "")
+        out_channels.append({"id": ch["id"], "number": ch["channel_number"], "name": ch["name"], "slug": ch["slug"], "art": art, "programmes": out})
     return {"ok": True, "kind": kind, "start": start, "end": end, "now": now, "channels": out_channels}
 
 
@@ -1041,6 +1207,7 @@ main{padding:16px;max-width:1700px;margin:0 auto}
 .time-row{position:sticky;top:0;z-index:5;background:var(--panel-strong);border-bottom:1px solid var(--line-strong)}
 .channel-name{position:sticky;left:0;z-index:7;background:#0a142a;border-right:1px solid var(--line-strong);border-bottom:1px solid var(--line);padding:6px 10px;display:flex;align-items:center;gap:9px;box-shadow:8px 0 14px rgba(2,7,18,.72)}
 .chan-badge{flex:0 0 auto;min-width:34px;text-align:center;padding:4px 7px;border-radius:7px;font-weight:900;font-size:12px;color:#04101f;background:linear-gradient(180deg,var(--accent2),var(--accent));box-shadow:0 0 10px -2px var(--accent)}
+.chan-badge.simpsons{background:linear-gradient(180deg,#ffd23f,#f5b400);box-shadow:0 0 10px -2px #f5b400}
 .chan-meta{display:flex;flex-direction:column;overflow:hidden}
 .chan-meta b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:13px}
 .chan-preview{flex:0 0 auto;position:relative;width:58px;height:33px;border-radius:6px;overflow:hidden;background:#010509;border:1px solid var(--line)}
@@ -1167,7 +1334,7 @@ async function loadGuide(){
       return `<button type="button" class="program ${p.is_now?'now':''}${sel}" style="left:${left}%;width:${w}%" data-channel="${ch.id}" data-key="${key}" data-json='${JSON.stringify(p).replace(/'/g,'&#39;')}'><b>${esc(p.title)}</b><span class="muted">${esc(p.subtitle||'')}${p.rating?' &#9733;'+Number(p.rating).toFixed(1):''}</span></button>`;
     }).join('');
     const now=(Date.now()/1000-d.start)/span*100;
-    return `<div class="channel-row"><div class="channel-name"><span class="chan-badge">${esc(ch.number)}</span><div class="chan-preview" data-channel="${ch.id}"><div class="preview-slot" aria-hidden="true"></div></div><div class="chan-meta"><b>${esc(ch.name)}</b></div></div><div class="timeline">${now>=0&&now<=100?`<i class="now-line" style="left:${now}%"></i>`:''}${ps}</div></div>`;
+    return `<div class="channel-row"><div class="channel-name"><span class="chan-badge${ch.slug==='t12'?' simpsons':''}">${esc(ch.number)}</span><div class="chan-preview" data-channel="${ch.id}"><div class="preview-slot" aria-hidden="true"></div></div><div class="chan-meta"><b>${esc(ch.name)}</b></div></div><div class="timeline">${now>=0&&now<=100?`<i class="now-line" style="left:${now}%"></i>`:''}${ps}</div></div>`;
   }).join('');
   previews.detachAll(false);
   grid.innerHTML=times+rows;
@@ -1636,12 +1803,13 @@ def admin_page(handler, message=""):
     body = f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Virtual Channel Administration</title><style>
 :root{{color-scheme:dark;--gold:#f5b73f}}*{{box-sizing:border-box}}body{{margin:0;background:#08090c;color:#fff;font:16px system-ui,sans-serif}}header,main{{padding:20px;max-width:1050px;margin:auto}}header{{display:flex;justify-content:space-between;border-bottom:1px solid #30343d}}a{{color:#fff}}.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}}.card{{background:#121720;border:1px solid #303a49;border-radius:16px;padding:18px}}button{{min-height:46px;padding:0 18px;border:0;border-radius:999px;background:var(--gold);color:#111;font-weight:900;cursor:pointer}}button.danger{{background:#732b37;color:#fff}}form{{margin-top:14px}}.note{{padding:12px;background:#15351f;border-radius:10px;margin-bottom:16px}}.muted{{color:#abb4c3}}code{{overflow-wrap:anywhere}}
 </style></head><body><header><strong>Virtual Channel Administration</strong><nav><a href="/admin/modules">Modules</a> &middot; <a href="/vchannels">Guide</a> &middot; <a href="/">Home</a></nav></header><main>{note}<h1>24×7 Virtual Schedules</h1><p class="muted">The rolling {HORIZON_DAYS}-day horizon is extended automatically, providing continuous service year-round.</p><div class="cards">
-<section class="card"><h2>Movie Channels</h2><p>{stats['movie']['rows']:,} scheduled programs</p><p>{stats['movie']['on_air']} of 10 channels currently on air</p></section>
-<section class="card"><h2>TV Channels</h2><p>{stats['tv']['rows']:,} scheduled episodes</p><p>{stats['tv']['on_air']} of 10 channels currently on air</p></section>
+<section class="card"><h2>Movie Channels</h2><p>{stats['movie']['rows']:,} scheduled programs</p><p>{stats['movie']['on_air']} of {stats['movie']['total']} channels currently on air</p></section>
+<section class="card"><h2>TV Channels</h2><p>{stats['tv']['rows']:,} scheduled episodes</p><p>{stats['tv']['on_air']} of {stats['tv']['total']} channels currently on air</p></section>
 <section class="card"><h2>Build Status</h2><p>{html.escape(str(state.get('last_build_status') or 'unknown'))}</p><p class="muted">Through {html.escape(str(state.get('horizon_until_date') or 'not built'))}</p><p class="muted">Randomization seed: {int(state.get('schedule_seed') or 1)}</p></section>
 </div><section class="card"><h2>Schedule Operations</h2><p>Flush removes both Movie and TV schedules. Rebuild creates a new randomized rolling lineup and resets TV episode progression to Season 1/Episode 1 for its newly assigned sequence.</p>
 <form method="post" action="/admin/vchannels" onsubmit="return confirm('Flush BOTH Movie and TV virtual schedules? The guide will remain empty until rebuilt.')"><button class="danger" name="action" value="flush">Flush Both Schedules</button></form>
-<form method="post" action="/admin/vchannels" onsubmit="return confirm('Back up, flush, re-randomize, and rebuild BOTH virtual schedules now?')"><button name="action" value="rebuild">Rebuild &amp; Re-randomize</button></form></section></main></body></html>'''
+<form method="post" action="/admin/vchannels" onsubmit="return confirm('Back up, flush, re-randomize, and rebuild BOTH virtual schedules now?')"><button name="action" value="rebuild">Rebuild &amp; Re-randomize</button></form>
+<form method="post" action="/admin/vchannels" onsubmit="return confirm('Back up, then rebuild and re-randomize only the TV lineup? Movie schedule and all watch state are untouched.')"><button name="action" value="rebuild_tv">Rebuild &amp; Re-randomize TV Only</button></form></section></main></body></html>'''
     return handler.render_html(body)
 
 
@@ -1732,6 +1900,16 @@ def handle_post(handler, user, path, movie_app, tv_app, stop_preview_fn=None):
             if action == "repair_tv":
                 result = rebuild_tv_schedules(movie_app, tv_app)
                 return admin_page(handler, f"TV schedules rebuilt using actual media durations. Backup: {result['backup']}")
+            if action == "rebuild_tv":
+                # TV-only rebuild + re-randomize (new schedule_seed): unlike
+                # "rebuild" above, never touches the movie lineup at all -
+                # only vchannel_schedule/progress/slot rows for kind='tv' are
+                # deleted before regenerating. Used after adding/changing TV
+                # channel definitions so the whole TV lineup gets a genuinely
+                # fresh shuffle without disturbing movies or any watch state
+                # (a completely separate table).
+                result = rebuild_tv_schedules(movie_app, tv_app, randomize=True)
+                return admin_page(handler, f"TV schedules rebuilt and re-randomized (movies untouched). Backup: {result['backup']}")
             if action == "repair_all":
                 result = rebuild_schedules(movie_app, tv_app, randomize=False)
                 return admin_page(handler, f"Movie and TV schedules rebuilt using actual media durations. Backup: {result['backup']}")

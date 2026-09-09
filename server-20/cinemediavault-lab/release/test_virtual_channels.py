@@ -500,5 +500,173 @@ class VirtualChannelsTestCase(unittest.TestCase):
         self.assertIn("audioSelect", payload["audio_control_html"])
 
 
+    # -- five additional TV channels (T11-T15), added 2026-09-09 -------------
+    def test_tv_channel_roster_is_fifteen_and_preserves_the_original_ten(self):
+        self.assertEqual(len(vc.TV_CHANNELS), 15)
+        self.assertEqual(len(vc.MOVIE_CHANNELS), 10, "movie roster must be untouched by this change")
+        original_ten = [
+            ("t1", "T1", "Drama", "Drama"), ("t2", "T2", "Comedy", "Comedy"),
+            ("t3", "T3", "Science Fiction", "Science Fiction"), ("t4", "T4", "Action & Adventure", "Action"),
+            ("t5", "T5", "Crime", "Crime"), ("t6", "T6", "Mystery", "Mystery"),
+            ("t7", "T7", "Animation", "Animation"), ("t8", "T8", "Family & Kids", "Family"),
+            ("t9", "T9", "Documentary", "Documentary"), ("t10", "T10", "Western", "Western"),
+        ]
+        self.assertEqual(vc.TV_CHANNELS[:10], original_ten, "existing ten TV channels must be preserved exactly, in order")
+        new_five = vc.TV_CHANNELS[10:]
+        self.assertEqual([c[0] for c in new_five], ["t11", "t12", "t13", "t14", "t15"])
+        self.assertEqual([c[1] for c in new_five], ["T11", "T12", "T13", "T14", "T15"])
+        self.assertEqual([c[3] for c in new_five], ["Knowledge", "TheSimpsons", "TheZone", "Nostalgia", "Sitcom"])
+        slugs = [c[0] for c in vc.TV_CHANNELS]
+        numbers = [c[1] for c in vc.TV_CHANNELS]
+        self.assertEqual(len(slugs), len(set(slugs)), "channel slugs must be unique")
+        self.assertEqual(len(numbers), len(set(numbers)), "channel numbers must be unique")
+
+    def test_schedule_stats_reports_dynamic_channel_totals(self):
+        stats = vc.schedule_stats()
+        self.assertEqual(stats["tv"]["total"], 15)
+        self.assertEqual(stats["movie"]["total"], 10)
+
+    def test_title_normalization_matches_the_and_punctuation_variants_not_substrings(self):
+        self.assertTrue(vc._title_matches_any("The Simpsons", vc.SIMPSONS_TITLES))
+        self.assertTrue(vc._title_matches_any("simpsons", vc.SIMPSONS_TITLES))
+        self.assertTrue(vc._title_matches_any("  THE   SIMPSONS!! ", vc.SIMPSONS_TITLES))
+        # Must never substring-match: a real library has "Super Friends" /
+        # "Garfield and Friends" that must NOT satisfy a "Friends" priority rule.
+        self.assertFalse(vc._title_matches_any("Super Friends", {"Friends"}))
+        self.assertFalse(vc._title_matches_any("Garfield and Friends", {"Friends"}))
+        self.assertTrue(vc._title_matches_any("Friends", {"Friends"}))
+
+    # -- Knowledge (T11): named anchors + Documentary genre fallback ---------
+    def test_knowledge_eligible_matches_named_shows_and_documentary_genre(self):
+        self.assertTrue(vc.knowledge_eligible(set(), "How It's Made"))
+        self.assertTrue(vc.knowledge_eligible(set(), "Modern Marvels"))
+        self.assertTrue(vc.knowledge_eligible({"Documentary"}, "Ancient Aliens"))
+        self.assertFalse(vc.knowledge_eligible({"Comedy"}, "Seinfeld"))
+
+    # -- The Simpsons (T12): exactly one show, nothing else ------------------
+    def test_simpsons_eligible_is_exact_show_only(self):
+        self.assertTrue(vc.simpsons_eligible("The Simpsons"))
+        self.assertFalse(vc.simpsons_eligible("The Simpsons Movie"))
+        self.assertFalse(vc.simpsons_eligible("Simpsons Comics"))
+        self.assertFalse(vc.simpsons_eligible("Family Guy"))
+
+    # -- The Zone (T13): named anthology anchors + SciFi-and-Mystery combo ---
+    def test_zone_eligible_matches_named_shows_and_scifi_mystery_combo(self):
+        self.assertTrue(vc.zone_eligible(set(), "The Twilight Zone"))
+        self.assertTrue(vc.zone_eligible(set(), "The Outer Limits"))
+        self.assertTrue(vc.zone_eligible({"Science Fiction", "Mystery", "Drama"}, "Fringe"))
+        # Science Fiction alone (no Mystery) must not qualify - that's T3's
+        # whole library, not a curated anthology neighborhood.
+        self.assertFalse(vc.zone_eligible({"Science Fiction", "Action"}, "Star Trek: The Next Generation"))
+        self.assertFalse(vc.zone_eligible({"Mystery", "Crime"}, "Murder, She Wrote"))
+
+    # -- Nostalgia (T14): named anchors + 1960-1999 release year -------------
+    def test_nostalgia_eligible_matches_named_shows_and_decade_window(self):
+        self.assertTrue(vc.nostalgia_eligible(set(), "Knight Rider", {"year": "1982"}))
+        self.assertTrue(vc.nostalgia_eligible({"Drama"}, "Little House on the Prairie", {"year": "1974"}))
+        self.assertFalse(vc.nostalgia_eligible({"Drama"}, "Stranger Things", {"year": "2016"}))
+        self.assertFalse(vc.nostalgia_eligible({"Comedy"}, "Some Show", {"year": ""}))
+
+    # -- Sitcom (T15): named anchors + Comedy minus Animation ----------------
+    def test_sitcom_eligible_matches_named_shows_and_live_action_comedy(self):
+        self.assertTrue(vc.sitcom_eligible(set(), "Seinfeld"))
+        self.assertTrue(vc.sitcom_eligible({"Comedy"}, "Malcolm in the Middle"))
+        self.assertFalse(vc.sitcom_eligible({"Comedy", "Animation"}, "Garfield and Friends"))
+        self.assertFalse(vc.sitcom_eligible({"Drama"}, "Some Drama"))
+
+    # -- integration: pool building must not leave any of the five empty -----
+    def _multi_show_tv_app(self):
+        def show(id_, title, genres, year, n_eps=2):
+            eps = [FakeEpisode(id_ * 100 + i, make_file(self.tmp, f"{title}-{i}.mp4"), 1, i + 1) for i in range(n_eps)]
+            return FakeShow(id_, title, {"s1": FakeSeason(eps)}), {
+                "genres": genres, "vote_average": 6.0, "year": year,
+                "episodes": {f"S01E{i+1:02d}": {"runtime": 22, "vote_average": 6.0} for i in range(n_eps)},
+            }
+        shows, metadata = [], {}
+        for id_, title, genres, year in [
+            (1, "How It's Made", ["Documentary"], "2001"),
+            (2, "Ancient Aliens", ["Documentary"], "2010"),
+            (3, "The Simpsons", ["Family", "Animation", "Comedy"], "1989"),
+            (4, "Fringe", ["Science Fiction", "Mystery", "Drama"], "2008"),
+            (5, "Knight Rider", ["Action", "Science Fiction", "Crime"], "1982"),
+            (6, "Seinfeld", ["Comedy"], "1989"),
+            (7, "Garfield and Friends", ["Animation", "Comedy"], "1988"),  # Sitcom must exclude this (Animation)
+            (8, "Modern Drama Show", ["Drama"], "2020"),  # matches nothing new (control)
+        ]:
+            s, m = show(id_, title, genres, year)
+            shows.append(s)
+            metadata[title] = m
+        return FakeTvApp(shows, metadata)
+
+    def test_build_all_pools_populates_all_five_new_channels_without_bleeding_into_wrong_ones(self):
+        tv_app = self._multi_show_tv_app()
+        movie_app = FakeMovieApp([], {})
+        movie_defs, tv_defs = vc.channels("movie"), vc.channels("tv")
+        _movie_pools, tv_pools = vc._build_all_pools(movie_app, tv_app, movie_defs, tv_defs)
+        by_slug = {ch["slug"]: ch["id"] for ch in tv_defs}
+
+        knowledge = tv_pools[by_slug["t11"]]
+        self.assertEqual(set(knowledge.keys()), {"How It's Made", "Ancient Aliens"})
+
+        simpsons = tv_pools[by_slug["t12"]]
+        self.assertEqual(set(simpsons.keys()), {"The Simpsons"})
+
+        zone = tv_pools[by_slug["t13"]]
+        self.assertEqual(set(zone.keys()), {"Fringe"})
+
+        nostalgia = tv_pools[by_slug["t14"]]
+        self.assertEqual(set(nostalgia.keys()), {"The Simpsons", "Knight Rider", "Seinfeld", "Garfield and Friends"})
+
+        sitcom = tv_pools[by_slug["t15"]]
+        self.assertEqual(set(sitcom.keys()), {"Seinfeld"}, "Sitcom must include live-action Comedy but exclude Animation")
+
+        # No empty channel when qualifying media exists for it.
+        for slug in ("t11", "t12", "t13", "t14", "t15"):
+            self.assertTrue(tv_pools[by_slug[slug]], f"{slug} must not be empty given qualifying local media")
+
+    def test_priority_named_shows_get_a_rating_floor_boost(self):
+        tv_app = self._multi_show_tv_app()
+        movie_app = FakeMovieApp([], {})
+        tv_defs = vc.channels("tv")
+        _movie_pools, tv_pools = vc._build_all_pools(movie_app, tv_app, vc.channels("movie"), tv_defs)
+        by_slug = {ch["slug"]: ch["id"] for ch in tv_defs}
+        knowledge = tv_pools[by_slug["t11"]]
+        self.assertGreaterEqual(knowledge["How It's Made"]["rating"], vc.PRIORITY_RATING_FLOOR)
+
+    def test_generate_horizon_schedules_all_five_new_channels_and_preserves_chronological_order(self):
+        tv_app = self._multi_show_tv_app()
+        movie_app = FakeMovieApp([], {})
+        vc.generate_horizon(movie_app, tv_app, horizon_days=3)
+        tv_defs = vc.channels("tv")
+        by_slug = {ch["slug"]: ch["id"] for ch in tv_defs}
+        c = vc.connect()
+        try:
+            for slug in ("t11", "t12", "t13", "t14", "t15"):
+                rows = c.execute(
+                    "SELECT COUNT(*) FROM vchannel_schedule WHERE channel_id=?", (by_slug[slug],)
+                ).fetchone()[0]
+                self.assertGreater(rows, 0, f"{slug} produced no scheduled programs at all")
+            # Sitcom (Seinfeld only, in this fixture) must air its episodes in
+            # strict, never-backward season/episode order - the same
+            # universal guarantee test_episodes_air_in_chronological_order_
+            # never_backward already covers for the original ten channels,
+            # re-checked explicitly against this new channel.
+            sitcom_rows = c.execute(
+                "SELECT episode_index FROM vchannel_schedule WHERE channel_id=? ORDER BY start_ts",
+                (by_slug["t15"],),
+            ).fetchall()
+        finally:
+            c.close()
+        raw = [r[0] for r in sitcom_rows]
+        self.assertEqual(raw, sorted(raw), "Sitcom channel must never air an earlier episode after a later one")
+
+    def test_admin_page_reports_fifteen_tv_and_ten_movie_channels(self):
+        handler = FakeHandler("/admin/vchannels")
+        result = vc.admin_page(handler)
+        self.assertIsNotNone(result)
+        self.assertIn("of 15 channels currently on air", handler.rendered)
+        self.assertIn("of 10 channels currently on air", handler.rendered)
+
+
 if __name__ == "__main__":
     unittest.main()
