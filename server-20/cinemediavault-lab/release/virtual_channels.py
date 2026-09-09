@@ -1247,6 +1247,7 @@ video{width:100%;max-height:calc(100vh - 66px);background:#000;display:block}
 .bar label{display:inline-flex;align-items:center;gap:6px;color:#fff;font-size:13px;font-weight:700}
 .bar select{min-height:36px;border-radius:8px;border:1px solid #444;background:#23262b;color:#fff;padding:4px 8px}
 body.channel-fullscreen{overflow:hidden}body.channel-fullscreen header,body.channel-fullscreen .bar{display:none}
+body.channel-fullscreen .now-info,.guide-open .now-info{display:none}
 body.channel-fullscreen video#v{position:fixed;inset:0;width:100vw;height:100vh;height:100dvh;max-height:none;object-fit:contain;background:#000}
 .guide-drawer{display:none;position:fixed;inset:0;z-index:30;background:#05070b}.guide-drawer.open{display:block}.guide-drawer iframe{width:100%;height:100%;border:0}.guide-close{position:fixed;right:16px;top:16px;z-index:33}.guide-open video#v{position:fixed;left:16px;top:16px;width:min(38vw,540px);height:auto;aspect-ratio:16/9;z-index:32;border:3px solid #7cc3ff;border-radius:12px;object-fit:contain;cursor:pointer}.guide-open header,.guide-open .bar{display:none}
 .up-next{position:fixed;left:0;right:0;bottom:0;z-index:20;background:linear-gradient(0deg,rgba(4,7,14,.97),rgba(4,7,14,.82) 65%,transparent);display:flex;align-items:center;gap:18px;padding:20px 26px;pointer-events:none}
@@ -1258,11 +1259,13 @@ body.channel-fullscreen video#v{position:fixed;inset:0;width:100vw;height:100vh;
 .next-subtitle{font-size:13px;color:#c6d1e2}
 .next-countdown{margin-top:4px;font-size:13px;font-weight:800;color:#cfe1ff}
 .count-number{color:#7cc3ff;font-size:16px}
-@media(max-width:850px){.up-next{padding:12px 14px;gap:10px}.up-next img.next-poster{width:44px;height:66px}.next-title{font-size:15px}}
+.now-info{display:grid;grid-template-columns:110px minmax(0,1fr);gap:16px;padding:18px 20px;background:#0d1118;border-top:1px solid #252c37}.now-info img{width:110px;aspect-ratio:2/3;object-fit:cover;border-radius:9px;background:#1b2230}.now-info img.no-art{display:none}.now-kicker{color:#7cc3ff;font-size:12px;font-weight:900;letter-spacing:.13em}.now-info h1{font-size:24px;margin:5px 0}.now-meta{color:#b8c4d4;font-weight:700}.now-description{max-width:850px;color:#d7deea;line-height:1.5;margin:10px 0 0}
+@media(max-width:850px){.up-next{padding:12px 14px;gap:10px}.up-next img.next-poster{width:44px;height:66px}.next-title{font-size:15px}.now-info{grid-template-columns:82px minmax(0,1fr);padding:14px;gap:12px}.now-info img{width:82px}.now-info h1{font-size:20px}}
 </style></head><body>
 <header><div id="pageTitle">__TITLE__</div><a class="btn" href="/vchannels/__KIND_PATH__">Back to Guide</a></header>
 <video id="v" controls autoplay playsinline __SOURCE_ATTR__>__CAPTION_TRACK__</video>
 <div class="bar">__PLAY_BEGINNING__<button id="openGuide" type="button">Guide</button><span id="audioControlHost">__AUDIO_CONTROL__</span></div>
+<section id="nowInfo" class="now-info"><img id="nowPoster" alt=""><div><div class="now-kicker">NOW PLAYING</div><h1 id="nowTitle"></h1><div id="nowMeta" class="now-meta"></div><p id="nowDescription" class="now-description"></p></div></section>
 <div class="guide-drawer" id="guideDrawer"><button class="guide-close" id="closeGuide" type="button">Return to Player</button><iframe id="guideFrame" title="CineVault Guide" data-src="/vchannels/__KIND_PATH__"></iframe></div>
 <section id="upNext" class="up-next hidden" aria-live="polite"><img id="nextPoster" class="next-poster" alt=""><div><div class="next-label">Up Next</div><h1 id="nextTitle" class="next-title"></h1><div id="nextSubtitle" class="next-subtitle"></div><div class="next-countdown">Starting in <span id="nextCount" class="count-number">10</span> seconds</div></div></section>
 <script src="/assets/hls.min.js"></script>
@@ -1272,7 +1275,7 @@ const guideDrawer=document.getElementById('guideDrawer'),guideFrame=document.get
 document.getElementById('openGuide').onclick=()=>{if(!guideFrame.src)guideFrame.src=guideFrame.dataset.src;guideDrawer.classList.add('open');document.body.classList.add('guide-open')};
 document.getElementById('closeGuide').onclick=()=>{guideDrawer.classList.remove('open');document.body.classList.remove('guide-open')};
 v.onclick=()=>{if(document.body.classList.contains('guide-open')){guideDrawer.classList.remove('open');document.body.classList.remove('guide-open')}};
-let offset=__OFFSET__,isHls=__IS_HLS__,src="__SOURCE__",next=__NEXT_JSON__,progStart=__ADVANCE_AFTER__,pinFor=__PIN_ADVANCE_AFTER__;
+let offset=__OFFSET__,isHls=__IS_HLS__,src="__SOURCE__",next=__NEXT_JSON__,currentInfo=__CURRENT_JSON__,progStart=__ADVANCE_AFTER__,pinFor=__PIN_ADVANCE_AFTER__;
 let hls=null,directFallbackStarted=false;
 window.addEventListener('message',event=>{if(event.origin!==location.origin||!event.data||event.data.type!=='cinevault-guide-navigate')return;const href=String(event.data.href||'');if(!href.startsWith(location.origin+'/'))return;v.pause();if(hls){try{hls.destroy()}catch(_e){}hls=null}v.removeAttribute('src');v.load();guideDrawer.classList.remove('open');document.body.classList.remove('guide-open');location.href=href});
 if(new URLSearchParams(location.search).get('fullscreen')==='1')document.body.classList.add('channel-fullscreen');
@@ -1310,8 +1313,15 @@ function wireAudioSelect(){
     });
   });
 }
+function renderNowPlaying(info){
+  info=info||{};document.getElementById('nowTitle').textContent=info.title||'Now Playing';
+  const date=t=>t?new Date(t*1000).toLocaleString([],{weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}):'';
+  const bits=[`${info.channel_number||''} ${info.channel||''}`.trim(),info.subtitle||'',info.start?`${date(info.start)}–${new Date(info.stop*1000).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})}`:'',info.rating?`★ ${Number(info.rating).toFixed(1)}`:''].filter(Boolean);
+  document.getElementById('nowMeta').textContent=bits.join(' · ');document.getElementById('nowDescription').textContent=info.overview||'No description is available for this program.';
+  const poster=document.getElementById('nowPoster');poster.src=info.poster||'';poster.classList.toggle('no-art',!info.poster);
+}
 function applyProgramData(data,usedAdvanceAfter){
-  offset=data.offset;isHls=data.is_hls;src=data.source;next=data.next;
+  offset=data.offset;isHls=data.is_hls;src=data.source;next=data.next;currentInfo=data.current||currentInfo;renderNowPlaying(currentInfo);
   pinFor=usedAdvanceAfter===undefined?null:usedAdvanceAfter;progStart=data.advance_after;
   document.title=data.title;document.getElementById('pageTitle').textContent=data.title;
   const playBeginning=document.getElementById('playBeginningLink');
@@ -1325,6 +1335,7 @@ function applyProgramData(data,usedAdvanceAfter){
   v.addEventListener('loadedmetadata',seekIn,{once:true});
   history.replaceState(null,'',`/watch/vchannel/${channelId}?advance_after=${progStart}&fullscreen=1`);
 }
+renderNowPlaying(currentInfo);
 wireAudioSelect();
 v.addEventListener('error',()=>{
   if(isHls||directFallbackStarted)return;
@@ -1458,6 +1469,18 @@ def _resolve_tune(channel_id, movie_app, tv_app, resolve_source_fn, caption_fn, 
             "poster": next_details.get("poster") or "",
             "start": nxt.get("start_ts"),
         }
+    current_details = _resolve_program_details(prog, movie_app, tv_app)
+    current_info = {
+        "title": title,
+        "subtitle": prog.get("subtitle") or "",
+        "overview": current_details.get("overview") or "",
+        "poster": current_details.get("poster") or "",
+        "rating": float(prog.get("rating") or 0),
+        "start": int(prog["start_ts"]),
+        "stop": int(prog["stop_ts"]),
+        "channel": channel["name"],
+        "channel_number": channel["channel_number"],
+    }
     return {
         "ok": True,
         "channel": channel,
@@ -1470,6 +1493,7 @@ def _resolve_tune(channel_id, movie_app, tv_app, resolve_source_fn, caption_fn, 
         "play_beginning_href": f"/player/{kind}/{item_id}",
         "advance_after": int(prog["start_ts"]),
         "next": next_info,
+        "current": current_info,
     }
 
 
@@ -1497,6 +1521,7 @@ def watch_channel(handler, user, channel_id, movie_app, tv_app, resolve_source_f
             return handler.redirect(f"/watch/vchannel/{channel['id']}")
         return _holding_response(handler, channel["kind"], result["headline"], result["detail"], refresh_ms=8000 if result["reason"] == "unavailable" else 15000)
     next_json = json.dumps(result["next"], ensure_ascii=False).replace("</", "<\\/")
+    current_json = json.dumps(result["current"], ensure_ascii=False).replace("</", "<\\/")
     next_url = f"/watch/vchannel/{channel['id']}?advance_after={result['advance_after']}&fullscreen=1"
     body = (
         TUNE_PLAYER_PAGE.replace("__TITLE__", html.escape(result["title"]))
@@ -1513,6 +1538,7 @@ def watch_channel(handler, user, channel_id, movie_app, tv_app, resolve_source_f
         .replace("__PIN_ADVANCE_AFTER__", advance_after if advance_after else "null")
         .replace("__NEXT_URL__", next_url)
         .replace("__NEXT_JSON__", next_json)
+        .replace("__CURRENT_JSON__", current_json)
     )
     return handler.render_html(body)
 
