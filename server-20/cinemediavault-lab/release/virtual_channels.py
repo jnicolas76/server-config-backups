@@ -1200,7 +1200,7 @@ function renderDetails(p,channelId){
 }
 grid.addEventListener('click',e=>{const b=e.target.closest('button.program');if(!b||!b.dataset.json)return;
   renderDetails(JSON.parse(b.dataset.json),b.dataset.channel)});
-document.addEventListener('click',e=>{const a=e.target.closest('a[href]');if(!a||a.target==='_blank')return;e.preventDefault();const href=a.href;let moved=false;const go=()=>{if(moved)return;moved=true;location.href=href};previews.teardownAll().finally(go);setTimeout(go,350)},true);
+document.addEventListener('click',e=>{const a=e.target.closest('a[href]');if(!a||a.target==='_blank')return;e.preventDefault();const href=a.href;let moved=false;const go=()=>{if(moved)return;moved=true;if(window.self!==window.top){window.parent.postMessage({type:'cinevault-guide-navigate',href:href},location.origin)}else{location.href=href}};previews.teardownAll().finally(go);setTimeout(go,350)},true);
 function clearSelection(){selectedKey=null;detailsPanel.classList.add('empty');detailsPanel.innerHTML='<div>Select a program in the grid to see details here.</div>';
   document.querySelectorAll('.program.selected').forEach(x=>x.classList.remove('selected'))}
 document.querySelector('nav').onclick=e=>{const b=e.target.closest('button[data-kind]');if(!b)return;kind=b.dataset.kind;
@@ -1274,6 +1274,7 @@ document.getElementById('closeGuide').onclick=()=>{guideDrawer.classList.remove(
 v.onclick=()=>{if(document.body.classList.contains('guide-open')){guideDrawer.classList.remove('open');document.body.classList.remove('guide-open')}};
 let offset=__OFFSET__,isHls=__IS_HLS__,src="__SOURCE__",next=__NEXT_JSON__,progStart=__ADVANCE_AFTER__,pinFor=__PIN_ADVANCE_AFTER__;
 let hls=null,directFallbackStarted=false,everAdvanced=false;
+window.addEventListener('message',event=>{if(event.origin!==location.origin||!event.data||event.data.type!=='cinevault-guide-navigate')return;const href=String(event.data.href||'');if(!href.startsWith(location.origin+'/'))return;v.pause();if(hls){try{hls.destroy()}catch(_e){}hls=null}v.removeAttribute('src');v.load();guideDrawer.classList.remove('open');document.body.classList.remove('guide-open');location.href=href});
 if(new URLSearchParams(location.search).get('fullscreen')==='1')document.body.classList.add('channel-fullscreen');
 /* Seamless (same-document) transitions only: navigating away with
    location.href/replace always exits the browser's native Fullscreen API on

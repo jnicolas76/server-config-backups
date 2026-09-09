@@ -2580,6 +2580,17 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
     document.getElementById("guideWhilePlaying")?.addEventListener("click",openGuideWhilePlaying);
     document.getElementById("closeGuideDrawer")?.addEventListener("click",closeGuideWhilePlaying);
     document.querySelector(".video-wrap")?.addEventListener("click",()=>{if(playerShell.classList.contains("guide-open"))closeGuideWhilePlaying()});
+    window.addEventListener("message", event => {
+      if (event.origin !== location.origin || !event.data || event.data.type !== "cinevault-guide-navigate") return;
+      const href = String(event.data.href || "");
+      if (!href.startsWith(location.origin + "/")) return;
+      video.pause();
+      if (hlsController) { try { hlsController.destroy(); } catch (_) {} hlsController = null; }
+      video.removeAttribute("src");
+      video.load();
+      closeGuideWhilePlaying();
+      location.href = href;
+    });
     const resumeButton = document.getElementById("resumeButton");
     const key = "cinevaultContinue";
     const mediaSource = video.dataset.source;
