@@ -1273,7 +1273,7 @@ document.getElementById('openGuide').onclick=()=>{if(!guideFrame.src)guideFrame.
 document.getElementById('closeGuide').onclick=()=>{guideDrawer.classList.remove('open');document.body.classList.remove('guide-open')};
 v.onclick=()=>{if(document.body.classList.contains('guide-open')){guideDrawer.classList.remove('open');document.body.classList.remove('guide-open')}};
 let offset=__OFFSET__,isHls=__IS_HLS__,src="__SOURCE__",next=__NEXT_JSON__,progStart=__ADVANCE_AFTER__,pinFor=__PIN_ADVANCE_AFTER__;
-let hls=null,directFallbackStarted=false,everAdvanced=false;
+let hls=null,directFallbackStarted=false;
 window.addEventListener('message',event=>{if(event.origin!==location.origin||!event.data||event.data.type!=='cinevault-guide-navigate')return;const href=String(event.data.href||'');if(!href.startsWith(location.origin+'/'))return;v.pause();if(hls){try{hls.destroy()}catch(_e){}hls=null}v.removeAttribute('src');v.load();guideDrawer.classList.remove('open');document.body.classList.remove('guide-open');location.href=href});
 if(new URLSearchParams(location.search).get('fullscreen')==='1')document.body.classList.add('channel-fullscreen');
 /* Seamless (same-document) transitions only: navigating away with
@@ -1340,12 +1340,21 @@ function advanceToNext(){
     if(!data.ok){location.href=nextUrlFallback();return}
     applyProgramData(data,progStart);
     document.getElementById('upNext').classList.add('hidden');
-    if(!everAdvanced){everAdvanced=true;document.body.classList.add('channel-fullscreen')}
+    document.body.classList.add('channel-fullscreen');
     v.play().catch(()=>{});
     v.addEventListener('ended',showUpNext,{once:true});
   }).catch(()=>{location.href=nextUrlFallback()});
 }
-function showUpNext(){
+function leaveNativeFullscreen(){
+  try{
+    if(document.fullscreenElement&&document.exitFullscreen)return document.exitFullscreen().catch(()=>{});
+    if(document.webkitFullscreenElement&&document.webkitExitFullscreen){document.webkitExitFullscreen();return Promise.resolve()}
+    if(v.webkitDisplayingFullscreen&&v.webkitExitFullscreen){v.webkitExitFullscreen();return Promise.resolve()}
+  }catch(_e){}
+  return Promise.resolve();
+}
+function revealUpNext(){
+  document.body.classList.remove('channel-fullscreen');
   const panel=document.getElementById('upNext');panel.classList.remove('hidden');
   document.getElementById('nextTitle').textContent=next.title||'Programming continues';
   document.getElementById('nextSubtitle').textContent=next.subtitle||'';
@@ -1353,6 +1362,7 @@ function showUpNext(){
   let remaining=10;document.getElementById('nextCount').textContent=remaining;
   const timer=setInterval(()=>{remaining-=1;document.getElementById('nextCount').textContent=Math.max(0,remaining);if(remaining<=0){clearInterval(timer);advanceToNext()}},1000);
 }
+function showUpNext(){leaveNativeFullscreen().finally(revealUpNext)}
 v.addEventListener('ended',showUpNext,{once:true});
 </script></body></html>'''
 
