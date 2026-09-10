@@ -47,17 +47,13 @@ fi
 mkdir -p "$LAB/logs"
 nohup python3 "$LAB/cinemediavault-lab-5000.py" --host "$CINEVAULT_HOST" --port "$PORT" >"$LOG_FILE" 2>"$ERR_FILE" &
 echo $! > "$PID_FILE"
-sleep 2
+for _ in $(seq 1 30); do
+  healthy && break
+  kill -0 "$(cat "$PID_FILE")" 2>/dev/null || break
+  sleep 2
+done
 if kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-  ready=0
-  for _ in $(seq 1 30); do
-    if healthy; then
-      ready=1
-      break
-    fi
-    sleep 2
-  done
-  if [[ "$ready" -eq 1 ]]; then
+  if healthy; then
     echo "Started CineMediaVault LAB PID $(cat "$PID_FILE")"
     echo "URL: https://192.168.1.20:${PORT}/"
   else

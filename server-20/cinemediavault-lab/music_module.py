@@ -15,6 +15,9 @@ import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
+from cinevault_theme import inject_theme, DEFAULT_THEME
+import cinevault_usage
+import secrets
 
 MUSIC_ROOT = Path(os.environ.get("CINEVAULT_MUSIC_ROOT", "/media/jnicolas/Expansion/Music")).resolve()
 MUSIC_DB = Path(os.environ.get("CINEVAULT_MUSIC_DB", "/home/jnicolas/cinevault-data/music.db")).resolve()
@@ -252,14 +255,34 @@ def safe_track(track_id):
         conn.close()
 
 
-def serve_file(handler, path, download_name="", head=False):
+def serve_file(handler, path, download_name="", head=False, track=True):
     size = path.stat().st_size
     start, end = 0, size - 1
     range_header = handler.headers.get("Range", "")
-    match = re.match(r"bytes=(\d*)-(\d*)", range_header)
+    match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header.strip())
     status = 200
     if match:
-        start = int(match.group(1) or 0); end = min(int(match.group(2) or end), end); status = 206
+        first, last = match.groups()
+        if not first and last:
+            # RFC 7233 suffix range: bytes=-N means the final N bytes. Android's
+            # MediaPlayer uses this to inspect metadata in large MP3/audiobook files.
+            suffix_length = int(last)
+            if suffix_length <= 0:
+                handler.send_response(416)
+                handler.send_header("Content-Range", f"bytes */{size}")
+                handler.end_headers()
+                return
+            start = max(0, size - suffix_length)
+        else:
+            start = int(first or 0)
+            if last:
+                end = min(int(last), size - 1)
+        if start >= size or start > end:
+            handler.send_response(416)
+            handler.send_header("Content-Range", f"bytes */{size}")
+            handler.end_headers()
+            return
+        status = 206
     length = max(0, end - start + 1)
     handler.send_response(status)
     handler.send_header("Content-Type", mimetypes.guess_type(path.name)[0] or "application/octet-stream")
@@ -268,12 +291,30 @@ def serve_file(handler, path, download_name="", head=False):
     if download_name: handler.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{urllib.parse.quote(download_name)}")
     handler.end_headers()
     if head: return
-    with path.open("rb") as source:
-        source.seek(start); remaining = length
-        while remaining:
-            chunk = source.read(min(1024 * 256, remaining))
-            if not chunk: break
-            handler.wfile.write(chunk); remaining -= len(chunk)
+    if not track:
+        with path.open("rb") as source:
+            source.seek(start); remaining = length
+            while remaining:
+                chunk = source.read(min(1024 * 256, remaining))
+                if not chunk: break
+                handler.wfile.write(chunk); remaining -= len(chunk)
+        return
+    user = handler.current_user()
+    delivery = "download" if download_name else "direct"
+    session_key = f"music:{secrets.token_urlsafe(8)}"
+    cinevault_usage.session_start(session_key, user=user, service="music", delivery=delivery,
+                                   media_type="music", title=path.stem, transcoding=False,
+                                   client=handler.headers.get("User-Agent", ""), kind="hold")
+    try:
+        with path.open("rb") as source:
+            source.seek(start); remaining = length
+            while remaining:
+                chunk = source.read(min(1024 * 256, remaining))
+                if not chunk: break
+                handler.wfile.write(chunk); remaining -= len(chunk)
+                cinevault_usage.record_bytes(user, "music", delivery, len(chunk), session_key=session_key)
+    finally:
+        cinevault_usage.session_end(session_key)
 
 
 def artwork_path(track_id):
@@ -823,7 +864,7 @@ MUSIC_PAGE = MUSIC_PAGE_V3
 
 def handle_get(handler, user, path, head=False):
     if path == "/music":
-        data=MUSIC_PAGE.encode(); handler.send_response(200); handler.send_header("Content-Type","text/html; charset=utf-8"); handler.send_header("Content-Length",str(len(data))); handler.end_headers(); return handler.wfile.write(data)
+        page = inject_theme(MUSIC_PAGE, getattr(handler, "_cinevault_theme", DEFAULT_THEME)); data=page.encode(); handler.send_response(200); handler.send_header("Content-Type","text/html; charset=utf-8"); handler.send_header("Content-Length",str(len(data))); handler.end_headers(); return handler.wfile.write(data)
     if path == "/api/music/library": return api_library(handler)
     if path == "/api/music/explore": return api_music_explore(handler,user)
     if path == "/api/music/now-playing": return playback_state_api(handler,user)
@@ -835,7 +876,7 @@ def handle_get(handler, user, path, head=False):
         if action=="art":
             art=artwork_path(track_id)
             if not art: return handler.send_error(404)
-            return serve_file(handler,art,head=head)
+            return serve_file(handler,art,head=head,track=False)
         if action == "stream" and not head and not handler.headers.get("Range"):
             record_music_play(int(user["id"]), int(track_id))
         return serve_file(handler,file,file.name if action=="download" else "",head)

@@ -3,6 +3,7 @@ import argparse
 import base64
 import concurrent.futures
 import datetime
+import difflib
 import email
 import email.policy
 import gzip
@@ -35,6 +36,10 @@ import xml.etree.ElementTree as ET
 import music_module
 import dvr_module
 import epg_extend
+import cinevault_usage
+import genre_catalog
+import virtual_channels
+from cinevault_theme import THEME_ALLOWED, DEFAULT_THEME, normalize_theme, theme_for_row, inject_theme
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -116,6 +121,7 @@ MOBILE_DOWNLOAD_JOBS: dict[str, dict] = {}
 MEDIA_DURATION_CACHE: dict[str, float] = {}
 MEDIA_CODEC_CACHE: dict[str, tuple[float, int, dict]] = {}
 SUBTITLE_DISCOVERY_CACHE: dict[str, tuple[float, int, int, list[dict]]] = {}
+AUDIO_TRACK_CACHE: dict[str, tuple[float, int, list[dict]]] = {}
 TRANSCODE_LOCK = threading.Lock()
 DIRECT_STREAM_LOCK = threading.Lock()
 HLS_VIEWER_LOCK = threading.Lock()
@@ -125,11 +131,28 @@ MEDIA_SCAN_LOCK = threading.Lock()
 MEDIA_SCAN_LAST_RESULT = {"running": False}
 UPSTREAM_MOVIE_APP_DIR = Path(os.environ.get("CINEVAULT_UPSTREAM_MOVIE_APP_DIR", "/home/jnicolas/media-download-library")).resolve()
 UPSTREAM_TV_APP_DIR = Path(os.environ.get("CINEVAULT_UPSTREAM_TV_APP_DIR", "/home/jnicolas/tv-download-library")).resolve()
+UPSTREAM_MEDIA_SYNC_ENABLED = os.environ.get("CINEVAULT_UPSTREAM_MEDIA_SYNC", "0").strip().lower() in {"1", "true", "yes", "on"}
 UPSTREAM_SYNC_INTERVAL_SECONDS = max(15.0, float(os.environ.get("CINEVAULT_UPSTREAM_SYNC_INTERVAL_SECONDS", "30")))
 UPSTREAM_SYNC_DEBOUNCE_SECONDS = max(10.0, float(os.environ.get("CINEVAULT_UPSTREAM_SYNC_DEBOUNCE_SECONDS", "45")))
+RECENT_ADDED_LEDGER = Path(os.environ.get("CINEVAULT_RECENT_ADDED_LEDGER", str(CINEVAULT_DB.parent / "recent-added-ledger.json"))).resolve()
+RECENT_ADDED_LOCK = threading.Lock()
 HDHR_SCAN_LOCK = threading.Lock()
 HDHR_GUIDE_LOCK = threading.Lock()
 POSTER_ROTATION_LOCK = threading.Lock()
+
+# Virtual-channel guide mini-previews: a small, capped, separate namespace
+# from the real playback TRANSCODES dict above so a preview tile can never
+# share process lifecycle with someone's actual Watch Live / Play stream.
+PREVIEW_TRANSCODES: dict[str, dict] = {}
+PREVIEW_LOCK = threading.Lock()
+PREVIEW_MAX_CONCURRENT = max(1, int(os.environ.get("CINEVAULT_VCHANNEL_PREVIEW_MAX_CONCURRENT", "3")))
+PREVIEW_SEMAPHORE = threading.Semaphore(PREVIEW_MAX_CONCURRENT)
+PREVIEW_HLS_CACHE_DIR = HLS_CACHE_DIR / "vpreview"
+PREVIEW_IDLE_STOP_SECONDS = float(os.environ.get("CINEVAULT_VCHANNEL_PREVIEW_IDLE_SECONDS", "20"))
+PREVIEW_CLEANUP_INTERVAL_SECONDS = float(os.environ.get("CINEVAULT_VCHANNEL_PREVIEW_CLEANUP_SECONDS", "10"))
+PREVIEW_VIDEO_WIDTH = int(os.environ.get("CINEVAULT_VCHANNEL_PREVIEW_WIDTH", "256"))
+PREVIEW_VIDEO_MAXRATE = os.environ.get("CINEVAULT_VCHANNEL_PREVIEW_MAXRATE", "220k")
+PREVIEW_VIDEO_BUFSIZE = os.environ.get("CINEVAULT_VCHANNEL_PREVIEW_BUFSIZE", "400k")
 
 
 def save_scan_progress(payload: dict) -> None:
@@ -412,6 +435,7 @@ CREATE TABLE IF NOT EXISTS users (
   is_admin INTEGER NOT NULL DEFAULT 0,
   is_super_admin INTEGER NOT NULL DEFAULT 0,
   active INTEGER NOT NULL DEFAULT 1,
+  theme TEXT NOT NULL DEFAULT 'default',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   last_login_at TEXT
@@ -566,6 +590,12 @@ CREATE TABLE IF NOT EXISTS user_video_playlist_items (
   PRIMARY KEY(playlist_id, media_key)
 );
 CREATE INDEX IF NOT EXISTS idx_video_playlist_order ON user_video_playlist_items(playlist_id, position);
+
+CREATE TABLE IF NOT EXISTS user_tv_state (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  last_channel_id INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
 """
 
 
@@ -609,6 +639,8 @@ def ensure_auth_schema() -> None:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
         if "is_super_admin" not in columns:
             conn.execute("ALTER TABLE users ADD COLUMN is_super_admin INTEGER NOT NULL DEFAULT 0")
+        if "theme" not in columns:
+            conn.execute("ALTER TABLE users ADD COLUMN theme TEXT NOT NULL DEFAULT 'default'")
         wall_columns = {row["name"] for row in conn.execute("PRAGMA table_info(user_video_wall)").fetchall()}
         if "media_path" not in wall_columns:
             conn.execute("ALTER TABLE user_video_wall ADD COLUMN media_path TEXT NOT NULL DEFAULT ''")
@@ -652,6 +684,8 @@ def ensure_auth_schema() -> None:
 
 
 ensure_auth_schema()
+cinevault_usage.configure(db_connect)
+cinevault_usage.ensure_schema()
 
 
 def hdhr_json(url: str, timeout: float = 1.5):
@@ -1008,6 +1042,7 @@ def reload_media_state() -> dict:
     tv_app.load_poster_map()
     tv_app.load_metadata_map()
     migrate_legacy_movie_state_keys()
+    migrate_legacy_tv_state_keys()
     rebuild_actor_index()
     return {
         "movies": len(movie_app.movie_index.items),
@@ -1135,6 +1170,383 @@ def watch_full_scan(process, out_path: Path, err_path: Path) -> None:
     save_scan_progress(final)
 
 
+USAGE_PAGE_TEMPLATE = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CineMediaVault Usage</title>
+<style>
+:root { color-scheme:dark; --bg:#090a0d; --panel:#11151d; --panel2:#0d1119; --line:rgba(255,255,255,.14); --muted:#aab4c3; --gold:#f5b73f;
+  --svc-movie:#3987e5; --svc-tv:#d95926; --svc-music:#199e70; --svc-dvr:#c98500; --svc-live_tv:#d55181;
+  --cpu-system:#3987e5; --cpu-cinevault:#d95926; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:#fff; font-family:Inter,system-ui,Segoe UI,sans-serif; }
+header { position:sticky; top:0; z-index:5; display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:14px; padding:18px 22px; padding-top:calc(18px + env(safe-area-inset-top)); padding-left:calc(22px + env(safe-area-inset-left)); padding-right:calc(22px + env(safe-area-inset-right)); background:rgba(9,10,13,.94); border-bottom:1px solid var(--line); }
+a { color:#fff; } main { padding:22px; padding-bottom:calc(40px + env(safe-area-inset-bottom)); max-width:1280px; margin:0 auto 40px; }
+nav { display:flex; flex-wrap:wrap; gap:4px 6px; align-items:center; } nav a { min-height:44px; display:inline-flex; align-items:center; padding:0 6px; }
+h1 { margin:0; font-size:28px; } h2 { margin:0 0 12px; font-size:20px; }
+.tabs { display:flex; gap:8px; margin-bottom:18px; }
+.tabbtn { min-height:44px; border:1px solid var(--line); background:var(--panel); color:#fff; border-radius:999px; padding:0 18px; font-weight:800; cursor:pointer; }
+.tabbtn.active { background:var(--gold); color:#111; border-color:transparent; }
+.tabpanel { display:none; } .tabpanel.active { display:block; }
+.panel { border:1px solid var(--line); border-radius:18px; background:var(--panel); padding:18px; margin-bottom:18px; box-shadow:0 18px 50px rgba(0,0,0,.24); }
+.stat-row { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-bottom:18px; }
+.stat-tile { border:1px solid var(--line); border-radius:16px; background:var(--panel); padding:14px 16px; }
+.stat-tile .label { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+.stat-tile .value { font-size:24px; font-weight:900; margin-top:4px; font-variant-numeric:tabular-nums; }
+.stat-tile .sub { color:var(--muted); font-size:12px; margin-top:2px; }
+.session-cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:12px; }
+.session-card { border:1px solid var(--line); border-radius:14px; background:var(--panel2); padding:12px 14px; }
+.session-card .title { font-weight:800; font-size:15px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.session-card .sub { color:var(--muted); font-size:12px; margin-top:2px; }
+.session-card .row { display:flex; justify-content:space-between; margin-top:8px; font-size:13px; }
+.session-card .badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:800; text-transform:uppercase; margin-right:4px; }
+.badge.svc-movie { background:color-mix(in srgb, var(--svc-movie) 30%, transparent); color:#bcd6ff; }
+.badge.svc-tv { background:color-mix(in srgb, var(--svc-tv) 30%, transparent); color:#ffd2b8; }
+.badge.svc-music { background:color-mix(in srgb, var(--svc-music) 30%, transparent); color:#b6f0da; }
+.badge.svc-dvr { background:color-mix(in srgb, var(--svc-dvr) 30%, transparent); color:#ffe2b0; }
+.badge.svc-live_tv { background:color-mix(in srgb, var(--svc-live_tv) 30%, transparent); color:#ffc9dd; }
+.badge.mode { background:rgba(255,255,255,.12); color:#e8ecf3; }
+.empty { color:var(--muted); padding:14px; border:1px dashed var(--line); border-radius:14px; text-align:center; }
+.user-totals { display:grid; gap:8px; }
+.user-total-row { display:grid; grid-template-columns:minmax(0,1fr) auto auto; gap:12px; align-items:center; padding:8px 0; border-bottom:1px solid rgba(255,255,255,.08); font-size:14px; }
+.controls-row { display:flex; flex-wrap:wrap; gap:14px; align-items:center; justify-content:space-between; margin-bottom:16px; }
+.range-group { display:flex; flex-wrap:wrap; gap:6px; }
+.range-group button, .filter-group select, .custom-range input, .custom-range button { min-height:40px; border-radius:10px; border:1px solid var(--line); background:var(--panel2); color:#fff; padding:0 10px; }
+.range-group button.active { background:var(--gold); color:#111; font-weight:800; border-color:transparent; }
+.filter-group { display:flex; flex-wrap:wrap; gap:10px; font-size:13px; color:var(--muted); }
+.filter-group label { display:flex; align-items:center; gap:6px; }
+.custom-range { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+.custom-range[hidden] { display:none; }
+.chart-wrap { position:relative; width:100%; }
+svg.chart { width:100%; height:220px; display:block; touch-action:pan-y; }
+svg.chart.tall { height:280px; }
+.legend { display:flex; flex-wrap:wrap; gap:12px; margin-top:10px; font-size:12px; color:var(--muted); }
+.legend .swatch { display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:6px; vertical-align:middle; }
+.tooltip { position:absolute; pointer-events:none; background:rgba(10,12,17,.96); border:1px solid var(--line); border-radius:10px; padding:8px 10px; font-size:12px; line-height:1.5; white-space:nowrap; transform:translate(-50%,-110%); z-index:6; display:none; box-shadow:0 8px 24px rgba(0,0,0,.4); }
+.settings-card p { color:var(--muted); font-size:13px; }
+.settings-card form { display:flex; flex-wrap:wrap; gap:14px; align-items:center; }
+.settings-card button, form.retention-form button { min-height:40px; border:0; border-radius:999px; padding:0 16px; font-weight:800; background:var(--gold); color:#111; cursor:pointer; }
+@media (max-width:720px) { main { padding:14px; } h1 { font-size:24px; } svg.chart { height:180px; } }
+</style>
+</head>
+<body>
+<header><strong>CineMediaVault Usage</strong><nav><a href="/admin/users">Users</a> &middot; <a href="/admin/activity">Activity</a> &middot; <a href="/admin/hls">Live Streams</a> &middot; <a href="/wall">Video Wall</a> &middot; <a href="/">Home</a></nav></header>
+<main>
+  <h1>Active &amp; Historical Usage</h1>
+  <p style="color:var(--muted);margin:6px 0 18px">Bandwidth is measured from bytes actually written to each response, never estimated from source bitrate. CPU is sampled from the live system and the CineVault process tree; per-session CPU is only shown when a specific transcoder process is known and is labeled as an estimate.</p>
+  <div class="tabs">
+    <button class="tabbtn active" data-tab="active">Active</button>
+    <button class="tabbtn" data-tab="history">Historical</button>
+  </div>
+
+  <section id="tab-active" class="tabpanel active">
+    <div class="stat-row" id="activeStats"></div>
+    <section class="panel">
+      <h2>Active Sessions</h2>
+      <div id="sessionCards" class="session-cards"><div class="empty">No active playback right now.</div></div>
+    </section>
+    <section class="panel">
+      <h2>Per-User Totals (live)</h2>
+      <div id="perUserTotals" class="user-totals"><div class="empty">No active usage right now.</div></div>
+    </section>
+  </section>
+
+  <section id="tab-history" class="tabpanel">
+    <div class="controls-row">
+      <div class="range-group" id="rangeGroup">
+        <button data-range="15m">15m</button>
+        <button data-range="1h">1h</button>
+        <button data-range="6h">6h</button>
+        <button class="active" data-range="24h">24h</button>
+        <button data-range="7d">7d</button>
+        <button data-range="30d">30d</button>
+        <button data-range="custom">Custom</button>
+      </div>
+      <div class="filter-group">
+        <label>User <select id="filterUser"><option value="">All users</option></select></label>
+        <label>Service <select id="filterService"><option value="">All services</option><option value="movie">Movie</option><option value="tv">TV</option><option value="music">Music</option><option value="dvr">DVR</option><option value="live_tv">Live TV</option></select></label>
+        <label>Delivery <select id="filterDelivery"><option value="">All delivery</option><option value="direct">Direct</option><option value="hls">HLS</option><option value="download">Download</option></select></label>
+      </div>
+    </div>
+    <div class="custom-range" id="customRange" hidden>
+      <label>From <input type="datetime-local" id="customStart"></label>
+      <label>To <input type="datetime-local" id="customEnd"></label>
+      <button id="applyCustom" type="button">Apply</button>
+    </div>
+    <div class="stat-row" id="historyStats"></div>
+    <section class="panel">
+      <h2>Bandwidth Over Time <small style="color:var(--muted);font-weight:400">(by service)</small></h2>
+      <div class="chart-wrap"><svg id="chartBandwidth" class="chart"></svg><div class="tooltip" id="tipBandwidth"></div></div>
+      <div class="legend" id="legendBandwidth"></div>
+    </section>
+    <section class="panel">
+      <h2>CPU Over Time</h2>
+      <div class="chart-wrap"><svg id="chartCpu" class="chart"></svg><div class="tooltip" id="tipCpu"></div></div>
+      <div class="legend" id="legendCpu"></div>
+    </section>
+    <section class="panel">
+      <h2>Concurrent Streams</h2>
+      <div class="chart-wrap"><svg id="chartConcurrent" class="chart"></svg><div class="tooltip" id="tipConcurrent"></div></div>
+    </section>
+    <section class="panel">
+      <h2>Per-User Ranking <small style="color:var(--muted);font-weight:400">(total transferred in range)</small></h2>
+      <div class="chart-wrap"><svg id="chartRanking" class="chart tall"></svg></div>
+    </section>
+    <section class="panel settings-card">
+      <h2>History Retention</h2>
+      <p>Compact 5-minute interval aggregates are kept for this long before automatic daily pruning. At typical home-lab activity levels this is roughly 1-5 MB per 90 days; it will not grow unbounded.</p>
+      <form class="retention-form" method="post" action="/admin/usage/retention">
+        {{RETENTION_RADIOS}}
+        <button type="submit">Save</button>
+      </form>
+    </section>
+  </section>
+</main>
+<script>
+(function(){
+  const fmtBps=v=>{const b=(v||0)*8;if(b>=1e9)return (b/1e9).toFixed(2)+' Gbps';if(b>=1e6)return (b/1e6).toFixed(2)+' Mbps';if(b>=1e3)return (b/1e3).toFixed(1)+' Kbps';return Math.round(b)+' bps'};
+  const fmtBytes=v=>{v=v||0;if(v>=1e9)return (v/1e9).toFixed(2)+' GB';if(v>=1e6)return (v/1e6).toFixed(1)+' MB';if(v>=1e3)return (v/1e3).toFixed(1)+' KB';return Math.round(v)+' B'};
+  const fmtPct=v=>(v==null?'--':v.toFixed(1)+'%');
+  const fmtTime=ts=>new Date(ts*1000).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+  const fmtClock=ts=>new Date(ts*1000).toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'});
+  const SVC_LABEL={movie:'Movie',tv:'TV',music:'Music',dvr:'DVR',live_tv:'Live TV'};
+  const svcHex={movie:'#3987e5',tv:'#d95926',music:'#199e70',dvr:'#c98500',live_tv:'#d55181'};
+
+  function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+
+  document.querySelectorAll('.tabbtn').forEach(btn=>btn.addEventListener('click',()=>{
+    document.querySelectorAll('.tabbtn').forEach(b=>b.classList.toggle('active',b===btn));
+    document.querySelectorAll('.tabpanel').forEach(p=>p.classList.toggle('active',p.id==='tab-'+btn.dataset.tab));
+    if(btn.dataset.tab==='history') loadHistory();
+  }));
+
+  // ---- Active view ----
+  function renderActive(d){
+    const stats=document.getElementById('activeStats');
+    stats.innerHTML=[
+      ['Total Bandwidth',fmtBps(d.total_bps),(d.concurrent_streams||0)+' active stream(s)'],
+      ['CineVault CPU',fmtPct(d.cpu_cinevault_pct),'process tree'],
+      ['System CPU',fmtPct(d.cpu_system_pct),'whole host'],
+      ['Memory',fmtBytes((d.mem_used_mb||0)*1e6)+' / '+fmtBytes((d.mem_total_mb||0)*1e6),'used / total'],
+    ].map(([label,value,sub])=>`<div class="stat-tile"><div class="label">${esc(label)}</div><div class="value">${esc(value)}</div><div class="sub">${esc(sub)}</div></div>`).join('');
+
+    const cards=document.getElementById('sessionCards');
+    if(!d.sessions||!d.sessions.length){cards.innerHTML='<div class="empty">No active playback right now.</div>';}
+    else{
+      cards.innerHTML=d.sessions.map(s=>{
+        const dur=Math.max(0,Math.round(s.duration_seconds||0));
+        const h=Math.floor(dur/3600), m=Math.floor((dur%3600)/60), sec=dur%60;
+        const durLabel=h?`${h}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`:`${m}:${String(sec).padStart(2,'0')}`;
+        const cpu=s.cpu_estimated_pct==null?'':`<div class="row"><span>Transcoder CPU (est.${s.cpu_shared?', shared':''})</span><strong>${fmtPct(s.cpu_estimated_pct)}</strong></div>`;
+        return `<div class="session-card">
+          <div class="badge svc-${esc(s.service)}">${esc(SVC_LABEL[s.service]||s.service)}</div><span class="badge mode">${esc((s.delivery||'').toUpperCase())}</span>${s.transcoding?'<span class="badge mode">Transcoding</span>':'<span class="badge mode">Direct copy</span>'}
+          <div class="title" style="margin-top:8px">${esc(s.title||'Untitled')}</div>
+          <div class="sub">${esc(s.subtitle||'')}</div>
+          <div class="row"><span>User</span><strong>${esc(s.user||'Unknown')}</strong></div>
+          <div class="row"><span>Bandwidth</span><strong>${fmtBps(s.bps)}</strong></div>
+          <div class="row"><span>Transferred</span><strong>${fmtBytes(s.bytes_total)}</strong></div>
+          <div class="row"><span>Duration</span><strong>${durLabel}</strong></div>
+          ${cpu}
+        </div>`;
+      }).join('');
+    }
+
+    const totals=document.getElementById('perUserTotals');
+    if(!d.per_user_totals||!d.per_user_totals.length){totals.innerHTML='<div class="empty">No active usage right now.</div>';}
+    else{
+      totals.innerHTML=d.per_user_totals.map(u=>`<div class="user-total-row"><span>${esc(u.user||'Unattributed')}</span><span>${fmtBps(u.bps)}</span><span>${u.streams} stream(s)</span></div>`).join('');
+    }
+  }
+
+  let activeTimer=null;
+  function pollActive(){
+    fetch('/api/admin/usage/active',{cache:'no-store'}).then(r=>r.json()).then(renderActive).catch(()=>{});
+  }
+  function startActivePolling(){ if(activeTimer) return; pollActive(); activeTimer=setInterval(pollActive,3000); }
+  function stopActivePolling(){ if(activeTimer){clearInterval(activeTimer);activeTimer=null;} }
+  document.addEventListener('visibilitychange',()=>{ if(document.hidden) stopActivePolling(); else if(document.querySelector('.tabbtn[data-tab="active"]').classList.contains('active')) startActivePolling(); });
+  startActivePolling();
+
+  // ---- Historical view ----
+  let currentRange='24h', customStartTs=null, customEndTs=null;
+  const rangeGroup=document.getElementById('rangeGroup');
+  const customRange=document.getElementById('customRange');
+  rangeGroup.addEventListener('click',e=>{
+    const btn=e.target.closest('button'); if(!btn) return;
+    rangeGroup.querySelectorAll('button').forEach(b=>b.classList.toggle('active',b===btn));
+    currentRange=btn.dataset.range;
+    customRange.hidden=currentRange!=='custom';
+    if(currentRange!=='custom') loadHistory();
+  });
+  document.getElementById('applyCustom').addEventListener('click',()=>{
+    const s=document.getElementById('customStart').value, en=document.getElementById('customEnd').value;
+    if(!s||!en) return;
+    customStartTs=new Date(s).getTime()/1000; customEndTs=new Date(en).getTime()/1000;
+    loadHistory();
+  });
+  ['filterUser','filterService','filterDelivery'].forEach(id=>document.getElementById(id).addEventListener('change',loadHistory));
+
+  fetch('/api/admin/usage/users',{cache:'no-store'}).then(r=>r.json()).then(d=>{
+    const sel=document.getElementById('filterUser');
+    (d.users||[]).forEach(u=>{const opt=document.createElement('option');opt.value=u.id;opt.textContent=u.name;sel.appendChild(opt);});
+  }).catch(()=>{});
+
+  function historyLoaded(){
+    return document.querySelector('.tabbtn[data-tab="history"]').classList.contains('active');
+  }
+
+  function loadHistory(){
+    if(!historyLoaded()) return;
+    const params=new URLSearchParams();
+    params.set('range',currentRange);
+    if(currentRange==='custom'){
+      if(!customStartTs||!customEndTs) return;
+      params.set('start',customStartTs); params.set('end',customEndTs);
+    }
+    const userId=document.getElementById('filterUser').value; if(userId) params.set('user_id',userId);
+    const service=document.getElementById('filterService').value; if(service) params.set('service',service);
+    const delivery=document.getElementById('filterDelivery').value; if(delivery) params.set('delivery',delivery);
+    fetch('/api/admin/usage/history?'+params.toString(),{cache:'no-store'}).then(r=>r.json()).then(d=>{
+      if(!d.ok) return;
+      renderHistoryStats(d);
+      renderBandwidthChart(d);
+      renderCpuChart(d);
+      renderConcurrentChart(d);
+      renderRankingChart(d);
+    }).catch(()=>{});
+  }
+
+  function renderHistoryStats(d){
+    const el=document.getElementById('historyStats');
+    const spanH=Math.max(0,(d.end-d.start)/3600);
+    el.innerHTML=[
+      ['Total Transferred',fmtBytes(d.totals.total_bytes),spanH.toFixed(1)+' hour span'],
+      ['Peak Throughput',fmtBps(d.totals.peak_bps),'highest 1-tick rate observed'],
+      ['Average Throughput',fmtBps(d.totals.avg_bps),'total / span'],
+      ['Resolution',Math.round(d.resolution_seconds/60)+' min buckets',d.system_series.length+' point(s)'],
+    ].map(([label,value,sub])=>`<div class="stat-tile"><div class="label">${esc(label)}</div><div class="value">${esc(value)}</div><div class="sub">${esc(sub)}</div></div>`).join('');
+  }
+
+  // Minimal dependency-free SVG line chart with hover tooltip.
+  function lineChart(svg, tooltipEl, series, opts){
+    opts=opts||{};
+    const W=800,H=svg.classList.contains('tall')?260:200,padL=44,padR=12,padT=10,padB=22;
+    svg.setAttribute('viewBox',`0 0 ${W} ${H}`);
+    svg.innerHTML='';
+    const allPoints=series.flatMap(s=>s.points);
+    if(!allPoints.length){
+      svg.innerHTML=`<text x="${W/2}" y="${H/2}" fill="var(--muted)" font-size="13" text-anchor="middle">No data for this range</text>`;
+      tooltipEl.style.display='none';
+      return;
+    }
+    const xs=allPoints.map(p=>p[0]), ys=allPoints.map(p=>p[1]);
+    const xMin=Math.min(...xs), xMax=Math.max(...xs);
+    const yMax=Math.max(1e-9,opts.yMax||Math.max(...ys));
+    const yMin=opts.yMin!==undefined?opts.yMin:0;
+    const xScale=x=>xMax>xMin?padL+((x-xMin)/(xMax-xMin))*(W-padL-padR):padL;
+    const yScale=y=>H-padB-((y-yMin)/(yMax-yMin||1))*(H-padT-padB);
+    // gridlines
+    let gridHtml='';
+    for(let i=0;i<=3;i++){const gy=padT+(H-padT-padB)*i/3;gridHtml+=`<line x1="${padL}" y1="${gy}" x2="${W-padR}" y2="${gy}" stroke="rgba(255,255,255,.08)" stroke-width="1"/>`;}
+    const yLabelFmt=opts.yFormat||(v=>Math.round(v));
+    let yLabels='';let lastYLabel=null;
+    for(let i=0;i<=2;i++){const val=yMax-(yMax-yMin)*i/2;const gy=padT+(H-padT-padB)*i/2;const lbl=yLabelFmt(val);if(lbl===lastYLabel)continue;lastYLabel=lbl;yLabels+=`<text x="4" y="${gy+4}" fill="var(--muted)" font-size="10">${esc(lbl)}</text>`;}
+    let paths='';
+    series.forEach(s=>{
+      if(!s.points.length) return;
+      const d=s.points.map((p,i)=>`${i===0?'M':'L'}${xScale(p[0]).toFixed(1)},${yScale(p[1]).toFixed(1)}`).join(' ');
+      paths+=`<path d="${d}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`;
+    });
+    const xLabelStart=`<text x="${padL}" y="${H-6}" fill="var(--muted)" font-size="10">${esc(fmtClock(xMin))}</text>`;
+    const xLabelEnd=`<text x="${W-padR}" y="${H-6}" fill="var(--muted)" font-size="10" text-anchor="end">${esc(fmtClock(xMax))}</text>`;
+    svg.innerHTML=gridHtml+yLabels+paths+xLabelStart+xLabelEnd+`<rect id="hoverCap" x="${padL}" y="${padT}" width="${W-padL-padR}" height="${H-padT-padB}" fill="transparent"/>`+`<line id="hoverLine" x1="0" y1="${padT}" x2="0" y2="${H-padB}" stroke="rgba(255,255,255,.35)" stroke-width="1" style="display:none"/>`;
+    const cap=svg.querySelector('#hoverCap');
+    const hoverLine=svg.querySelector('#hoverLine');
+    function pointerToData(evt){
+      const rect=svg.getBoundingClientRect();
+      const clientX=(evt.touches&&evt.touches[0]?evt.touches[0].clientX:evt.clientX);
+      const px=(clientX-rect.left)/rect.width*W;
+      const frac=Math.min(1,Math.max(0,(px-padL)/(W-padL-padR)));
+      const targetX=xMin+frac*(xMax-xMin);
+      let nearest=allPoints[0],best=Infinity;
+      series[0]&&series[0].points.forEach(p=>{const dist=Math.abs(p[0]-targetX);if(dist<best){best=dist;nearest=p;}});
+      return {x:nearest?nearest[0]:targetX, px:xScale(nearest?nearest[0]:targetX)};
+    }
+    function onMove(evt){
+      const {x,px}=pointerToData(evt);
+      hoverLine.style.display='block'; hoverLine.setAttribute('x1',px); hoverLine.setAttribute('x2',px);
+      let rows=series.map(s=>{
+        const pt=s.points.reduce((a,b)=>Math.abs(b[0]-x)<Math.abs(a[0]-x)?b:a,s.points[0]);
+        return pt?`<div><span class="swatch" style="background:${s.color}"></span>${esc(s.label)}: <strong>${esc((opts.tooltipFormat||opts.yFormat||(v=>v))(pt[1]))}</strong></div>`:'';
+      }).join('');
+      tooltipEl.innerHTML=`<div>${esc(fmtTime(x))}</div>${rows}`;
+      tooltipEl.style.display='block';
+      const rect=svg.getBoundingClientRect();
+      tooltipEl.style.left=(px/W*rect.width)+'px';
+      tooltipEl.style.top='6px';
+    }
+    cap.addEventListener('mousemove',onMove);
+    cap.addEventListener('touchstart',onMove,{passive:true});
+    cap.addEventListener('touchmove',onMove,{passive:true});
+    cap.addEventListener('mouseleave',()=>{tooltipEl.style.display='none';hoverLine.style.display='none';});
+    cap.addEventListener('touchend',()=>{tooltipEl.style.display='none';hoverLine.style.display='none';});
+  }
+
+  function renderBandwidthChart(d){
+    const svc={};
+    (d.breakdown_series||[]).forEach(row=>{
+      if(!svc[row.service]) svc[row.service]={};
+      svc[row.service][row.bucket_start]=(svc[row.service][row.bucket_start]||0)+row.bytes_total;
+    });
+    const bucketSpan=d.resolution_seconds||300;
+    const series=Object.keys(svc).map(key=>({
+      key, label:SVC_LABEL[key]||key, color:svcHex[key]||'#888',
+      points:Object.keys(svc[key]).map(Number).sort((a,b)=>a-b).map(bs=>[bs,svc[key][bs]/bucketSpan]),
+    }));
+    lineChart(document.getElementById('chartBandwidth'), document.getElementById('tipBandwidth'), series, {yFormat:fmtBps,tooltipFormat:fmtBps});
+    document.getElementById('legendBandwidth').innerHTML=series.length?series.map(s=>`<span><span class="swatch" style="background:${s.color}"></span>${esc(s.label)}</span>`).join(''):'<span>No breakdown data for this range.</span>';
+  }
+
+  function renderCpuChart(d){
+    const points=(d.system_series||[]);
+    const series=[
+      {key:'system',label:'System CPU',color:'#3987e5',points:points.map(p=>[p.bucket_start,p.cpu_system_pct])},
+      {key:'cinevault',label:'CineVault CPU',color:'#d95926',points:points.map(p=>[p.bucket_start,p.cpu_cinevault_pct])},
+    ];
+    lineChart(document.getElementById('chartCpu'), document.getElementById('tipCpu'), series, {yFormat:v=>v.toFixed(0)+'%',yMax:100,tooltipFormat:v=>v.toFixed(1)+'%'});
+    document.getElementById('legendCpu').innerHTML=series.map(s=>`<span><span class="swatch" style="background:${s.color}"></span>${esc(s.label)}</span>`).join('');
+  }
+
+  function renderConcurrentChart(d){
+    const points=(d.system_series||[]);
+    const series=[{key:'concurrent',label:'Concurrent Streams',color:'#199e70',points:points.map(p=>[p.bucket_start,p.concurrent_streams_max])}];
+    lineChart(document.getElementById('chartConcurrent'), document.getElementById('tipConcurrent'), series, {yFormat:v=>Math.round(v),tooltipFormat:v=>Math.round(v)+' stream(s)'});
+  }
+
+  function renderRankingChart(d){
+    const svg=document.getElementById('chartRanking');
+    const rows=(d.user_ranking||[]).filter(r=>r.bytes_total>0).slice(0,15);
+    const W=800,H=280,padL=140,padR=70,padT=10,rowH=Math.min(30,(H-padT*2)/Math.max(1,rows.length));
+    svg.setAttribute('viewBox',`0 0 ${W} ${H}`);
+    if(!rows.length){svg.innerHTML=`<text x="${W/2}" y="${H/2}" fill="var(--muted)" font-size="13" text-anchor="middle">No usage recorded for this range</text>`;return;}
+    const maxVal=Math.max(...rows.map(r=>r.bytes_total));
+    let html='';
+    rows.forEach((r,i)=>{
+      const y=padT+i*rowH;
+      const w=(r.bytes_total/maxVal)*(W-padL-padR);
+      html+=`<text x="${padL-10}" y="${y+rowH*0.65}" fill="#fff" font-size="12" text-anchor="end">${esc(r.user)}</text>`;
+      html+=`<rect x="${padL}" y="${y+rowH*0.15}" width="${Math.max(2,w)}" height="${rowH*0.7}" rx="4" fill="var(--gold)"/>`;
+      html+=`<text x="${padL+w+8}" y="${y+rowH*0.65}" fill="var(--muted)" font-size="11">${esc(fmtBytes(r.bytes_total))}</text>`;
+    });
+    svg.innerHTML=html;
+  }
+})();
+</script>
+</body>
+</html>"""
+
+
 PLAYER_PAGE = """<!doctype html>
 <html lang="en">
 <head>
@@ -1144,14 +1556,14 @@ PLAYER_PAGE = """<!doctype html>
   <style>
     :root { color-scheme:dark; --bg:#05070b; --text:#f7fbff; --muted:#a8b2bf; --green:#2ee66b; --line:rgba(255,255,255,.16); }
     * { box-sizing:border-box; }
-    body { margin:0; min-height:100vh; background:var(--bg); color:var(--text); font-family:Arial, Helvetica, sans-serif; }
-    .page { min-height:100vh; display:grid; grid-template-rows:auto 1fr; }
-    header { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:14px 18px; border-bottom:1px solid var(--line); background:#0b1017; }
-    .back { color:#fff; text-decoration:none; font-weight:900; }
+    body { margin:0; min-height:100vh; min-height:100dvh; background:var(--bg); color:var(--text); font-family:Arial, Helvetica, sans-serif; }
+    .page { min-height:100vh; min-height:100dvh; display:grid; grid-template-rows:auto 1fr; }
+    header { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:16px; padding:14px 18px; padding-top:calc(14px + env(safe-area-inset-top)); padding-left:calc(18px + env(safe-area-inset-left)); padding-right:calc(18px + env(safe-area-inset-right)); border-bottom:1px solid var(--line); background:#0b1017; }
+    .back { color:#fff; text-decoration:none; font-weight:900; min-height:44px; display:inline-flex; align-items:center; }
     .title { min-width:0; font-weight:900; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .status { color:var(--muted); font-size:13px; white-space:nowrap; }
-    main { display:grid; place-items:center; padding:14px; }
-    video { width:min(100%, 1280px); max-height:calc(100vh - 92px); background:#000; border:1px solid var(--line); border-radius:8px; box-shadow:0 28px 80px rgba(0,0,0,.52); }
+    main { display:grid; place-items:center; padding:14px; padding-bottom:calc(14px + env(safe-area-inset-bottom)); }
+    video { width:min(100%, 1280px); max-height:calc(100vh - 92px); max-height:calc(100dvh - 92px); background:#000; border:1px solid var(--line); border-radius:8px; box-shadow:0 28px 80px rgba(0,0,0,.52); }
     .message { width:min(900px, 100%); margin-top:12px; color:#c9d2df; line-height:1.4; font-size:14px; }
     .message strong { color:var(--green); }
     @media (max-width:640px) {
@@ -1343,7 +1755,7 @@ HOME_PAGE = """<!doctype html>
     .home-search-panel input { width:min(720px,100%); height:44px; border-radius:14px; border:1px solid rgba(88,166,255,.62); background:#20252d; color:#fff; padding:0 16px; font-size:17px; outline:none; box-shadow:0 0 0 3px rgba(47,157,255,.22); }
     .icon { width:36px; height:36px; display:grid; place-items:center; border-radius:999px; color:#fff; text-decoration:none; font-size:22px; background:transparent; border:0; cursor:pointer; }
     .playback-toggle { min-height:34px; min-width:72px; display:inline-flex; align-items:center; justify-content:center; padding:0 12px; border-radius:999px; border:1px solid rgba(255,255,255,.18); background:rgba(255,255,255,.08); color:#fff; font-size:12px; font-weight:900; cursor:pointer; }
-    .playback-toggle.hls { color:#06111c; background:#f5b73f; border-color:#f5b73f; }
+    .playback-toggle.hls { color:#06111c; background:var(--gold); border-color:var(--gold); }
     .cast-button svg { width:23px; height:23px; display:block; }
     .cast-fallback { position:fixed; inset:0; z-index:30; display:none; align-items:end; background:rgba(0,0,0,.62); }
     .cast-fallback.open { display:flex; }
@@ -1470,10 +1882,10 @@ HOME_PAGE = """<!doctype html>
       .cmv-mark { width:.80em; height:.80em; }
       .cmv-media { letter-spacing:-.055em; }
       .top-actions { gap:12px; }
-      .playback-toggle { min-height:30px; min-width:54px; padding:0 8px; font-size:10px; }
+      .playback-toggle { min-height:40px; min-width:58px; padding:0 10px; font-size:11px; }
       .home-search-panel { top:68px; padding:0 24px 12px; }
       .home-search-panel input { height:42px; border-radius:13px; font-size:16px; }
-      .icon { width:32px; }
+      .icon { width:40px; height:40px; }
       .tabs { gap:9px; padding-bottom:18px; }
       .tab { min-height:38px; padding:0 14px; font-size:16px; }
       h2 { font-size:25px; }
@@ -1484,10 +1896,11 @@ HOME_PAGE = """<!doctype html>
       header { flex-wrap:wrap; align-items:center; gap:10px; padding:18px 18px 10px; }
       header .brand { flex:1 1 100%; min-width:0; }
       .top-actions { flex:1 1 100%; width:100%; min-width:0; gap:7px; justify-content:flex-start; }
-      .scan-button,.home-search-button { min-height:34px; padding:0 11px; font-size:12px; flex:0 0 auto; }
+      .scan-button,.home-search-button { min-height:40px; padding:0 12px; font-size:12px; flex:0 0 auto; }
       .playback-toggle { flex:0 0 auto; }
-      .cast-button { margin-left:auto; flex:0 0 32px; }
+      .cast-button { margin-left:auto; flex:0 0 40px; }
       .account-wrap,.top-actions > .avatar { flex:0 0 auto; }
+      .avatar { width:36px; height:36px; font-size:15px; }
       .home-search-panel { top:104px; padding-left:18px; padding-right:18px; }
     }
   </style>
@@ -1501,7 +1914,7 @@ HOME_PAGE = """<!doctype html>
   <div class="scan-progress" id="scanProgress"><div class="scan-progress-row"><span id="scanProgressMessage">Preparing scan</span><strong id="scanProgressPercent">0%</strong></div><div class="scan-progress-track"><div class="scan-progress-fill" id="scanProgressFill"></div></div></div>
   <div class="home-search-panel" id="homeSearchPanel"><input id="homeSearch" type="search" placeholder="Search movies, shows, actors, or genres"></div>
   <main>
-    <nav class="tabs"><a class="tab active" href="/">Home</a><a class="tab" href="/movies">Movies</a><a class="tab" href="/tv">TV Shows</a><a class="tab" href="/music">Music</a><a class="tab" href="/video-lists">My Lists</a><a class="tab" href="/live-tv">Live TV</a><a class="tab" href="/wall">Video Wall</a>{{MODULE_TABS}}</nav>
+    <nav class="tabs"><a class="tab active" href="/">Home</a><a class="tab" href="/movies">Movies</a><a class="tab" href="/tv">TV Shows</a><a class="tab" href="/music">Music</a><a class="tab" href="/video-lists">My Lists</a><a class="tab" href="/live-tv">Live TV</a><a class="tab" href="/vchannels">Virtual Channels</a><a class="tab" href="/wall">Video Wall</a>{{MODULE_TABS}}</nav>
     <section class="section" id="continueSection">
       <div class="section-head"><div><h2>Continue Watching</h2></div></div>
       <div class="rail" id="continueRail"></div>
@@ -1883,8 +2296,8 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
   <style>
     :root { color-scheme:dark; --text:#fff; --muted:#c2c7d1; --gold:#f5b73f; --line:rgba(255,255,255,.13); }
     * { box-sizing:border-box; }
-    body { margin:0; min-height:100vh; background:#000; color:var(--text); font-family:Arial, Helvetica, sans-serif; }
-    .watch-page { min-height:100vh; position:relative; overflow:hidden; padding:22px clamp(20px,4vw,56px) 34px; }
+    body { margin:0; min-height:100vh; min-height:100dvh; background:#000; color:var(--text); font-family:Arial, Helvetica, sans-serif; }
+    .watch-page { min-height:100vh; min-height:100dvh; position:relative; overflow:hidden; padding:22px clamp(20px,4vw,56px) 34px; padding-top:calc(22px + env(safe-area-inset-top)); padding-left:calc(clamp(20px,4vw,56px) + env(safe-area-inset-left)); padding-right:calc(clamp(20px,4vw,56px) + env(safe-area-inset-right)); padding-bottom:calc(34px + env(safe-area-inset-bottom)); }
     .watch-page::before { content:""; position:fixed; inset:-26px; background-image:var(--poster-bg); background-size:cover; background-position:center top; opacity:.66; filter:blur(7px) saturate(1.25); transform:scale(1.08); }
     .watch-page::after { content:""; position:fixed; inset:0; background:linear-gradient(180deg,rgba(0,0,0,.12) 0%,rgba(0,0,0,.38) 28%,rgba(18,34,13,.82) 100%), linear-gradient(90deg,rgba(0,0,0,.88) 0%,rgba(0,0,0,.50) 48%,rgba(0,0,0,.76) 100%); }
     .topbar,.hero,.player-shell { position:relative; z-index:2; }
@@ -1928,12 +2341,12 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
     .download-size-panel.visible { display:block; }
     .download-size-head { display:flex; align-items:baseline; justify-content:space-between; gap:10px; color:#fff; font-size:13px; font-weight:900; }
     .download-size-head span:last-child { color:#f5b73f; }
-    .download-size-panel input[type=range] { width:100%; accent-color:#f5b73f; margin:8px 0 6px; }
+    .download-size-panel input[type=range] { width:100%; accent-color:var(--gold); margin:8px 0 6px; }
     .download-size-meta { display:flex; justify-content:space-between; gap:10px; color:rgba(238,242,247,.78); font-size:11px; font-weight:800; }
     .actions { display:flex; flex-wrap:wrap; justify-content:center; gap:13px; margin:0 0 26px; }
     .video-list-actions { display:flex; justify-content:center; gap:9px; flex-wrap:wrap; margin:12px 0 18px; }
     .video-list-actions a { min-height:42px; padding:0 16px; border:1px solid rgba(255,255,255,.18); border-radius:999px; background:rgba(255,255,255,.12); color:#fff; display:inline-flex; align-items:center; justify-content:center; gap:7px; text-decoration:none; font-size:14px; font-weight:900; }
-    .video-list-actions a:first-child { background:#f5b73f; border-color:#f5b73f; color:#111; }
+    .video-list-actions a:first-child { background:var(--gold); border-color:var(--gold); color:#111; }
     .action { width:84px; color:#e8edf5; text-decoration:none; font-size:12px; line-height:1.25; }
     .action span { width:50px; height:50px; display:grid; place-items:center; margin:0 auto 7px; border-radius:999px; background:rgba(255,255,255,.12); border:1px solid rgba(255,255,255,.12); font-size:21px; }
     .action.download span, .action.mark-watched span { background:rgba(255,255,255,.10); border:3px solid rgba(255,255,255,.92); color:#fff; font-size:25px; }
@@ -1960,23 +2373,25 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
     .cast-list li { border:1px solid rgba(255,255,255,.16); background:rgba(255,255,255,.11); border-radius:999px; padding:8px 11px; color:#eef5ff; font-size:14px; }
     .file-grid { display:grid; grid-template-columns:120px minmax(0,1fr); gap:12px 22px; max-width:520px; width:100%; margin:0 auto; text-align:left; font-size:17px; }
     .label { color:rgba(236,243,255,.72); }
-    .player-shell { display:none; min-height:100vh; grid-template-rows:auto 1fr; }
+    .player-shell { display:none; min-height:100vh; min-height:100dvh; grid-template-rows:auto 1fr; }
     .player-shell.open { display:grid; }
-    .player-shell.fullscreen-mode { position:fixed; inset:0; z-index:20; min-height:100vh; background:#000; grid-template-rows:1fr; }
-    .player-shell.fullscreen-mode .player-head { position:absolute; left:0; right:0; top:0; z-index:3; padding:10px 14px; background:linear-gradient(180deg,rgba(0,0,0,.72),rgba(0,0,0,0)); opacity:0; transition:opacity .18s ease; }
+    .player-shell.fullscreen-mode { position:fixed; inset:0; z-index:20; min-height:100vh; min-height:100dvh; background:#000; grid-template-rows:1fr; }
+    .player-shell.fullscreen-mode .player-head { position:absolute; left:0; right:0; top:0; z-index:3; padding:10px 14px; padding-top:calc(10px + env(safe-area-inset-top)); padding-left:calc(14px + env(safe-area-inset-left)); padding-right:calc(14px + env(safe-area-inset-right)); background:linear-gradient(180deg,rgba(0,0,0,.72),rgba(0,0,0,0)); opacity:0; transition:opacity .18s ease; }
     .player-shell.fullscreen-mode:hover .player-head,
     .player-shell.fullscreen-mode .player-head:focus-within { opacity:1; }
-    .player-shell.fullscreen-mode .video-wrap { min-height:100vh; }
-    .player-shell.fullscreen-mode video { width:100vw; height:100vh; max-width:none; max-height:none; border-radius:0; object-fit:contain; }
-    .player-head { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:10px 0; }
+    .player-shell.fullscreen-mode .video-wrap { min-height:100vh; min-height:100dvh; }
+    .player-shell.fullscreen-mode video { width:100vw; height:100vh; height:100dvh; max-width:none; max-height:none; border-radius:0; object-fit:contain; }
+    .guide-drawer{display:none;position:fixed;inset:0;z-index:30;background:#05070b}.guide-drawer.open{display:block}.guide-drawer iframe{width:100%;height:100%;border:0;background:#05070b}.guide-drawer-close{position:fixed;right:18px;top:18px;z-index:33;border-radius:999px;padding:12px 18px;background:#111a27;color:#fff;border:2px solid var(--gold);font-weight:850}
+    .player-shell.guide-open .video-wrap{position:fixed;left:18px;top:18px;width:min(38vw,560px);height:auto;aspect-ratio:16/9;min-height:0!important;z-index:32;border:3px solid var(--gold);border-radius:12px;overflow:hidden;box-shadow:0 15px 45px #000;background:#000;cursor:pointer}.player-shell.guide-open .video-wrap video{width:100%;height:100%;max-width:none;max-height:none;object-fit:contain}.player-shell.guide-open .player-overlay,.player-shell.guide-open .up-next{display:none!important}
+    .player-head { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:16px; padding:10px 0; }
     .player-title { min-width:0; }
     .player-title strong { display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:20px; }
     .player-title span { color:var(--muted); font-size:14px; }
-    .episode-nav { display:flex; gap:10px; }
-    .episode-nav a { min-height:40px; display:inline-flex; align-items:center; padding:0 13px; border-radius:999px; background:rgba(255,255,255,.12); color:#fff; text-decoration:none; font-weight:800; border:1px solid var(--line); }
+    .episode-nav { display:flex; flex-wrap:wrap; gap:10px; }
+    .episode-nav a { min-height:44px; display:inline-flex; align-items:center; padding:0 13px; border-radius:999px; background:rgba(255,255,255,.12); color:#fff; text-decoration:none; font-weight:800; border:1px solid var(--line); }
     .video-wrap { display:grid; place-items:center; position:relative; overflow:hidden; background:#000; }
-    video { width:100%; max-width:1280px; max-height:calc(100vh - 86px); background:#000; border-radius:6px; }
-    .player-overlay { position:absolute; inset:0; display:grid; grid-template-rows:auto 1fr auto; padding:22px clamp(18px,4vw,42px) 26px; color:#fff; opacity:0; pointer-events:none; transition:opacity .18s ease; background:linear-gradient(180deg,rgba(0,0,0,.74),rgba(0,0,0,.18) 26%,rgba(0,0,0,.12) 58%,rgba(0,0,0,.78)); }
+    video { width:100%; max-width:1280px; max-height:calc(100vh - 86px); max-height:calc(100dvh - 86px); background:#000; border-radius:6px; }
+    .player-overlay { position:absolute; inset:0; display:grid; grid-template-rows:auto 1fr auto; padding:22px clamp(18px,4vw,42px) 26px; padding-top:calc(22px + env(safe-area-inset-top)); padding-left:calc(clamp(18px,4vw,42px) + env(safe-area-inset-left)); padding-right:calc(clamp(18px,4vw,42px) + env(safe-area-inset-right)); padding-bottom:calc(26px + env(safe-area-inset-bottom)); color:#fff; opacity:0; pointer-events:none; transition:opacity .18s ease; background:linear-gradient(180deg,rgba(0,0,0,.74),rgba(0,0,0,.18) 26%,rgba(0,0,0,.12) 58%,rgba(0,0,0,.78)); }
     .player-overlay.visible { opacity:1; pointer-events:auto; }
     .overlay-top { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; }
     .overlay-title strong { display:block; max-width:min(70vw,780px); font-size:clamp(19px,2.8vw,30px); line-height:1.1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-shadow:0 3px 14px rgba(0,0,0,.78); }
@@ -2037,6 +2452,7 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
       <div class="resume-row"><button class="resume" id="resumeButton">Play</button><button class="restart" id="restartButton" title="Start from beginning" aria-label="Restart from beginning"><span class="restart-icon" aria-hidden="true">&#8634;</span>Restart</button></div>
       <div class="mode-switch"><a class="{{DIRECT_MODE_CLASS}}" href="{{DIRECT_MODE_HREF}}">Direct</a><a class="{{HLS_MODE_CLASS}}" href="{{HLS_MODE_HREF}}">HLS</a></div>
       {{CAPTION_CONTROL}}
+      {{AUDIO_CONTROL}}
       <div class="video-list-actions"><a href="#queue" data-video-queue="1">Add to Queue</a><a href="#playlist" data-video-playlist="1">Add to Playlist</a><a href="/video-lists">View My Lists</a></div>
       <div class="download-size-panel{{DOWNLOAD_SIZE_OPEN_CLASS}}" id="downloadSizePanel" data-source-bytes="{{SOURCE_BYTES}}" data-default-ratio="{{DOWNLOAD_DEFAULT_RATIO}}">
         <div class="download-size-head"><span>HLS compressed download size</span><span id="downloadSizeValue">{{DOWNLOAD_DEFAULT_LABEL}}</span></div>
@@ -2053,7 +2469,7 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
       <div class="player-head">
         <a class="circle" href="{{BACK}}" aria-label="Back">&lsaquo;</a>
         <div class="player-title"><strong>{{EPISODE_OR_TITLE}}</strong><span>{{SUBTITLE}}</span></div>
-        <div class="episode-nav">{{PLAYER_NAV}}</div>
+        <div class="episode-nav"><button type="button" id="guideWhilePlaying">Guide</button>{{PLAYER_NAV}}</div>
       </div>
       <div class="video-wrap">
         <video id="player" controls playsinline preload="metadata"{{VIDEO_AUTOPLAY}} data-source="{{SOURCE}}">{{SUBTITLE_TRACKS}}</video>
@@ -2082,6 +2498,7 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
           </div>
         </div>
       </div>
+      <div class="guide-drawer" id="guideDrawer"><button type="button" class="guide-drawer-close" id="closeGuideDrawer">Return to Player</button><iframe id="guideFrame" title="CineVault Guide" data-src="{{GUIDE_URL}}"></iframe></div>
     </section>
   </main>
   <script src="/assets/hls.min.js"></script>
@@ -2139,8 +2556,41 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
       video.addEventListener("loadedmetadata", () => applyCaptionSelection(captionSelect.value));
       setTimeout(() => applyCaptionSelection(captionSelect.value), 0);
     }
+    const audioSelect = document.getElementById("audioSelect");
+    if (audioSelect) {
+      // Only rendered when the file has 2+ embedded audio streams (see
+      // audio_markup() server-side). Direct playback has no cross-browser
+      // way to steer HTMLMediaElement.audioTracks toward a specific
+      // embedded stream, so any selection here reloads through HLS with an
+      // explicit ffmpeg -map for that track - see ensure_hls_stream()'s
+      // audio_index parameter.
+      audioSelect.addEventListener("change", () => {
+        const url = new URL(location.href);
+        url.searchParams.set("audio", audioSelect.value);
+        url.searchParams.set("mode", "hls");
+        location.href = url.pathname + url.search;
+      });
+    }
     const hero = document.getElementById("hero");
     const playerShell = document.getElementById("playerShell");
+    const guideDrawer = document.getElementById("guideDrawer");
+    const guideFrame = document.getElementById("guideFrame");
+    function openGuideWhilePlaying(){if(!guideDrawer)return;if(!guideFrame.src)guideFrame.src=guideFrame.dataset.src;guideDrawer.classList.add("open");playerShell.classList.add("guide-open")}
+    function closeGuideWhilePlaying(){if(guideDrawer)guideDrawer.classList.remove("open");playerShell.classList.remove("guide-open")}
+    document.getElementById("guideWhilePlaying")?.addEventListener("click",openGuideWhilePlaying);
+    document.getElementById("closeGuideDrawer")?.addEventListener("click",closeGuideWhilePlaying);
+    document.querySelector(".video-wrap")?.addEventListener("click",()=>{if(playerShell.classList.contains("guide-open"))closeGuideWhilePlaying()});
+    window.addEventListener("message", event => {
+      if (event.origin !== location.origin || !event.data || event.data.type !== "cinevault-guide-navigate") return;
+      const href = String(event.data.href || "");
+      if (!href.startsWith(location.origin + "/")) return;
+      video.pause();
+      if (hlsController) { try { hlsController.destroy(); } catch (_) {} hlsController = null; }
+      video.removeAttribute("src");
+      video.load();
+      closeGuideWhilePlaying();
+      location.href = href;
+    });
     const resumeButton = document.getElementById("resumeButton");
     const key = "cinevaultContinue";
     const mediaSource = video.dataset.source;
@@ -2852,6 +3302,244 @@ def movie_media_key(item) -> str:
     return "movie-path:" + hashlib.sha256(relative.encode("utf-8")).hexdigest()[:24]
 
 
+def episode_media_key(episode) -> str:
+    """Return a scan-order-independent identity for a TV episode file."""
+    relative = str(getattr(episode, "rel_path", "") or getattr(episode, "path", "")).replace("\\", "/").casefold()
+    return "tv-path:" + hashlib.sha256(relative.encode("utf-8")).hexdigest()[:24]
+
+
+def episode_for_media_key(key: str):
+    if not str(key).startswith("tv-path:"):
+        return None
+    return next((episode for episode in tv_app.tv_index.episode_by_id.values() if episode_media_key(episode) == key), None)
+
+
+def recent_added_timestamps() -> dict[str, float]:
+    """Persist first-seen times so rescans/transcodes cannot reorder Recent items."""
+    with RECENT_ADDED_LOCK:
+        try:
+            ledger = json.loads(RECENT_ADDED_LEDGER.read_text(encoding="utf-8"))
+            if not isinstance(ledger, dict):
+                ledger = {}
+        except Exception:
+            ledger = {}
+        changed = False
+        for item in movie_app.movie_index.items:
+            key = movie_media_key(item)
+            if key not in ledger:
+                ledger[key] = float(getattr(item, "modified", 0) or time.time())
+                changed = True
+        for episode in tv_app.tv_index.episode_by_id.values():
+            key = episode_media_key(episode)
+            if key not in ledger:
+                ledger[key] = float(getattr(episode, "modified", 0) or time.time())
+                changed = True
+        if changed:
+            RECENT_ADDED_LEDGER.parent.mkdir(parents=True, exist_ok=True)
+            temporary = RECENT_ADDED_LEDGER.with_suffix(RECENT_ADDED_LEDGER.suffix + ".tmp")
+            temporary.write_text(json.dumps(ledger, sort_keys=True), encoding="utf-8")
+            temporary.replace(RECENT_ADDED_LEDGER)
+        return {str(key): float(value) for key, value in ledger.items()}
+
+
+def recent_movies_payload(limit: int = 20) -> list[dict]:
+    """True recently-added movies, newest first, using the scan-order-independent ledger."""
+    added_times = recent_added_timestamps()
+    items = sorted(
+        (item for item in movie_app.movie_index.items),
+        key=lambda item: added_times.get(movie_media_key(item), 0),
+        reverse=True,
+    )[:max(1, int(limit))]
+    out = []
+    for item in items:
+        metadata = movie_app.metadata_for(item)
+        out.append({
+            "id": item.id,
+            "title": metadata.get("title") or item.title,
+            "year": metadata.get("year") or "",
+            "poster": movie_app.poster_url_for(item),
+            "size_label": movie_app.human_size(item.size),
+            "added_at": added_times.get(movie_media_key(item), 0),
+            "href": f"/movie/{item.id}",
+            "mediaKey": movie_media_key(item),
+        })
+    return out
+
+
+def all_movies_payload() -> list[dict]:
+    """Full movie catalog for the Samsung TV Movies browse view, alphabetical and with
+    the same scan-order-independent media_key the web/mobile clients use, so watch
+    progress recorded from the TV stays on the same Continue Watching row everywhere."""
+    out = []
+    for item in movie_app.movie_index.items:
+        metadata = movie_app.metadata_for(item)
+        out.append({
+            "id": item.id,
+            "title": metadata.get("title") or item.title,
+            "year": metadata.get("year") or "",
+            "poster": movie_app.poster_url_for(item),
+            "size_label": movie_app.human_size(item.size),
+            "mediaKey": movie_media_key(item),
+        })
+    out.sort(key=lambda entry: (entry["title"] or "").casefold())
+    return out
+
+
+def all_shows_payload() -> list[dict]:
+    """Full TV show catalog for the Samsung TV Shows browse view, alphabetical."""
+    out = []
+    for show in tv_app.tv_index.shows:
+        metadata = tv_app.metadata_for(show)
+        out.append({
+            "id": show.id,
+            "title": metadata.get("title") or show.title,
+            "year": metadata.get("year") or "",
+            "poster": tv_app.poster_url_for(show),
+            "episode_count": show.count,
+            "size_label": tv_app.human_size(show.size),
+        })
+    out.sort(key=lambda entry: (entry["title"] or "").casefold())
+    return out
+
+
+def recent_shows_payload(limit: int = 20) -> list[dict]:
+    """True recently-added TV shows, newest first, by newest episode addition."""
+    added_times = recent_added_timestamps()
+
+    def show_added_at(show) -> float:
+        return max(
+            (added_times.get(episode_media_key(episode), 0)
+             for season in show.seasons.values() for episode in season.episodes),
+            default=0,
+        )
+
+    shows = sorted(
+        (show for show in tv_app.tv_index.shows if show.count),
+        key=show_added_at,
+        reverse=True,
+    )[:max(1, int(limit))]
+    out = []
+    for show in shows:
+        metadata = tv_app.metadata_for(show)
+        out.append({
+            "id": show.id,
+            "title": metadata.get("title") or show.title,
+            "year": metadata.get("year") or "",
+            "poster": tv_app.poster_url_for(show),
+            "episode_count": show.count,
+            "size_label": tv_app.human_size(show.size),
+            "added_at": show_added_at(show),
+            "href": f"/tv/show/{show.id}",
+        })
+    return out
+
+
+def continue_watching_items(user) -> list[dict]:
+    """Shared Continue Watching query used by both the web API and the TV home rail."""
+    conn = db_connect()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM user_media_state
+            WHERE user_id=? AND watched=0 AND (
+              (duration_seconds>0 AND position_seconds>=10 AND position_seconds<duration_seconds*0.92)
+              OR (media_type='tv' AND duration_seconds=0 AND position_seconds=0)
+            )
+            ORDER BY updated_at DESC
+            LIMIT 30
+            """,
+            (int(user["id"]),),
+        ).fetchall()
+        items = []
+        for row in rows:
+            card = continue_card_item(row)
+            if not card:
+                continue
+            movie_card_changed = (
+                row["media_type"] == "movie"
+                and card.get("key", "").startswith("movie-path:")
+                and (
+                    row["media_key"] != card["key"]
+                    or int(row["media_id"] or 0) != int(card.get("mediaId") or 0)
+                    or str(row["title"] or "") != str(card.get("title") or "")
+                    or str(row["subtitle"] or "") != str(card.get("subtitle") or "")
+                    or str(row["poster"] or "") != str(card.get("poster") or "")
+                    or str(row["href"] or "") != str(card.get("href") or "")
+                    or str(row["detail_href"] or "") != str(card.get("detailHref") or "")
+                )
+            )
+            if movie_card_changed:
+                conn.execute(
+                    """UPDATE user_media_state SET media_key=?,media_id=?,title=?,subtitle=?,poster=?,href=?,detail_href=?
+                       WHERE user_id=? AND media_key=?""",
+                    (card["key"], int(card.get("mediaId") or 0), card["title"], card["subtitle"], card["poster"],
+                     card["href"], card["detailHref"], int(user["id"]), row["media_key"]),
+                )
+            items.append(card)
+        conn.commit()
+        return items
+    finally:
+        conn.close()
+
+
+def tv_title_norm(value: str) -> str:
+    """Normalize a title for fuzzy guide<->library matching (mirrors epg_extend's approach)."""
+    value = re.sub(r"\(.*?\)", " ", str(value or ""))
+    value = re.sub(r"[^a-z0-9 ]", " ", value.lower())
+    value = re.sub(r"\b(the|a|an)\b", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def library_match_for_title(title: str) -> dict | None:
+    """Best-effort lookup: does a live-guide program title exist in the local library?
+
+    Used for the Samsung TV guide's "Play from My Library" action. Cheap exact/substring
+    pass first; only falls back to fuzzy matching (difflib) when nothing obvious matched,
+    since this runs on-demand per selected guide program rather than across the whole guide.
+    """
+    norm = tv_title_norm(title)
+    if len(norm) < 3:
+        return None
+    best, best_ratio = None, 0.0
+    for item in movie_app.movie_index.items:
+        metadata = movie_app.metadata_for(item)
+        candidate = tv_title_norm(metadata.get("title") or item.title)
+        if not candidate:
+            continue
+        if candidate == norm:
+            return {
+                "type": "movie", "id": item.id, "title": metadata.get("title") or item.title,
+                "poster": movie_app.poster_url_for(item), "href": f"/movie/{item.id}",
+                "mediaKey": movie_media_key(item),
+            }
+        if norm in candidate or candidate in norm:
+            ratio = difflib.SequenceMatcher(None, norm, candidate).ratio()
+            if ratio > best_ratio:
+                best_ratio, best = ratio, {
+                    "type": "movie", "id": item.id, "title": metadata.get("title") or item.title,
+                    "poster": movie_app.poster_url_for(item), "href": f"/movie/{item.id}",
+                    "mediaKey": movie_media_key(item),
+                }
+    for show in tv_app.tv_index.shows:
+        metadata = tv_app.metadata_for(show)
+        candidate = tv_title_norm(metadata.get("title") or show.title)
+        if not candidate:
+            continue
+        if candidate == norm:
+            return {
+                "type": "tv", "id": show.id, "title": metadata.get("title") or show.title,
+                "poster": tv_app.poster_url_for(show), "href": f"/tv/show/{show.id}",
+            }
+        if norm in candidate or candidate in norm:
+            ratio = difflib.SequenceMatcher(None, norm, candidate).ratio()
+            if ratio > best_ratio:
+                best_ratio, best = ratio, {
+                    "type": "tv", "id": show.id, "title": metadata.get("title") or show.title,
+                    "poster": tv_app.poster_url_for(show), "href": f"/tv/show/{show.id}",
+                }
+    return best if best_ratio >= 0.6 else None
+
+
 def movie_for_media_key(key: str):
     if not str(key).startswith("movie-path:"):
         return None
@@ -3252,7 +3940,7 @@ SEARCH_PAGE = """<!doctype html>
 <style>
 :root { color-scheme:dark; --bg:#08090c; --panel:#11151d; --line:rgba(255,255,255,.12); --muted:#aeb7c5; --gold:#f5b73f; }
 * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:#fff; font-family:Inter,system-ui,Segoe UI,sans-serif; }
-header { position:sticky; top:0; z-index:3; display:flex; align-items:center; gap:14px; padding:18px clamp(18px,4vw,42px); background:rgba(8,9,12,.92); border-bottom:1px solid var(--line); backdrop-filter:blur(14px); }
+header { position:sticky; top:0; z-index:3; display:flex; flex-wrap:wrap; align-items:center; row-gap:10px; gap:14px; padding:18px clamp(18px,4vw,42px); background:rgba(8,9,12,.92); border-bottom:1px solid var(--line); backdrop-filter:blur(14px); }
 .brand { font-size:clamp(24px,4vw,44px); font-weight:950; letter-spacing:0; }
 .cmv-logo { display:inline-flex; align-items:center; gap:.30em; color:#fff; text-decoration:none; line-height:.88; white-space:nowrap; }
 .cmv-left { display:inline-flex; gap:0; align-items:center; }
@@ -3260,16 +3948,18 @@ header { position:sticky; top:0; z-index:3; display:flex; align-items:center; ga
 .cmv-divider { width:.052em; height:1.12em; background:rgba(255,255,255,.66); }
 .cmv-vault { color:var(--gold); font-size:.95em; font-weight:950; letter-spacing:.02em; text-transform:uppercase; }
 .cmv-mark { width:1.08em; height:1.08em; color:var(--gold); flex:0 0 auto; }
-a { color:#fff; text-decoration:none; } .pill { border:1px solid var(--line); border-radius:999px; padding:11px 18px; background:#1a1f29; font-weight:850; }
-main { padding:22px clamp(18px,4vw,42px) 80px; }
-.search-row { display:flex; gap:12px; margin:10px 0 24px; max-width:980px; }
-input { flex:1; min-height:48px; border-radius:15px; border:1px solid #344155; background:#151b25; color:#fff; padding:0 16px; font-size:18px; }
+a { color:#fff; text-decoration:none; } .pill { border:1px solid var(--line); border-radius:999px; padding:11px 18px; background:#1a1f29; font-weight:850; min-height:44px; display:inline-flex; align-items:center; }
+main { padding:22px clamp(18px,4vw,42px) 80px; max-width:100vw; }
+.search-row { display:flex; flex-wrap:wrap; gap:12px; margin:10px 0 24px; max-width:980px; }
+input { flex:1; min-width:0; min-height:48px; border-radius:15px; border:1px solid #344155; background:#151b25; color:#fff; padding:0 16px; font-size:18px; }
 button { min-height:48px; border:0; border-radius:999px; padding:0 22px; font-weight:900; cursor:pointer; background:var(--gold); color:#111; }
 .muted { color:var(--muted); } .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(145px, 1fr)); gap:24px 18px; }
-.card { min-width:0; } .poster { aspect-ratio:2/3; border-radius:8px; overflow:hidden; background:#101722; border:1px solid rgba(255,255,255,.1); display:flex; align-items:center; justify-content:center; color:#9aa4b2; font-weight:800; }
+.card { min-width:0; } .poster { position:relative; aspect-ratio:2/3; border-radius:8px; overflow:hidden; background:#101722; border:1px solid rgba(255,255,255,.1); display:flex; align-items:center; justify-content:center; color:#9aa4b2; font-weight:800; }
 .poster img { width:100%; height:100%; object-fit:cover; } .card-title { margin-top:10px; font-weight:900; line-height:1.15; } .card-meta { margin-top:4px; color:var(--muted); font-size:14px; }
+.watched-badge { position:absolute; left:8px; top:8px; z-index:2; border-radius:999px; padding:3px 7px; background:rgba(48,209,88,.92); color:#031007; font-size:10px; font-weight:950; text-transform:uppercase; letter-spacing:.02em; }
+.card.watched .poster { outline:3px solid #30d158; outline-offset:2px; }
 @media (min-width:900px) { .grid { grid-template-columns:repeat(auto-fill, minmax(126px, 126px)); } }
-@media (max-width:700px) { .cmv-mark { width:.80em; height:.80em; } .cmv-media { letter-spacing:-.055em; } }
+@media (max-width:700px) { .cmv-mark { width:.80em; height:.80em; } .cmv-media { letter-spacing:-.055em; } .pill { padding:8px 13px; font-size:13px; min-height:40px; } }
 </style></head><body>
 <header><a class="brand cmv-logo" href="/"><span class="cmv-left"><span class="cmv-cine">Cine</span><span class="cmv-media">Media</span></span><span class="cmv-divider"></span><span class="cmv-vault">Vault</span><svg class="cmv-mark" viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="32" r="26" fill="none" stroke="currentColor" stroke-width="4"/><circle cx="32" cy="32" r="9" fill="none" stroke="currentColor" stroke-width="4"/><path d="M32 6v17M32 41v17M6 32h17M41 32h17M13.6 13.6l12 12M38.4 38.4l12 12M50.4 13.6l-12 12M25.6 38.4l-12 12" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"/><circle cx="32" cy="32" r="3" fill="currentColor"/><path d="M32 32l5 4M32 32l-5 4M32 32v-6" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg></a><a class="pill" href="/">Home</a><a class="pill" href="/movies">Movies</a><a class="pill" href="/tv">TV Shows</a><a class="pill" href="/music">Music</a></header>
 <main>
@@ -3303,8 +3993,9 @@ def continue_item_for_episode(episode) -> dict:
     episode_meta = tv_episode_display_metadata(metadata, episode)
     subtitle = episode_label(episode) or episode.season
     return {
-        "key": f"tv:{episode.id}",
+        "key": episode_media_key(episode),
         "kind": "tv",
+        "mediaId": int(episode.id),
         "title": episode.show,
         "episodeTitle": episode_meta.get("title") or episode.title,
         "summary": episode_meta.get("summary") or "",
@@ -3327,13 +4018,92 @@ def continue_metadata_for_key(key: str) -> dict | None:
             return continue_item_for_movie(item)
         except Exception:
             return None
+    if key.startswith("tv-path:"):
+        episode = episode_for_media_key(key)
+        return continue_item_for_episode(episode) if episode else None
+    # Numeric TV IDs are scan-order dependent. They must be migrated using the
+    # saved title/snapshot; resolving them directly can resume a different show.
     if key.startswith("tv:"):
-        try:
-            episode = tv_app.safe_episode(key.split(":", 1)[1])
-            return continue_item_for_episode(episode)
-        except Exception:
-            return None
+        return None
     return None
+
+
+def _legacy_tv_episode_for_row(row, legacy_by_id: dict[int, dict]):
+    """Resolve a numeric TV key without ever trusting a reused scan-order ID."""
+    saved_title = str(row["title"] or "").strip().casefold()
+    saved_subtitle = str(row["subtitle"] or "").strip().casefold()
+    try:
+        numeric_id = int(str(row["media_key"]).split(":", 1)[1])
+    except (ValueError, IndexError):
+        return None
+
+    # The retired production cache is the last snapshot of the numeric IDs that
+    # created many old resume rows. Only accept it when its saved show agrees.
+    legacy = legacy_by_id.get(numeric_id)
+    if legacy and str(legacy.get("show") or "").strip().casefold() == saved_title:
+        wanted_rel = str(legacy.get("rel_path") or "").replace("\\", "/").casefold()
+        match = next((ep for ep in tv_app.tv_index.episode_by_id.values()
+                      if str(getattr(ep, "rel_path", "")).replace("\\", "/").casefold() == wanted_rel), None)
+        if match:
+            return match
+
+    # A still-valid numeric ID is safe only if both the show and displayed
+    # episode/season label agree with what was stored at playback time.
+    current = tv_app.tv_index.episode_by_id.get(numeric_id)
+    if current and str(current.show or "").strip().casefold() == saved_title:
+        current_label = str(episode_label(current) or current.season or "").strip().casefold()
+        if not saved_subtitle or current_label == saved_subtitle:
+            return current
+
+    candidates = []
+    for episode in tv_app.tv_index.episode_by_id.values():
+        if str(episode.show or "").strip().casefold() != saved_title:
+            continue
+        label = str(episode_label(episode) or episode.season or "").strip().casefold()
+        if saved_subtitle and label == saved_subtitle:
+            candidates.append(episode)
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def migrate_legacy_tv_state_keys() -> int:
+    """Replace unstable tv:<scan-id> resume keys with path-based identities."""
+    legacy_by_id = {}
+    try:
+        payload = json.loads((UPSTREAM_TV_APP_DIR / "tv-live-index.json").read_text(encoding="utf-8"))
+        legacy_by_id = {int(item.get("id") or 0): item for item in payload.get("episodes", [])}
+    except Exception:
+        pass
+    conn = db_connect()
+    migrated = 0
+    try:
+        rows = conn.execute("SELECT * FROM user_media_state WHERE media_type='tv' AND media_key LIKE 'tv:%'").fetchall()
+        for row in rows:
+            episode = _legacy_tv_episode_for_row(row, legacy_by_id)
+            if not episode:
+                # Never redirect an unresolved saved row to an unrelated episode.
+                continue
+            current = continue_item_for_episode(episode)
+            existing = conn.execute(
+                "SELECT * FROM user_media_state WHERE user_id=? AND media_key=?",
+                (int(row["user_id"]), current["key"]),
+            ).fetchone()
+            if existing:
+                if str(existing["updated_at"] or "") >= str(row["updated_at"] or ""):
+                    conn.execute("DELETE FROM user_media_state WHERE user_id=? AND media_key=?", (int(row["user_id"]), row["media_key"]))
+                    migrated += 1
+                    continue
+                conn.execute("DELETE FROM user_media_state WHERE user_id=? AND media_key=?", (int(row["user_id"]), current["key"]))
+            conn.execute(
+                """UPDATE user_media_state SET media_key=?,media_id=?,title=?,subtitle=?,poster=?,href=?,detail_href=?
+                   WHERE user_id=? AND media_key=?""",
+                (current["key"], int(episode.id), current["title"], current["subtitle"], current["poster"],
+                 current["href"], current["detailHref"], int(row["user_id"]), row["media_key"]),
+            )
+            migrated += 1
+        conn.commit()
+        return migrated
+    finally:
+        conn.close()
 
 
 def sqlite_timestamp_to_ms(value: str) -> int:
@@ -3347,6 +4117,7 @@ def user_state_item(row) -> dict:
     return {
         "key": row["media_key"],
         "kind": row["media_type"],
+        "mediaId": int(row["media_id"] or 0),
         "title": row["title"] or "",
         "subtitle": row["subtitle"] or "",
         "poster": row["poster"] or "",
@@ -3358,6 +4129,58 @@ def user_state_item(row) -> dict:
         "watched": bool(row["watched"]),
         "updatedAt": sqlite_timestamp_to_ms(row["updated_at"]),
     }
+
+
+def watch_state_for_key(user_id: int, media_key: str) -> dict:
+    """Position/duration/progress/watched for one media key, for the pre-play detail screen."""
+    conn = db_connect()
+    try:
+        row = conn.execute(
+            "SELECT * FROM user_media_state WHERE user_id=? AND media_key=?",
+            (int(user_id), media_key),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return {"position": 0.0, "duration": 0.0, "progress": 0.0, "watched": False, "updatedAt": 0}
+    item = user_state_item(row)
+    return {
+        "position": item["position"],
+        "duration": item["duration"],
+        "progress": item["progress"],
+        "watched": item["watched"],
+        "updatedAt": item["updatedAt"],
+    }
+
+
+def is_in_watchlist(user_id: int, media_type: str, media_id: int) -> bool:
+    conn = db_connect()
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM user_watchlist WHERE user_id=? AND media_type=? AND media_id=?",
+            (int(user_id), media_type, int(media_id)),
+        ).fetchone()
+        return bool(row)
+    finally:
+        conn.close()
+
+
+def set_watchlist(user_id: int, media_type: str, media_id: int, add: bool) -> None:
+    conn = db_connect()
+    try:
+        if add:
+            conn.execute(
+                "INSERT OR IGNORE INTO user_watchlist(user_id, media_type, media_id, created_at) VALUES(?,?,?,?)",
+                (int(user_id), media_type, int(media_id), auth_now()),
+            )
+        else:
+            conn.execute(
+                "DELETE FROM user_watchlist WHERE user_id=? AND media_type=? AND media_id=?",
+                (int(user_id), media_type, int(media_id)),
+            )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def continue_card_item(row) -> dict:
@@ -3372,6 +4195,8 @@ def continue_card_item(row) -> dict:
         return item
     if item.get("kind") != "tv":
         return item
+    if str(item.get("key") or "").startswith("tv:"):
+        return None
     current = continue_metadata_for_key(str(item.get("key") or ""))
     if current and current.get("poster"):
         item["poster"] = current["poster"]
@@ -3700,6 +4525,65 @@ def discover_subtitles(path: Path, kind: str, item_id: str) -> list[dict]:
     return tracks
 
 
+AUDIO_CHANNEL_LABELS = {1: "Mono", 2: "Stereo", 6: "5.1", 8: "7.1"}
+
+
+def probe_audio_tracks(path: Path) -> list[dict]:
+    """Enumerate embedded audio streams for the TV pre-play/audio-track selector.
+
+    Mirrors discover_subtitles()'s ffprobe + mtime/size cache pattern. Track order
+    here is assumed to match the order the platform's media engine exposes via
+    HTMLMediaElement.audioTracks for direct playback of the same file; this holds
+    for ffprobe/most native decoders but is not guaranteed on every device, so the
+    TV client only offers audio-track switching when the browser actually reports
+    more than one AudioTrack at runtime.
+    """
+    path = Path(path).resolve()
+    try:
+        stat = path.stat()
+    except OSError:
+        return []
+    cache_key = str(path)
+    cached = AUDIO_TRACK_CACHE.get(cache_key)
+    if cached and cached[0] == stat.st_mtime and cached[1] == stat.st_size:
+        return cached[2]
+    tracks: list[dict] = []
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries",
+             "stream=index,codec_name,channels:stream_tags=language,title:stream_disposition=default",
+             "-of", "json", str(path)], capture_output=True, text=True, timeout=20, check=True,
+        )
+        streams = json.loads(probe.stdout or "{}").get("streams") or []
+    except Exception:
+        streams = []
+    for order, stream in enumerate(streams):
+        tags = stream.get("tags") or {}
+        disposition = stream.get("disposition") or {}
+        language = str(tags.get("language") or "und").lower()
+        label = subtitle_language_label(language)
+        try:
+            channels = int(stream.get("channels") or 0)
+        except (TypeError, ValueError):
+            channels = 0
+        channel_label = AUDIO_CHANNEL_LABELS.get(channels, f"{channels}ch" if channels else "")
+        title = str(tags.get("title") or "").strip()
+        display = title or label
+        if channel_label:
+            display = f"{display} ({channel_label})"
+        tracks.append({
+            "order": order,
+            "index": int(stream.get("index", order)),
+            "language": language,
+            "label": display,
+            "codec": str(stream.get("codec_name") or ""),
+            "channels": channels,
+            "default": bool(disposition.get("default")),
+        })
+    AUDIO_TRACK_CACHE[cache_key] = (stat.st_mtime, stat.st_size, tracks)
+    return tracks
+
+
 def subtitle_markup(tracks: list[dict]) -> tuple[str, str, str]:
     track_html = "".join(
         f'<track kind="subtitles" src="{html.escape(track["url"])}" srclang="{html.escape(track["language"])}" label="{html.escape(track["label"])}"'
@@ -3727,7 +4611,37 @@ movie_app.subtitle_summary_for_path = subtitle_detail_summary
 tv_app.subtitle_summary_for_path = subtitle_detail_summary
 
 
-def direct_player_context(kind: str, item_id: str, is_admin: bool = False, playback_mode: str | None = None) -> dict:
+def audio_markup(tracks: list[dict], selected_index: int | None) -> tuple[str, str]:
+    """Mirrors subtitle_markup()'s shape for the audio-track selector: a
+    <select> control (only rendered when there's more than one embedded
+    track - a single-track file has nothing to choose between) and the
+    resolved index actually in effect (the requested one if valid, else
+    whatever ffprobe/the disposition flag marks as default, else track 0).
+
+    Deliberately keyed on each track's "order" (0-based position among audio
+    streams only), never its absolute ffprobe "index" - ffmpeg's -map
+    0:a:N stream specifier (used by ensure_hls_stream's audio_index) counts
+    audio streams only, so a file with stream 0 = video / 1 = audio #0 / 2 =
+    audio #1 needs -map 0:a:0 / 0:a:1, not 0:a:1 / 0:a:2. "order" is also
+    what HTMLMediaElement.audioTracks[i] is expected to line up with (see
+    probe_audio_tracks()'s docstring), so it is the one value that works for
+    both the native-track-toggle path and the HLS remux fallback."""
+    if not tracks:
+        return "", None
+    default_order = next((t["order"] for t in tracks if t.get("default")), tracks[0]["order"])
+    valid_orders = {t["order"] for t in tracks}
+    resolved = selected_index if selected_index in valid_orders else default_order
+    if len(tracks) < 2:
+        return "", resolved
+    options = "".join(
+        f'<option value="{t["order"]}"{" selected" if t["order"] == resolved else ""}>{html.escape(t["label"])}</option>'
+        for t in tracks
+    )
+    control = f'<label class="caption-control audio-control">Audio <select id="audioSelect" aria-label="Audio track">{options}</select></label>'
+    return control, resolved
+
+
+def direct_player_context(kind: str, item_id: str, is_admin: bool = False, playback_mode: str | None = None, audio_index: int | None = None) -> dict:
     playback_mode = (playback_mode or read_global_playback_mode()).lower()
     if playback_mode not in {"direct", "hls"}:
         playback_mode = "direct"
@@ -3735,6 +4649,16 @@ def direct_player_context(kind: str, item_id: str, is_admin: bool = False, playb
         item = movie_app.safe_item(item_id)
         caption_tracks = discover_subtitles(item.path, kind, item_id)
         caption_track_html, caption_control, caption_summary = subtitle_markup(caption_tracks)
+        audio_tracks = probe_audio_tracks(item.path)
+        audio_control, resolved_audio_index = audio_markup(audio_tracks, audio_index)
+        audio_default_index = next((t["order"] for t in audio_tracks if t.get("default")), (audio_tracks[0]["order"] if audio_tracks else 0))
+        non_default_audio = resolved_audio_index if (resolved_audio_index is not None and resolved_audio_index != audio_default_index) else None
+        # A non-default audio track can only be guaranteed via an explicit
+        # ffmpeg -map through HLS - Direct playback has no reliable way to
+        # steer HTMLMediaElement.audioTracks toward a specific embedded
+        # stream across browsers, so requesting one implies HLS.
+        if non_default_audio is not None:
+            playback_mode = "hls"
         metadata = movie_app.metadata_for(item)
         title = metadata.get("title") or item.title
         subtitle = str(metadata.get("year") or "Movie")
@@ -3745,7 +4669,7 @@ def direct_player_context(kind: str, item_id: str, is_admin: bool = False, playb
         source = f"/play/{item.id}"
         video_label = "Local file stream"
         if playback_mode == "hls":
-            stream = ensure_hls_stream(kind, item_id, item.path)
+            stream = ensure_hls_stream(kind, item_id, item.path, audio_index=non_default_audio)
             source = stream["playlist_url"]
             video_label = "Adaptive HLS stream"
         meta = "".join(
@@ -3785,11 +4709,20 @@ def direct_player_context(kind: str, item_id: str, is_admin: bool = False, playb
             "caption_tracks": caption_track_html,
             "caption_control": caption_control,
             "caption_summary": caption_summary,
+            "audio_control": audio_control,
+            "audio_tracks": audio_tracks,
+            "resolved_audio_index": resolved_audio_index,
         }
     if kind == "tv":
         episode = tv_app.safe_episode(item_id)
         caption_tracks = discover_subtitles(episode.path, kind, item_id)
         caption_track_html, caption_control, caption_summary = subtitle_markup(caption_tracks)
+        audio_tracks = probe_audio_tracks(episode.path)
+        audio_control, resolved_audio_index = audio_markup(audio_tracks, audio_index)
+        audio_default_index = next((t["order"] for t in audio_tracks if t.get("default")), (audio_tracks[0]["order"] if audio_tracks else 0))
+        non_default_audio = resolved_audio_index if (resolved_audio_index is not None and resolved_audio_index != audio_default_index) else None
+        if non_default_audio is not None:
+            playback_mode = "hls"
         show = show_for_episode(episode)
         previous_episode = previous_episode_for(episode)
         next_episode = next_episode_for(episode)
@@ -3815,7 +4748,7 @@ def direct_player_context(kind: str, item_id: str, is_admin: bool = False, playb
         source = f"/play/episode/{episode.id}"
         video_label = "Local episode stream"
         if playback_mode == "hls":
-            stream = ensure_hls_stream(kind, item_id, episode.path)
+            stream = ensure_hls_stream(kind, item_id, episode.path, audio_index=non_default_audio)
             source = stream["playlist_url"]
             video_label = "Adaptive HLS stream"
         meta_values = [episode_label(episode), episode_air_date, runtime_label, "TV Show"]
@@ -3873,6 +4806,9 @@ def direct_player_context(kind: str, item_id: str, is_admin: bool = False, playb
             "caption_tracks": caption_track_html,
             "caption_control": caption_control,
             "caption_summary": caption_summary,
+            "audio_control": audio_control,
+            "audio_tracks": audio_tracks,
+            "resolved_audio_index": resolved_audio_index,
         }
     raise FileNotFoundError("Unknown media kind")
 
@@ -4246,7 +5182,7 @@ def cleanup_mobile_download_cache_once() -> None:
 
 LIVE_TV_PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>CineMediaVault Live TV</title><style>
-:root{color-scheme:dark;--bg:#080a0f;--panel:#121720;--line:#2a3340;--muted:#9ba7b8;--gold:#f5b73f;--green:#35dc79}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:#fff;font-family:Inter,system-ui,Segoe UI,sans-serif}header{position:sticky;top:0;z-index:4;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 18px;background:rgba(8,10,15,.95);border-bottom:1px solid var(--line)}h1{font-size:24px;margin:0}h1 b{color:var(--gold)}button,.button{border:1px solid var(--line);border-radius:8px;min-height:40px;padding:0 14px;background:#1a202a;color:#fff;font-weight:850;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;cursor:pointer}.primary{background:var(--gold);border-color:var(--gold);color:#111}main{max-width:1200px;margin:auto;padding:18px}.summary{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:16px}.device{border:1px solid var(--line);background:var(--panel);padding:12px;border-radius:8px}.device small{display:block;color:var(--muted);margin-top:4px}.search{width:100%;min-height:48px;border:1px solid var(--line);border-radius:8px;background:#151b25;color:#fff;padding:0 14px;font-size:16px;margin-bottom:14px}.guide{display:grid;gap:8px}.channel{display:grid;grid-template-columns:72px 1fr auto;gap:12px;align-items:center;padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}.number{font-size:20px;color:var(--gold);font-weight:950}.channel small{display:block;color:var(--muted);margin-top:3px}.actions{display:flex;gap:7px}.live{color:var(--green);font-size:12px;font-weight:950}.slots{display:none;gap:5px}.channel.choosing .slots{display:flex}.channel.choosing .watch{display:none}.slots button{width:36px;padding:0}.player{display:none;position:fixed;inset:0;z-index:20;background:#000}.player.open{display:block}.player video{width:100%;height:100%;object-fit:contain}.player .close{position:absolute;right:16px;top:16px;z-index:2;border-radius:50%;width:44px;padding:0}@media(max-width:650px){header{align-items:flex-start}.channel{grid-template-columns:58px 1fr}.actions{grid-column:1/-1}.channel{padding:10px}h1{font-size:20px}}
+:root{color-scheme:dark;--bg:#080a0f;--panel:#121720;--line:#2a3340;--muted:#9ba7b8;--gold:#f5b73f;--green:#35dc79}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:#fff;font-family:Inter,system-ui,Segoe UI,sans-serif}header{position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;padding:14px 18px;padding-top:calc(14px + env(safe-area-inset-top));padding-left:calc(18px + env(safe-area-inset-left));padding-right:calc(18px + env(safe-area-inset-right));background:rgba(8,10,15,.95);border-bottom:1px solid var(--line)}h1{font-size:24px;margin:0}h1 b{color:var(--gold)}button,.button{border:1px solid var(--line);border-radius:8px;min-height:44px;padding:0 14px;background:#1a202a;color:#fff;font-weight:850;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;cursor:pointer}.primary{background:var(--gold);border-color:var(--gold);color:#111}main{max-width:1200px;margin:auto;padding:18px;padding-bottom:calc(18px + env(safe-area-inset-bottom))}.summary{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:16px}.device{border:1px solid var(--line);background:var(--panel);padding:12px;border-radius:8px}.device small{display:block;color:var(--muted);margin-top:4px}.search{width:100%;min-height:48px;border:1px solid var(--line);border-radius:8px;background:#151b25;color:#fff;padding:0 14px;font-size:16px;margin-bottom:14px}.guide{display:grid;gap:8px}.channel{display:grid;grid-template-columns:72px 1fr auto;gap:12px;align-items:center;padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}.number{font-size:20px;color:var(--gold);font-weight:950}.channel small{display:block;color:var(--muted);margin-top:3px}.actions{display:flex;gap:7px;flex-wrap:wrap}.live{color:var(--green);font-size:12px;font-weight:950}.slots{display:none;gap:5px}.channel.choosing .slots{display:flex}.channel.choosing .watch{display:none}.slots button{width:40px;min-height:40px;padding:0}.player{display:none;position:fixed;inset:0;z-index:20;background:#000}.player.open{display:block}.player video{width:100%;height:100%;object-fit:contain}.player .close{position:absolute;right:calc(16px + env(safe-area-inset-right));top:calc(16px + env(safe-area-inset-top));z-index:2;border-radius:50%;width:44px;min-height:44px;padding:0}@media(max-width:650px){header{align-items:flex-start}.channel{grid-template-columns:58px 1fr}.actions{grid-column:1/-1}.channel{padding:10px}h1{font-size:20px}}
 </style></head><body><header><h1>CineMedia<b>Vault</b> Live TV</h1><div><a class="button" href="/">Home</a> <a class="button" href="/wall">Wall</a> <button id="refreshGuide">Refresh guide</button> <button class="primary" id="scan">Scan tuners</button></div></header><main><div class="summary" id="devices"></div><input class="search" id="query" type="search" placeholder="Search channel, program, or description"><div class="guide" id="guide"></div></main><div class="player" id="player"><button class="close" id="close">&#10005;</button><video id="video" controls autoplay playsinline></video></div><script src="/assets/hls.min.js"></script><script>
 let channels=[],hls=null;const esc=s=>String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const clock=n=>n?new Date(n*1000).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):'';
@@ -4264,12 +5200,12 @@ VIDEO_WALL_PAGE = r"""<!doctype html>
 <title>CineMediaVault Video Wall</title><style>
 :root{color-scheme:dark;--bg:#07090d;--panel:#11161f;--line:#2b3442;--text:#f7f9fc;--muted:#9ca8b8;--gold:#f5b73f;--green:#36dc78}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,Segoe UI,sans-serif;overflow-x:hidden}
-header{position:sticky;top:0;z-index:5;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 18px;background:rgba(7,9,13,.94);border-bottom:1px solid var(--line);backdrop-filter:blur(14px)}
-.brand{font-size:24px;font-weight:950}.brand b{color:var(--gold)}.controls{display:flex;gap:8px;flex-wrap:wrap}button,.button{min-height:38px;border:1px solid var(--line);border-radius:8px;padding:0 13px;background:#171d27;color:#fff;font-weight:850;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}.primary{background:var(--gold);color:#111;border-color:var(--gold)}
-main{padding:14px}.wall{height:calc(100vh - 92px);min-height:520px;position:relative;background:#000}.tiles{height:100%;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:10px}.wall.wall-fs-active{height:100vh}.wall.expanded{position:fixed;inset:0;z-index:40;height:100vh}.wall.wall-fs-active .tiles,.wall.expanded .tiles{grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}.tile{position:relative;min-width:0;min-height:0;overflow:hidden;background:#000;border:2px solid transparent;border-radius:8px}.tile.expanded{position:fixed;inset:0;z-index:30;border:0;border-radius:0}.tile video{width:100%;height:100%;object-fit:contain;background:#000}.empty{height:100%;display:grid;place-items:center;text-align:center;color:var(--muted);border:1px dashed var(--line);padding:18px}.tile-bar{position:absolute;left:0;right:0;bottom:0;display:grid;grid-template-columns:auto auto minmax(90px,1fr) auto auto auto auto;align-items:center;gap:7px;padding:26px 9px 9px;background:linear-gradient(transparent,rgba(0,0,0,.94));opacity:0;transition:opacity .18s}.tile:hover .tile-bar,.tile.active .tile-bar,.tile.expanded .tile-bar{opacity:1}.tile-title{position:absolute;left:10px;right:10px;bottom:50px;min-width:0;font-weight:850;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 3px #000}.icon{width:34px;height:34px;padding:0;border-radius:50%}#exitWallFs{display:none;position:absolute;top:10px;right:10px;z-index:41;width:40px;height:40px;border-radius:50%;background:rgba(0,0,0,.72)}.wall.wall-fs-active #exitWallFs,.wall.expanded #exitWallFs{display:flex}.seek{width:100%;accent-color:var(--gold)}.time{font-size:12px;color:#fff;white-space:nowrap;font-variant-numeric:tabular-nums}.bandwidth{display:none;align-items:center;gap:14px;padding:9px 14px;border-bottom:1px solid var(--line);background:#101620}.bandwidth.open{display:flex}.bandwidth strong{font-size:18px;color:var(--green);font-variant-numeric:tabular-nums}.bandwidth span{color:var(--muted);font-size:13px}
-.drawer{position:fixed;inset:0 0 0 auto;z-index:10;width:min(440px,100%);padding:18px;background:#0c1017;border-left:1px solid var(--line);transform:translateX(105%);transition:transform .2s;overflow:auto}.drawer.open{transform:none}.drawer-head{display:flex;justify-content:space-between;align-items:center}.search{width:100%;min-height:48px;margin:16px 0;border:1px solid var(--line);border-radius:8px;background:#171d27;color:#fff;padding:0 14px;font-size:16px}.results{display:grid;gap:9px}.result{display:grid;grid-template-columns:52px 1fr auto;align-items:center;gap:10px;border:1px solid var(--line);border-radius:8px;padding:8px;background:var(--panel)}.result img{width:52px;aspect-ratio:2/3;object-fit:cover;background:#06080c}.result small{display:block;color:var(--muted);margin-top:3px}.slot-picker{display:flex;gap:5px}.slot-picker button{width:34px;height:34px;min-height:34px;padding:0}.hint{color:var(--muted);font-size:13px}
+header{position:sticky;top:0;z-index:5;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 18px;padding-top:calc(14px + env(safe-area-inset-top));padding-left:calc(18px + env(safe-area-inset-left));padding-right:calc(18px + env(safe-area-inset-right));background:rgba(7,9,13,.94);border-bottom:1px solid var(--line);backdrop-filter:blur(14px)}
+.brand{font-size:24px;font-weight:950}.brand b{color:var(--gold)}.controls{display:flex;gap:8px;flex-wrap:wrap}button,.button{min-height:44px;border:1px solid var(--line);border-radius:8px;padding:0 13px;background:#171d27;color:#fff;font-weight:850;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}.primary{background:var(--gold);color:#111;border-color:var(--gold)}
+main{padding:14px;padding-bottom:calc(14px + env(safe-area-inset-bottom))}.wall{height:calc(100vh - 92px);height:calc(100dvh - 92px);min-height:520px;position:relative;background:#000}.tiles{height:100%;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:10px}.wall.wall-fs-active{height:100vh;height:100dvh}.wall.expanded{position:fixed;inset:0;z-index:40;height:100vh;height:100dvh}.wall.wall-fs-active .tiles,.wall.expanded .tiles{grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}.tile{position:relative;min-width:0;min-height:0;overflow:hidden;background:#000;border:2px solid transparent;border-radius:8px}.tile.expanded{position:fixed;inset:0;z-index:30;border:0;border-radius:0}.tile video{width:100%;height:100%;object-fit:contain;background:#000}.empty{height:100%;display:grid;place-items:center;text-align:center;color:var(--muted);border:1px dashed var(--line);padding:18px}.tile-bar{position:absolute;left:0;right:0;bottom:0;display:grid;grid-template-columns:auto auto minmax(90px,1fr) auto auto auto auto;align-items:center;gap:7px;padding:26px 9px 9px;padding-bottom:calc(9px + env(safe-area-inset-bottom));background:linear-gradient(transparent,rgba(0,0,0,.94));opacity:0;transition:opacity .18s}.tile:hover .tile-bar,.tile.active .tile-bar,.tile.expanded .tile-bar{opacity:1}.tile-title{position:absolute;left:10px;right:10px;bottom:50px;min-width:0;font-weight:850;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 3px #000}.icon{width:36px;height:36px;padding:0;border-radius:50%}#exitWallFs{display:none;position:absolute;top:calc(10px + env(safe-area-inset-top));right:calc(10px + env(safe-area-inset-right));z-index:41;width:44px;height:44px;border-radius:50%;background:rgba(0,0,0,.72)}.wall.wall-fs-active #exitWallFs,.wall.expanded #exitWallFs{display:flex}.seek{width:100%;accent-color:var(--gold)}.time{font-size:12px;color:#fff;white-space:nowrap;font-variant-numeric:tabular-nums}.bandwidth{display:none;flex-wrap:wrap;align-items:center;gap:14px;padding:9px 14px;border-bottom:1px solid var(--line);background:#101620}.bandwidth.open{display:flex}.bandwidth strong{font-size:18px;color:var(--green);font-variant-numeric:tabular-nums}.bandwidth span{color:var(--muted);font-size:13px}.bandwidth .spacer{flex:1}.bandwidth button{min-height:34px;padding:0 10px;font-size:12px}.wall-breakdown{display:none;flex-basis:100%;gap:8px 16px;flex-wrap:wrap;padding-top:6px;border-top:1px solid var(--line);margin-top:4px;font-size:12px;color:var(--muted)}.wall-breakdown.open{display:flex}.wall-breakdown b{color:#fff}@media(max-width:720px){.icon{width:44px;height:44px}.tile-bar{grid-template-columns:auto auto minmax(70px,1fr) auto auto auto auto;padding:30px 8px 10px;padding-bottom:calc(10px + env(safe-area-inset-bottom))}}
+.drawer{position:fixed;inset:0 0 0 auto;z-index:10;width:min(440px,100%);padding:18px;padding-top:calc(18px + env(safe-area-inset-top));padding-right:calc(18px + env(safe-area-inset-right));padding-bottom:calc(18px + env(safe-area-inset-bottom));background:#0c1017;border-left:1px solid var(--line);transform:translateX(105%);transition:transform .2s;overflow:auto}.drawer.open{transform:none}.drawer-head{display:flex;justify-content:space-between;align-items:center}.search{width:100%;min-height:48px;margin:16px 0;border:1px solid var(--line);border-radius:8px;background:#171d27;color:#fff;padding:0 14px;font-size:16px}.results{display:grid;gap:9px}.result{display:grid;grid-template-columns:52px 1fr auto;align-items:center;gap:10px;border:1px solid var(--line);border-radius:8px;padding:8px;background:var(--panel)}.result img{width:52px;aspect-ratio:2/3;object-fit:cover;background:#06080c}.result small{display:block;color:var(--muted);margin-top:3px}.slot-picker{display:flex;gap:5px}.slot-picker button{width:40px;height:40px;min-height:40px;padding:0}.hint{color:var(--muted);font-size:13px}
 @media(max-width:720px){header{align-items:flex-start;flex-direction:column}.wall{height:auto;min-height:0}.tiles{grid-template-columns:1fr;grid-template-rows:none}.tile{aspect-ratio:16/9}.wall.wall-fs-active .tile,.wall.expanded .tile{aspect-ratio:auto}.tile-bar{opacity:1}.brand{font-size:20px}}
-</style></head><body><header><div class="brand">CineMedia<b>Vault</b> Wall</div><div class="controls"><a class="button" href="/">Home</a><button id="playAll" class="primary">Play all</button><button id="pauseAll">Pause all</button><button id="syncAll">Sync</button><button id="fullWall">Full Screen Wall</button><button id="toggleBandwidth">Bandwidth</button><button id="addMedia">Add media</button><button id="clearWall">Clear Wall</button></div></header><div class="bandwidth" id="bandwidthPanel"><strong id="bandwidthValue">0.00 Mbps</strong><span id="bandwidthBytes">0 B/s</span><span id="playingCount">0 playing</span></div>
+</style></head><body><header><div class="brand">CineMedia<b>Vault</b> Wall</div><div class="controls"><a class="button" href="/">Home</a><button id="playAll" class="primary">Play all</button><button id="pauseAll">Pause all</button><button id="syncAll">Sync</button><button id="fullWall">Full Screen Wall</button><button id="toggleBandwidth">Bandwidth</button><button id="addMedia">Add media</button><button id="clearWall">Clear Wall</button>{{USAGE_LINK}}</div></header><div class="bandwidth" id="bandwidthPanel"><strong id="bandwidthValue">0.00 Mbps</strong><span id="bandwidthBytes">0 B/s</span><span id="playingCount">0 playing</span><span id="bandwidthCpu"></span><span class="spacer"></span><button id="toggleBreakdown" type="button">Per-stream breakdown</button><div class="wall-breakdown" id="wallBreakdown"></div></div>
 <main><div class="wall" id="wall"><div class="tiles" id="tiles"></div><button class="icon" id="exitWallFs" title="Exit full screen" aria-label="Exit full screen">&#10005;</button></div></main>
 <aside class="drawer" id="drawer"><div class="drawer-head"><div><h2>Add to wall</h2><div class="hint">Search a movie, episode, or live tuner channel, then choose a slot.</div></div><button class="icon" id="closeDrawer" aria-label="Close">&#10005;</button></div><input class="search" id="wallSearch" type="search" placeholder="Search movies, episodes, or live channels"><div class="results" id="results"></div></aside>
 <script src="/assets/hls.min.js"></script><script>
@@ -4290,7 +5226,10 @@ document.getElementById('clearWall').onclick=async()=>{if(!confirm('Remove all 4
 document.getElementById('playAll').onclick=()=>document.querySelectorAll('video').forEach(v=>v.play().catch(()=>{}));document.getElementById('pauseAll').onclick=()=>document.querySelectorAll('video').forEach(v=>v.pause());document.getElementById('syncAll').onclick=()=>{const vs=[...document.querySelectorAll('video')];if(!vs.length)return;const t=Math.min(...vs.map(v=>v.currentTime||0));vs.forEach(v=>v.currentTime=t)};
 function fsElement(){return document.fullscreenElement||document.webkitFullscreenElement||null}function syncWallFsUi(){wall.classList.toggle('wall-fs-active',fsElement()===wall)}function requestWallFullscreen(){const request=wall.requestFullscreen||wall.webkitRequestFullscreen;if(!request){wall.classList.add('expanded');return}try{const pending=request.call(wall);if(pending&&pending.catch)pending.catch(()=>wall.classList.add('expanded'))}catch(_){wall.classList.add('expanded')}}function exitWallFullscreen(){if(document.exitFullscreen){const pending=document.exitFullscreen();if(pending&&pending.catch)pending.catch(()=>{})}else if(document.webkitExitFullscreen)document.webkitExitFullscreen();wall.classList.remove('expanded')}document.getElementById('fullWall').onclick=()=>{if(fsElement()===wall||wall.classList.contains('expanded'))exitWallFullscreen();else requestWallFullscreen()};document.getElementById('exitWallFs').onclick=exitWallFullscreen;document.addEventListener('fullscreenchange',syncWallFsUi);document.addEventListener('webkitfullscreenchange',syncWallFsUi);
 const bandwidthPanel=document.getElementById('bandwidthPanel');document.getElementById('toggleBandwidth').onclick=()=>{bandwidthPanel.classList.toggle('open');localStorage.setItem('cmv-wall-bandwidth',bandwidthPanel.classList.contains('open')?'1':'0');updateBandwidth()};if(localStorage.getItem('cmv-wall-bandwidth')==='1')bandwidthPanel.classList.add('open');
-function humanRate(n){if(n>=1048576)return (n/1048576).toFixed(2)+' MB/s';if(n>=1024)return (n/1024).toFixed(1)+' KB/s';return Math.round(n)+' B/s'}async function updateBandwidth(){const playing=[...document.querySelectorAll('video')].filter(v=>!v.paused&&!v.ended).length;document.getElementById('playingCount').textContent=`${playing} playing`;if(!bandwidthPanel.classList.contains('open'))return;try{const r=await fetch('/api/video-wall/bandwidth',{cache:'no-store'}),d=await r.json();document.getElementById('bandwidthValue').textContent=`${Number(d.mbps||0).toFixed(2)} Mbps`;document.getElementById('bandwidthBytes').textContent=humanRate(Number(d.bytes_per_second||0))}catch(_){document.getElementById('bandwidthValue').textContent='Unavailable'}}setInterval(updateBandwidth,1000);
+const wallBreakdown=document.getElementById('wallBreakdown');document.getElementById('toggleBreakdown').onclick=()=>{wallBreakdown.classList.toggle('open');updateBandwidth()};
+function humanRate(n){if(n>=1048576)return (n/1048576).toFixed(2)+' MB/s';if(n>=1024)return (n/1024).toFixed(1)+' KB/s';return Math.round(n)+' B/s'}
+function renderWallBreakdown(streams){if(!wallBreakdown.classList.contains('open'))return;const items=(streams||[]).map(s=>{const v=[...document.querySelectorAll('video')].find(el=>el.dataset.kind===s.kind&&String(el.dataset.id)===String(s.media_id));const slot=v?v.dataset.slot:'-';return `<span>Slot ${slot}: <b>${humanRate(s.bps||0)}</b></span>`}).join('');wallBreakdown.innerHTML=items||'<span>No attributable per-stream data right now.</span>'}
+async function updateBandwidth(){const playing=[...document.querySelectorAll('video')].filter(v=>!v.paused&&!v.ended).length;document.getElementById('playingCount').textContent=`${playing} playing`;if(!bandwidthPanel.classList.contains('open'))return;try{const r=await fetch('/api/video-wall/bandwidth',{cache:'no-store'}),d=await r.json();document.getElementById('bandwidthValue').textContent=`${Number(d.mbps||0).toFixed(2)} Mbps`;document.getElementById('bandwidthBytes').textContent=humanRate(Number(d.bytes_per_second||0));document.getElementById('bandwidthCpu').textContent=d.cpu_cinevault_pct!=null?`CineVault CPU ${Number(d.cpu_cinevault_pct).toFixed(0)}%`:'';renderWallBreakdown(d.streams)}catch(_){document.getElementById('bandwidthValue').textContent='Unavailable'}}setInterval(updateBandwidth,1000);
 async function updateSlot(slot,item){await fetch('/api/video-wall/slot',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({slot,media_type:item&&item.media_type,media_id:item&&item.media_id})})}
 search.addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(runSearch,250)});async function runSearch(){const q=search.value.trim();if(q.length<2){results.innerHTML='';return}const r=await fetch('/api/video-wall/search?q='+encodeURIComponent(q));const d=await r.json();results.innerHTML=(d.items||[]).map(i=>`<article class="result">${i.poster?`<img src="${esc(i.poster)}" alt="">`:'<span></span>'}<div><strong>${esc(i.title)}</strong><small>${esc(i.subtitle)}</small></div><div class="slot-picker">${[1,2,3,4].map(n=>`<button data-pick="${n}" data-kind="${i.media_type}" data-id="${i.media_id}">${n}</button>`).join('')}</div></article>`).join('')||'<p class="hint">No matches.</p>'}
 results.addEventListener('click',async e=>{const b=e.target.closest('[data-pick]');if(!b)return;await updateSlot(+b.dataset.pick,{media_type:b.dataset.kind,media_id:+b.dataset.id});active=+b.dataset.pick;drawer.classList.remove('open');load()});load();
@@ -4312,6 +5251,9 @@ class CombinedHandler(VideoListsMixin, BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?", 1)[0]
+        if path == "/api/tv/login":
+            return self.tv_login_submit()
+        self._cinevault_theme = theme_for_row(self.current_user())
         if path.startswith("/api/dvr/"):
             user = self.current_user()
             if not user:
@@ -4324,6 +5266,15 @@ class CombinedHandler(VideoListsMixin, BaseHTTPRequestHandler):
             if not user:
                 return self.require_auth(path)
             handled = music_module.handle_post(self, user, path)
+            if handled is not False:
+                return handled
+        if path.startswith("/api/admin/vchannels/") or path in {"/api/vchannels/preview/stop", "/api/vchannels/promo/stop", "/admin/vchannels"}:
+            user = self.current_user()
+            if not user:
+                return self.require_auth(path)
+            handled = virtual_channels.handle_post(
+                self, user, path, movie_app, tv_app, vchannel_stop_preview_source
+            )
             if handled is not False:
                 return handled
         if path == "/login":
@@ -4340,6 +5291,11 @@ class CombinedHandler(VideoListsMixin, BaseHTTPRequestHandler):
             if not user or not user["is_admin"]:
                 return self.send_error(403)
             return self.admin_hls_submit(user)
+        if path == "/admin/usage/retention":
+            user = self.current_user()
+            if not user or not user["is_admin"]:
+                return self.send_error(403)
+            return self.admin_usage_retention_submit(user)
         if path == "/admin/modules":
             user = self.current_user()
             if not user or not user["is_admin"]:
@@ -4385,6 +5341,11 @@ class CombinedHandler(VideoListsMixin, BaseHTTPRequestHandler):
             if not user:
                 return self.require_auth(path)
             return self.api_playback_mode_set(user)
+        if path == "/account/theme":
+            user = self.current_user()
+            if not user:
+                return self.require_auth(path)
+            return self.account_theme_submit(user)
         if path == "/api/mobile-download/enqueue":
             user = self.current_user()
             if not user:
@@ -4405,6 +5366,16 @@ class CombinedHandler(VideoListsMixin, BaseHTTPRequestHandler):
             if not user:
                 return self.require_auth(path)
             return self.api_video_wall_clear(user)
+        if path == "/api/tv/last-channel":
+            user = self.current_user()
+            if not user:
+                return self.require_auth(path)
+            return self.api_tv_last_channel_set(user)
+        if path == "/api/tv/watchlist":
+            user = self.current_user()
+            if not user:
+                return self.require_auth(path)
+            return self.api_tv_watchlist_set(user)
         if path == "/api/hdhr/scan":
             user = self.current_user()
             if not user or not user["is_admin"]:
@@ -4515,7 +5486,8 @@ class CombinedHandler(VideoListsMixin, BaseHTTPRequestHandler):
         package = (job_dir / status.get("filename", "")).resolve()
         if not str(package).startswith(str(job_dir.resolve()) + os.sep) or not package.is_file():
             return self.send_error(404)
-        return self.serve_download_package(package)
+        service = "tv" if status.get("scope") in {"episode", "season"} else "movie"
+        return self.serve_download_package(package, service=service)
 
     def cookie_value(self, name: str) -> str:
         cookie = self.headers.get("Cookie", "")
@@ -4527,8 +5499,24 @@ class CombinedHandler(VideoListsMixin, BaseHTTPRequestHandler):
                 return urllib.parse.unquote(value)
         return ""
 
+    def bearer_or_query_token(self) -> str:
+        """Raw session token from Authorization/query, deliberately excluding the cookie.
+
+        Used to decide whether an HLS request came from a token-based client (the TV
+        widget) that needs its playlists rewritten with the token on every segment,
+        as opposed to a cookie-based browser session where the cookie already covers
+        every subsequent segment request automatically.
+        """
+        authorization = (self.headers.get("Authorization") or "").strip()
+        if authorization.lower().startswith("bearer "):
+            return authorization[7:].strip()
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        return (query.get("access_token") or [""])[-1]
+
     def current_user(self):
-        token = self.cookie_value(CINEVAULT_SESSION_COOKIE)
+        token = self.bearer_or_query_token()
+        if not token:
+            token = self.cookie_value(CINEVAULT_SESSION_COOKIE)
         if not token:
             return None
         token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
@@ -4536,7 +5524,7 @@ class CombinedHandler(VideoListsMixin, BaseHTTPRequestHandler):
         try:
             row = conn.execute(
                 """
-                SELECT users.id, users.username, users.full_name, users.email, users.is_admin, users.is_super_admin, users.active
+                SELECT users.id, users.username, users.full_name, users.email, users.is_admin, users.is_super_admin, users.active, users.theme
                 FROM user_sessions
                 JOIN users ON users.id = user_sessions.user_id
                 WHERE user_sessions.token_hash=? AND user_sessions.expires_at>? AND users.active=1
@@ -4602,6 +5590,7 @@ class CombinedHandler(VideoListsMixin, BaseHTTPRequestHandler):
         return self.redirect(f"/login?next={urllib.parse.quote(self.path)}") is None
 
     def render_html(self, body: str, status: int = 200):
+        body = inject_theme(body, getattr(self, "_cinevault_theme", DEFAULT_THEME))
         data = body.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -4609,6 +5598,63 @@ class CombinedHandler(VideoListsMixin, BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(data)
+
+    def account_page(self, user, message: str = ""):
+        note = f"<div class='note'>{html.escape(message)}</div>" if message else ""
+        current_theme = theme_for_row(user)
+        theme_labels = {"default": "Default (Gold)", "royal-blue": "Royal Blue", "green": "Green"}
+        theme_rows = "".join(
+            f"""<label class="theme-option{' selected' if current_theme == value else ''}">
+                <input type="radio" name="theme" value="{value}" {'checked' if current_theme == value else ''}>
+                <span class="swatch swatch-{value}"></span>
+                <span>{html.escape(label)}</span>
+              </label>"""
+            for value, label in theme_labels.items()
+        )
+        return self.render_html(f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CineMediaVault Account</title><style>
+:root {{ color-scheme:dark; --bg:#08090c; --panel:#11151d; --line:rgba(255,255,255,.14); --muted:#aab4c3; --gold:#f5b73f; }}
+* {{ box-sizing:border-box; }} body {{ margin:0; background:var(--bg); color:#fff; font-family:Inter,system-ui,Segoe UI,sans-serif; }}
+header {{ display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:14px; padding:18px 24px; padding-top:calc(18px + env(safe-area-inset-top)); padding-left:calc(24px + env(safe-area-inset-left)); padding-right:calc(24px + env(safe-area-inset-right)); border-bottom:1px solid var(--line); }}
+a {{ color:#fff; }} main {{ width:100%; max-width:640px; margin:0 auto; padding:24px; padding-bottom:calc(24px + env(safe-area-inset-bottom)); }}
+h1 {{ margin-top:0; }} .muted {{ color:var(--muted); }} .panel {{ border:1px solid var(--line); border-radius:18px; padding:20px; background:var(--panel); margin-bottom:18px; }}
+.theme-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin:16px 0; }}
+.theme-option {{ position:relative; display:flex; flex-direction:column; align-items:center; gap:10px; border:2px solid var(--line); border-radius:14px; padding:16px 12px; cursor:pointer; text-align:center; font-weight:800; min-height:44px; }}
+.theme-option input {{ position:absolute; top:10px; left:10px; width:18px; height:18px; margin:0; accent-color:var(--gold); }}
+.theme-option.selected {{ border-color:var(--gold); background:rgba(245,183,63,.08); }}
+.swatch {{ width:44px; height:44px; border-radius:50%; border:2px solid rgba(255,255,255,.25); }}
+.swatch-default {{ background:#f5b73f; }} .swatch-royal-blue {{ background:#4d90fe; }} .swatch-green {{ background:#1f9d55; }}
+button {{ min-height:44px; border:0; border-radius:999px; padding:0 20px; font-weight:900; cursor:pointer; background:var(--gold); color:#111; }}
+.note {{ padding:10px 12px; border-radius:10px; background:#15351f; margin-bottom:14px; }}
+nav {{ display:flex; flex-wrap:wrap; gap:4px 6px; align-items:center; }} nav a {{ min-height:44px; display:inline-flex; align-items:center; padding:0 6px; }}
+@media (max-width:600px) {{ header {{ align-items:flex-start; flex-direction:column; }} main {{ padding:18px; }} }}
+</style></head><body>
+<header><strong>Account</strong><nav><a href="/">Home</a> &middot; <a href="/logout">Logout</a></nav></header>
+<main>{note}
+<h1>Hi, {html.escape(user['username'])}</h1>
+<div class="panel">
+  <h2>Color Theme</h2>
+  <p class="muted">Choose how CineMediaVault looks. This is saved to your account and follows you to every browser and device you sign in on.</p>
+  <form method="post" action="/account/theme">
+    <div class="theme-grid">{theme_rows}</div>
+    <button type="submit">Save Theme</button>
+  </form>
+</div>
+</main>
+<script>document.querySelectorAll('.theme-option').forEach(function(label){{label.addEventListener('click',function(){{document.querySelectorAll('.theme-option').forEach(function(l){{l.classList.remove('selected')}});label.classList.add('selected')}})}});</script>
+</body></html>""")
+
+    def account_theme_submit(self, user):
+        form = self.read_form()
+        theme = normalize_theme(form.get("theme"))
+        conn = db_connect()
+        try:
+            conn.execute("UPDATE users SET theme=?, updated_at=? WHERE id=?", (theme, auth_now(), int(user["id"])))
+            conn.commit()
+        finally:
+            conn.close()
+        self._cinevault_theme = theme
+        return self.account_page(self.current_user(), "Theme updated.")
 
     def login_page(self, error: str = "", message: str = ""):
         parsed = urllib.parse.urlparse(self.path)
@@ -4699,6 +5745,21 @@ modal.addEventListener("click",event=>{{if(event.target===modal) modal.classList
             self.path = f"/login?next={urllib.parse.quote(next_url)}"
             return self.login_page("Invalid username or password.")
         return self.redirect(next_url, cookie=self.create_session(int(row["id"])))
+
+    def tv_login_submit(self):
+        """Token login for signed TV widgets that cannot retain cross-origin cookies."""
+        form = self.read_form()
+        username = (form.get("username") or "").strip()
+        password = form.get("password") or ""
+        conn = db_connect()
+        try:
+            row = conn.execute("SELECT * FROM users WHERE username=? AND active=1", (username,)).fetchone()
+        finally:
+            conn.close()
+        if not row or not password_ok(password, row["password_hash"]):
+            return self.json_response({"ok": False, "error": "Invalid username or password."})
+        token = self.create_session(int(row["id"]))
+        return self.json_response({"ok": True, "token": token, "username": row["username"]})
 
     def signup_submit(self):
         form = self.read_form()
@@ -4820,13 +5881,14 @@ modal.addEventListener("click",event=>{{if(event.target===modal) modal.classList
         return self.render_html(f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>CineMediaVault Users</title><style>
 :root {{ color-scheme:dark; --gold:#f5b73f; --line:rgba(255,255,255,.14); }} body {{ margin:0; background:#08090c; color:#fff; font-family:Inter,system-ui,Segoe UI,sans-serif; }}
-* {{ box-sizing:border-box; }} header {{ display:flex; justify-content:space-between; align-items:center; gap:14px; padding:18px 24px; border-bottom:1px solid var(--line); }} a {{ color:#fff; }} main {{ width:100%; max-width:none; margin:0; padding:24px; }}
-.panel {{ width:100%; border:1px solid var(--line); border-radius:18px; padding:18px; background:#11151d; margin-bottom:22px; overflow:hidden; }} input {{ width:100%; min-height:40px; border-radius:10px; border:1px solid #2a3341; background:#0b1017; color:#fff; padding:0 10px; }}
-.grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }} label {{ font-weight:800; color:#cfd5df; }} button {{ min-height:38px; border:0; border-radius:999px; padding:0 14px; font-weight:900; cursor:pointer; background:var(--gold); color:#111; }}
-.danger {{ background:#62212b; color:#ffdfe4; }} .muted {{ color:#aab4c3; overflow-wrap:anywhere; }} .table-wrap {{ width:100%; overflow-x:auto; }} table {{ width:100%; min-width:920px; border-collapse:collapse; }} th,td {{ padding:10px; border-bottom:1px solid var(--line); text-align:left; vertical-align:middle; }} .actions {{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; }} .actions form {{ margin:0; }} .password-form {{ display:flex; gap:8px; align-items:center; }} .password-form input {{ width:170px; min-height:36px; }} .note {{ padding:10px 12px; border-radius:10px; background:#15351f; margin-bottom:14px; }}
+* {{ box-sizing:border-box; }} header {{ display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:14px; padding:18px 24px; padding-top:calc(18px + env(safe-area-inset-top)); padding-left:calc(24px + env(safe-area-inset-left)); padding-right:calc(24px + env(safe-area-inset-right)); border-bottom:1px solid var(--line); }} a {{ color:#fff; }} main {{ width:100%; max-width:none; margin:0; padding:24px; padding-bottom:calc(24px + env(safe-area-inset-bottom)); }}
+.panel {{ width:100%; border:1px solid var(--line); border-radius:18px; padding:18px; background:#11151d; margin-bottom:22px; overflow:hidden; }} input {{ width:100%; min-height:44px; border-radius:10px; border:1px solid #2a3341; background:#0b1017; color:#fff; padding:0 10px; }}
+.grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }} label {{ font-weight:800; color:#cfd5df; }} button {{ min-height:44px; border:0; border-radius:999px; padding:0 14px; font-weight:900; cursor:pointer; background:var(--gold); color:#111; }}
+.danger {{ background:#62212b; color:#ffdfe4; }} .muted {{ color:#aab4c3; overflow-wrap:anywhere; }} .table-wrap {{ width:100%; overflow-x:auto; -webkit-overflow-scrolling:touch; }} table {{ width:100%; min-width:920px; border-collapse:collapse; }} th,td {{ padding:10px; border-bottom:1px solid var(--line); text-align:left; vertical-align:middle; }} .actions {{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; }} .actions form {{ margin:0; }} .password-form {{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }} .password-form input {{ width:170px; min-height:44px; }} .note {{ padding:10px 12px; border-radius:10px; background:#15351f; margin-bottom:14px; }}
+nav {{ display:flex; flex-wrap:wrap; gap:4px 6px; align-items:center; }} nav a {{ min-height:44px; display:inline-flex; align-items:center; padding:0 6px; }}
 .stats-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }} .stat {{ border:1px solid var(--line); border-radius:14px; padding:14px; background:#0b1017; }} .stat strong,.stat span {{ display:block; }} .stat strong {{ font-size:20px; margin-bottom:8px; }} .stat span {{ color:#cfd8e6; margin:4px 0; }}
 @media (max-width:700px) {{ header {{ padding:14px 18px; }} main {{ padding:18px; }} .grid {{ grid-template-columns:1fr; }} .panel {{ padding:14px; border-radius:14px; }} table {{ min-width:820px; }} .password-form input {{ width:145px; }} }}
-</style></head><body><header><strong>CineMediaVault User Management</strong><nav><a href="/admin/activity">Activity</a> | <a href="/admin/modules">Modules</a> &middot; <a href="/">Home</a> &middot; <a href="/admin/hls">Live Streams</a> &middot; <a href="/logout">Logout</a></nav></header><main>{note}
+</style></head><body><header><strong>CineMediaVault User Management</strong><nav><a href="/admin/activity">Activity</a> | <a href="/admin/modules">Modules</a> &middot; <a href="/admin/usage">Usage</a> &middot; <a href="/">Home</a> &middot; <a href="/admin/hls">Live Streams</a> &middot; <a href="/logout">Logout</a></nav></header><main>{note}
 <section class="panel"><h2>Library Totals</h2>{stats_html}</section>
 <section class="panel"><h2>Pending Account Requests</h2><div class="table-wrap"><table><thead><tr><th>Username</th><th>Name</th><th>Email</th><th>Requested</th><th>Actions</th></tr></thead><tbody>{pending_html}</tbody></table></div></section>
 <section class="panel"><h2>Add User</h2><form method="post" action="/admin/users"><input type="hidden" name="action" value="create"><div class="grid">
@@ -4966,18 +6028,19 @@ modal.addEventListener("click",event=>{{if(event.target===modal) modal.classList
         return self.render_html(f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>CineMediaVault Modules</title><style>
 :root {{ color-scheme:dark; --gold:#f5b73f; --line:rgba(255,255,255,.14); }} body {{ margin:0; background:#08090c; color:#fff; font-family:Inter,system-ui,Segoe UI,sans-serif; }}
-* {{ box-sizing:border-box; }} header {{ display:flex; justify-content:space-between; align-items:center; gap:14px; padding:18px 24px; border-bottom:1px solid var(--line); }} a {{ color:#fff; }} main {{ width:100%; max-width:1180px; margin:0 auto; padding:24px; }}
+* {{ box-sizing:border-box; }} header {{ display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:14px; padding:18px 24px; padding-top:calc(18px + env(safe-area-inset-top)); padding-left:calc(24px + env(safe-area-inset-left)); padding-right:calc(24px + env(safe-area-inset-right)); border-bottom:1px solid var(--line); }} a {{ color:#fff; }} main {{ width:100%; max-width:1180px; margin:0 auto; padding:24px; padding-bottom:calc(24px + env(safe-area-inset-bottom)); }}
 .module-grid {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(310px,1fr)); gap:18px; }} .module-card {{ border:1px solid var(--line); border-radius:18px; padding:18px; background:#11151d; }}
 .module-head {{ display:flex; gap:14px; align-items:center; margin-bottom:14px; }} h1,h2,p {{ margin-top:0; }} h2 {{ margin-bottom:2px; }} .muted {{ color:#aeb7c5; overflow-wrap:anywhere; }}
 .module-icon {{ width:54px; height:54px; display:flex; align-items:center; justify-content:center; border-radius:14px; background:#1b2230; border:1px solid var(--line); font-weight:950; }} .module-logo-text {{ display:inline-block; font-size:14px; }}
 .module-logo {{ display:inline-flex; align-items:center; justify-content:center; min-width:42px; min-height:26px; border-radius:8px; overflow:hidden; background:rgba(255,255,255,.10); font-weight:950; }} .module-logo-img {{ width:100%; height:100%; object-fit:contain; display:block; }} .game-logo {{ line-height:1; }} .logo-comics {{ color:#fff; background:linear-gradient(135deg,#e3342f,#f5b73f); font-family:Impact,Arial Black,Arial,sans-serif; font-size:12px; text-shadow:1px 1px 0 #111; }} .logo-nes {{ min-width:58px; min-height:22px; padding:0 7px; border:2px solid #e60012; border-radius:999px; color:#e60012; background:#fff; font-size:14px; font-weight:900; font-family:Arial Black,Arial,sans-serif; }} .logo-sega {{ color:#0877d8; font-size:18px; font-weight:900; font-family:Arial Black,Arial,sans-serif; text-shadow:1px 0 #fff,-1px 0 #fff,0 1px #fff,0 -1px #fff; }} .logo-dos {{ color:#79ff8c; font-size:14px; font-family:Consolas,monospace; }} .logo-mame {{ color:#ffcf2e; font-size:16px; font-family:Impact,Arial Black,Arial,sans-serif; text-shadow:1px 1px 0 #236bff; }}
 label {{ display:block; font-weight:850; color:#cfd5df; margin:10px 0 6px; }} input,select {{ width:100%; min-height:40px; border-radius:10px; border:1px solid #2a3341; background:#0b1017; color:#fff; padding:0 10px; }}
 .logo-form {{ border-top:1px solid var(--line); margin-top:14px; padding-top:12px; }}
-.grid {{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }} .check {{ display:flex; gap:8px; align-items:center; }} .check input {{ width:auto; min-height:auto; }} button {{ min-height:38px; border:0; border-radius:999px; padding:0 16px; font-weight:900; cursor:pointer; background:var(--gold); color:#111; }}
+.grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:12px; }} .check {{ display:flex; gap:8px; align-items:center; min-height:44px; }} .check input {{ width:auto; min-height:auto; }} button {{ min-height:44px; border:0; border-radius:999px; padding:0 16px; font-weight:900; cursor:pointer; background:var(--gold); color:#111; }}
 .danger {{ background:#62212b; color:#ffdfe4; }} .actions {{ display:flex; gap:10px; flex-wrap:wrap; margin-top:14px; }} .note {{ padding:10px 12px; border-radius:10px; background:#15351f; margin-bottom:14px; }} .running {{ color:#8dff9f; }} .stopped {{ color:#ffb0b9; }}
-@media (max-width:700px) {{ header {{ align-items:flex-start; flex-direction:column; }} main {{ padding:18px; }} .module-grid {{ grid-template-columns:1fr; }} }}
-</style></head><body><header><strong>CineMediaVault Modules</strong><nav><a href="/admin/users">Users</a> &middot; <a href="/admin/activity">Activity</a> &middot; <a href="/admin/hls">Live Streams</a> &middot; <a href="/">Home</a> &middot; <a href="/logout">Logout</a></nav></header>
-<main>{note}<h1>Modules</h1><p class="muted">Show or hide external libraries on the CineMediaVault home page, change their destination URLs, and start or stop the backing services.</p><div class="module-grid">{''.join(rows)}</div></main></body></html>""")
+nav {{ display:flex; flex-wrap:wrap; gap:4px 6px; align-items:center; }} nav a {{ min-height:44px; display:inline-flex; align-items:center; padding:0 6px; }}
+@media (max-width:700px) {{ header {{ align-items:flex-start; flex-direction:column; }} main {{ padding:18px; }} .module-grid {{ grid-template-columns:1fr; }} .grid {{ grid-template-columns:1fr 1fr; }} }}
+</style></head><body><header><strong>CineMediaVault Modules</strong><nav><a href="/admin/users">Users</a> &middot; <a href="/admin/activity">Activity</a> &middot; <a href="/admin/hls">Live Streams</a> &middot; <a href="/admin/usage">Usage</a> &middot; <a href="/">Home</a> &middot; <a href="/logout">Logout</a></nav></header>
+<main>{note}<h1>Modules</h1><p class="muted">Show or hide external libraries on the CineMediaVault home page, change their destination URLs, and start or stop the backing services.</p><p><a href="/admin/vchannels">Manage 24×7 Virtual Channel Schedules</a></p><div class="module-grid">{''.join(rows)}</div></main></body></html>""")
 
     def admin_modules_submit(self, user):
         form = self.read_form()
@@ -5139,14 +6202,15 @@ label {{ display:block; font-weight:850; color:#cfd5df; margin:10px 0 6px; }} in
 <title>CineMediaVault Activity</title><style>
 :root {{ color-scheme:dark; --bg:#090a0d; --panel:#11151d; --line:rgba(255,255,255,.14); --muted:#aab4c3; --gold:#f5b73f; }}
 * {{ box-sizing:border-box; }} body {{ margin:0; background:var(--bg); color:#fff; font-family:Inter,system-ui,Segoe UI,sans-serif; }}
-header {{ position:sticky; top:0; z-index:5; display:flex; justify-content:space-between; align-items:center; gap:14px; padding:18px 22px; background:rgba(9,10,13,.94); border-bottom:1px solid var(--line); }}
-a {{ color:#fff; }} main {{ padding:22px; max-width:1280px; margin:0 auto 40px; }}
-.top {{ display:flex; justify-content:space-between; align-items:center; gap:14px; margin-bottom:18px; }} h1 {{ margin:0; font-size:34px; }} .controls {{ display:flex; gap:10px; align-items:center; }}
-button {{ min-height:38px; border:0; border-radius:999px; padding:0 14px; font-weight:900; cursor:pointer; background:var(--gold); color:#111; }} .danger {{ background:#62212b; color:#ffdfe4; }}
+header {{ position:sticky; top:0; z-index:5; display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:14px; padding:18px 22px; padding-top:calc(18px + env(safe-area-inset-top)); padding-left:calc(22px + env(safe-area-inset-left)); padding-right:calc(22px + env(safe-area-inset-right)); background:rgba(9,10,13,.94); border-bottom:1px solid var(--line); }}
+a {{ color:#fff; }} main {{ padding:22px; padding-bottom:calc(40px + env(safe-area-inset-bottom)); max-width:1280px; margin:0 auto 40px; }}
+nav {{ display:flex; flex-wrap:wrap; gap:4px 6px; align-items:center; }} nav a {{ min-height:44px; display:inline-flex; align-items:center; padding:0 6px; }}
+.top {{ display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:14px; margin-bottom:18px; }} h1 {{ margin:0; font-size:34px; }} .controls {{ display:flex; flex-wrap:wrap; gap:10px; align-items:center; }}
+button {{ min-height:44px; border:0; border-radius:999px; padding:0 14px; font-weight:900; cursor:pointer; background:var(--gold); color:#111; }} .danger {{ background:#62212b; color:#ffdfe4; }}
 .layout {{ display:grid; grid-template-columns:minmax(0,1fr) minmax(320px,.9fr); gap:18px; align-items:start; }}
 .panel,.chart-card {{ border:1px solid var(--line); border-radius:22px; background:var(--panel); overflow:hidden; box-shadow:0 18px 50px rgba(0,0,0,.28); }}
 .panel h2 {{ margin:0; padding:18px 18px 8px; font-size:24px; }}
-.activity-list,.chart-list {{ display:grid; gap:0; padding:10px 18px 18px; max-height:calc(100vh - 150px); overflow:auto; }}
+.activity-list,.chart-list {{ display:grid; gap:0; padding:10px 18px 18px; max-height:calc(100vh - 150px); max-height:calc(100dvh - 150px); overflow:auto; -webkit-overflow-scrolling:touch; }}
 .activity-row,.chart-row {{ display:grid; grid-template-columns:54px minmax(0,1fr); gap:14px; padding:9px 0; text-decoration:none; border-bottom:1px solid rgba(255,255,255,.08); }}
 .activity-row:last-child,.chart-row:last-child {{ border-bottom:0; }}
 .poster {{ width:54px; aspect-ratio:2/3; object-fit:cover; border-radius:6px; background:#06080d; }}
@@ -5156,7 +6220,7 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
 .empty {{ color:var(--muted); padding:14px; border:1px dashed var(--line); border-radius:14px; }}
 @media (max-width:900px) {{ main {{ padding:18px; }} .layout {{ grid-template-columns:1fr; }} .activity-list,.chart-list {{ max-height:none; }} h1 {{ font-size:30px; }} }}
 </style></head><body>
-<header><strong>CineMediaVault Activity</strong><nav><a href="/admin/users">Users</a> &middot; <a href="/admin/hls">Live Streams</a> &middot; <a href="/">Home</a></nav></header>
+<header><strong>CineMediaVault Activity</strong><nav><a href="/admin/users">Users</a> &middot; <a href="/admin/hls">Live Streams</a> &middot; <a href="/admin/usage">Usage</a> &middot; <a href="/">Home</a></nav></header>
 <main>
   <div class="top"><h1>Top Charts</h1><div class="controls"><form method="post" action="/admin/users" onsubmit="return confirm('Clear play history for all users')"><input type="hidden" name="action" value="clear_history_all"><button class="danger" type="submit">Clear History</button></form></div></div>
   <div class="layout">
@@ -5164,6 +6228,79 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
     <div class="charts">{top_tv_html}{top_movies_html}</div>
   </div>
 </main></body></html>""")
+
+    def admin_usage_page(self, user):
+        retention_days = cinevault_usage.get_retention_days()
+
+        def radio(value: int) -> str:
+            checked = "checked" if retention_days == value else ""
+            return f'<label><input type="radio" name="days" value="{value}" {checked}> {value} days</label>'
+
+        retention_radios = "".join(radio(value) for value in (30, 90, 180))
+        return self.render_html(USAGE_PAGE_TEMPLATE.replace("{{RETENTION_RADIOS}}", retention_radios))
+
+    def api_admin_usage_active(self, user):
+        return self.json_response(cinevault_usage.active_snapshot())
+
+    def api_admin_usage_users(self, user):
+        conn = db_connect()
+        try:
+            rows = conn.execute("SELECT id, username, full_name FROM users ORDER BY username").fetchall()
+        finally:
+            conn.close()
+        return self.json_response({"ok": True, "users": [
+            {"id": row["id"], "name": row["full_name"] or row["username"]} for row in rows
+        ]})
+
+    def api_admin_usage_history(self, user):
+        parsed = urllib.parse.urlparse(self.path)
+        params = urllib.parse.parse_qs(parsed.query)
+        range_key = (params.get("range", ["24h"])[0] or "24h").strip().lower()
+        preset_seconds = {"15m": 900, "1h": 3600, "6h": 21600, "24h": 86400, "7d": 7 * 86400, "30d": 30 * 86400}
+        now = time.time()
+
+        def bad_request(message: str):
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(json.dumps({"ok": False, "error": message}).encode("utf-8"))
+
+        if range_key == "custom":
+            try:
+                start_ts = float(params.get("start", [""])[0])
+                end_ts = float(params.get("end", [""])[0])
+            except (TypeError, ValueError):
+                return bad_request("Invalid custom start/end")
+            if end_ts <= start_ts:
+                return bad_request("End must be after start")
+            if end_ts - start_ts > 400 * 86400:
+                return bad_request("Custom range too large")
+            if end_ts > now + 3600:
+                end_ts = now
+        elif range_key in preset_seconds:
+            end_ts = now
+            start_ts = now - preset_seconds[range_key]
+        else:
+            return bad_request("Invalid range")
+
+        user_id_raw = (params.get("user_id", [""])[0] or "").strip()
+        user_id = int(user_id_raw) if user_id_raw.isdigit() else None
+        service = (params.get("service", [""])[0] or "").strip() or None
+        delivery = (params.get("delivery", [""])[0] or "").strip() or None
+        try:
+            result = cinevault_usage.historical_query(start_ts, end_ts, user_id=user_id, service=service, delivery=delivery)
+        except ValueError as exc:
+            return bad_request(str(exc))
+        return self.json_response(result)
+
+    def admin_usage_retention_submit(self, user):
+        form = self.read_form()
+        try:
+            days = int(form.get("days", "90"))
+        except ValueError:
+            days = 90
+        cinevault_usage.set_retention_days(days)
+        return self.redirect("/admin/usage")
 
     def media_state_payload(self, payload: dict, watched: int | None = None) -> dict:
         item = payload.get("item") if isinstance(payload.get("item"), dict) else payload
@@ -5379,48 +6516,234 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
             conn.close()
 
     def api_watch_continue(self, user):
+        return self.json_response({"ok": True, "items": continue_watching_items(user)})
+
+    def api_tv_home(self, user):
+        """Aggregated Home rails for the Samsung TV app: one round trip at app launch."""
+        parsed = urllib.parse.urlparse(self.path)
+        params = urllib.parse.parse_qs(parsed.query)
+        try:
+            limit = max(1, min(50, int(params.get("limit", ["20"])[0])))
+        except (TypeError, ValueError):
+            limit = 20
+        return self.json_response({
+            "ok": True,
+            "continue": continue_watching_items(user),
+            "recent_movies": recent_movies_payload(limit),
+            "recent_shows": recent_shows_payload(limit),
+        })
+
+    def api_tv_show_detail(self, show_id: str):
+        """Native season/episode catalog for the Samsung TV show detail view (JSON, not HTML)."""
+        try:
+            show = tv_app.tv_index.show_by_id[int(show_id)]
+        except Exception:
+            return self.json_response({"ok": False, "error": "show not found"})
+        metadata = tv_app.metadata_for(show)
+        seasons_sorted = sorted(show.seasons.values(), key=lambda season: tv_app.season_sort_key(season.label))
+        seasons = []
+        for season in seasons_sorted:
+            episodes = []
+            for episode in season.episodes:
+                episodes.append({
+                    "id": episode.id,
+                    "title": tv_app.display_episode_title(metadata, episode),
+                    "label": tv_app.episode_number_label(episode),
+                    "airDate": tv_app.episode_air_date(metadata, episode),
+                    "summary": tv_app.episode_summary(metadata, episode),
+                    "still": tv_app.episode_still_url(metadata, episode),
+                    "sizeLabel": tv_app.human_size(episode.size),
+                    "playHref": f"/play/episode/{episode.id}",
+                    "hlsHref": f"/hls/tv/{episode.id}/index.m3u8",
+                    "downloadHref": f"/download/episode/{episode.id}",
+                    "mediaKey": episode_media_key(episode),
+                })
+            seasons.append({
+                "label": season.label,
+                "key": season.key,
+                "episodeCount": len(season.episodes),
+                "sizeLabel": tv_app.human_size(sum(e.size for e in season.episodes)),
+                "episodes": episodes,
+            })
+        return self.json_response({
+            "ok": True,
+            "show": {
+                "id": show.id,
+                "title": metadata.get("title") or show.title,
+                "year": tv_app.release_label_for(metadata),
+                "genres": tv_app.genres_for(metadata),
+                "overview": metadata.get("overview") or "",
+                "poster": tv_app.poster_url_for(show),
+                "backdrop": tv_app.backdrop_url_for(show),
+                "episodeCount": show.count,
+                "sizeLabel": tv_app.human_size(show.size),
+                "seasons": seasons,
+            },
+        })
+
+    def api_tv_last_channel_get(self, user):
         conn = db_connect()
         try:
-            rows = conn.execute(
-                """
-                SELECT * FROM user_media_state
-                WHERE user_id=? AND watched=0 AND (
-                  (duration_seconds>0 AND position_seconds>=10 AND position_seconds<duration_seconds*0.92)
-                  OR (media_type='tv' AND duration_seconds=0 AND position_seconds=0)
-                )
-                ORDER BY updated_at DESC
-                LIMIT 30
-                """,
-                (int(user["id"]),),
-            ).fetchall()
-            items = []
-            for row in rows:
-                card = continue_card_item(row)
-                movie_card_changed = (
-                    row["media_type"] == "movie"
-                    and card.get("key", "").startswith("movie-path:")
-                    and (
-                        row["media_key"] != card["key"]
-                        or int(row["media_id"] or 0) != int(card.get("mediaId") or 0)
-                        or str(row["title"] or "") != str(card.get("title") or "")
-                        or str(row["subtitle"] or "") != str(card.get("subtitle") or "")
-                        or str(row["poster"] or "") != str(card.get("poster") or "")
-                        or str(row["href"] or "") != str(card.get("href") or "")
-                        or str(row["detail_href"] or "") != str(card.get("detailHref") or "")
-                    )
-                )
-                if movie_card_changed:
-                    conn.execute(
-                        """UPDATE user_media_state SET media_key=?,media_id=?,title=?,subtitle=?,poster=?,href=?,detail_href=?
-                           WHERE user_id=? AND media_key=?""",
-                        (card["key"], int(card.get("mediaId") or 0), card["title"], card["subtitle"], card["poster"],
-                         card["href"], card["detailHref"], int(user["id"]), row["media_key"]),
-                    )
-                items.append(card)
-            conn.commit()
-            return self.json_response({"ok": True, "items": items})
+            row = conn.execute("SELECT last_channel_id FROM user_tv_state WHERE user_id=?", (int(user["id"]),)).fetchone()
         finally:
             conn.close()
+        channel_id = int(row["last_channel_id"]) if row else 0
+        channel = hdhr_channel(channel_id) if channel_id else None
+        if not channel:
+            return self.json_response({"ok": True, "channel_id": 0, "channel": None})
+        guide = hdhr_guide_snapshot()
+        now = int(time.time())
+        schedule = guide.get("programmes", {}).get(str(channel["guide_number"]), [])
+        current_index = next((index for index, item in enumerate(schedule) if item["start"] <= now < item["stop"]), -1)
+        payload = dict(channel)
+        payload["current"] = schedule[current_index] if current_index >= 0 else None
+        payload["next"] = schedule[current_index + 1] if current_index >= 0 and current_index + 1 < len(schedule) else None
+        return self.json_response({"ok": True, "channel_id": channel_id, "channel": payload})
+
+    def api_tv_last_channel_set(self, user):
+        payload = self.read_json()
+        try:
+            channel_id = int(payload.get("channel_id") or 0)
+        except (TypeError, ValueError):
+            return self.json_response({"ok": False, "error": "channel_id required"})
+        if channel_id and not hdhr_channel(channel_id):
+            return self.json_response({"ok": False, "error": "unknown channel"})
+        conn = db_connect()
+        try:
+            conn.execute(
+                """INSERT INTO user_tv_state(user_id, last_channel_id, updated_at) VALUES(?, ?, ?)
+                   ON CONFLICT(user_id) DO UPDATE SET last_channel_id=excluded.last_channel_id, updated_at=excluded.updated_at""",
+                (int(user["id"]), channel_id, auth_now()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return self.json_response({"ok": True, "channel_id": channel_id})
+
+    def api_tv_library_match(self, user):
+        parsed = urllib.parse.urlparse(self.path)
+        title = urllib.parse.parse_qs(parsed.query).get("title", [""])[0].strip()
+        if not title:
+            return self.json_response({"ok": False, "error": "title required"})
+        return self.json_response({"ok": True, "match": library_match_for_title(title)})
+
+    def api_tv_movie_detail(self, user, item_id: str):
+        """Full pre-play detail payload for one movie: metadata, tracks, and this user's watch state."""
+        try:
+            item = movie_app.safe_item(item_id)
+        except Exception:
+            return self.json_response({"ok": False, "error": "movie not found"})
+        metadata = movie_app.metadata_for(item)
+        key = movie_media_key(item)
+        subtitle_tracks = discover_subtitles(item.path, "movie", item_id)
+        audio_tracks = probe_audio_tracks(item.path)
+        compatibility = browser_media_compatibility(item.path)
+        actors = [str(name) for name in (metadata.get("actors") or metadata.get("cast") or []) if str(name).strip()][:12]
+        try:
+            rating = float(metadata.get("vote_average") or 0)
+        except (TypeError, ValueError):
+            rating = 0.0
+        runtime_minutes = round(ffprobe_duration(item.path) / 60.0) if item.path else 0
+        return self.json_response({
+            "ok": True,
+            "movie": {
+                "id": item.id,
+                "mediaKey": key,
+                "title": metadata.get("title") or item.title,
+                "year": metadata.get("year") or "",
+                "genres": movie_app.genres_for(metadata),
+                "overview": metadata.get("overview") or "",
+                "runtimeMinutes": runtime_minutes,
+                "rating": rating,
+                "poster": movie_app.poster_url_for(item),
+                "backdrop": movie_app.poster_url_for(item),
+                "sizeLabel": movie_app.human_size(item.size),
+                "actors": actors,
+                "videoCodec": compatibility.get("video_codec") or "",
+                "audioCodec": compatibility.get("audio_codec") or "",
+                "playHref": f"/play/{item.id}",
+                "hlsHref": f"/hls/movie/{item.id}/index.m3u8",
+                "subtitleTracks": [
+                    {"token": t["token"], "label": t["label"], "language": t["language"], "url": t["url"]}
+                    for t in subtitle_tracks
+                ],
+                "audioTracks": audio_tracks,
+                "watchState": watch_state_for_key(int(user["id"]), key),
+                "inWatchlist": is_in_watchlist(int(user["id"]), "movie", item.id),
+            },
+        })
+
+    def api_tv_episode_detail(self, user, item_id: str):
+        """Full pre-play detail payload for one TV episode: metadata, tracks, and this user's watch state."""
+        try:
+            episode = tv_app.safe_episode(item_id)
+        except Exception:
+            return self.json_response({"ok": False, "error": "episode not found"})
+        show = show_for_episode(episode)
+        metadata = tv_app.metadata_for(show) if show else {}
+        episode_meta = tv_episode_display_metadata(metadata, episode)
+        key = episode_media_key(episode)
+        subtitle_tracks = discover_subtitles(episode.path, "tv", item_id)
+        audio_tracks = probe_audio_tracks(episode.path)
+        compatibility = browser_media_compatibility(episode.path)
+        actors = [str(name) for name in (metadata.get("actors") or metadata.get("cast") or []) if str(name).strip()][:12]
+        try:
+            rating = float(episode_meta.get("vote_average") or 0)
+        except (TypeError, ValueError):
+            rating = 0.0
+        runtime_minutes = round(ffprobe_duration(episode.path) / 60.0) if episode.path else 0
+        next_ep = next_episode_for(episode)
+        prev_ep = previous_episode_for(episode)
+        return self.json_response({
+            "ok": True,
+            "episode": {
+                "id": episode.id,
+                "mediaKey": key,
+                "showId": show.id if show else 0,
+                "showTitle": episode.show,
+                "title": episode_meta.get("title") or episode.title,
+                "label": episode_label(episode),
+                "airDate": episode_meta.get("air_date") or "",
+                "summary": episode_meta.get("summary") or metadata.get("overview") or "",
+                "genres": tv_app.genres_for(metadata) if show else [],
+                "runtimeMinutes": runtime_minutes,
+                "rating": rating,
+                "poster": tv_app.episode_still_url(metadata, episode) or (tv_app.poster_url_for(show) if show else ""),
+                "backdrop": tv_app.backdrop_url_for(show) if show else "",
+                "showPoster": tv_app.poster_url_for(show) if show else "",
+                "sizeLabel": tv_app.human_size(episode.size),
+                "actors": actors,
+                "videoCodec": compatibility.get("video_codec") or "",
+                "audioCodec": compatibility.get("audio_codec") or "",
+                "playHref": f"/play/episode/{episode.id}",
+                "hlsHref": f"/hls/tv/{episode.id}/index.m3u8",
+                "subtitleTracks": [
+                    {"token": t["token"], "label": t["label"], "language": t["language"], "url": t["url"]}
+                    for t in subtitle_tracks
+                ],
+                "audioTracks": audio_tracks,
+                "watchState": watch_state_for_key(int(user["id"]), key),
+                "inWatchlist": is_in_watchlist(int(user["id"]), "tv", show.id if show else episode.id),
+                "hasNext": bool(next_ep),
+                "hasPrevious": bool(prev_ep),
+                "nextId": next_ep.id if next_ep else 0,
+            },
+        })
+
+    def api_tv_watchlist_set(self, user):
+        payload = self.read_json()
+        media_type = str(payload.get("mediaType") or payload.get("media_type") or "").strip().lower()
+        if media_type not in {"movie", "tv"}:
+            return self.json_response({"ok": False, "error": "mediaType must be movie or tv"})
+        try:
+            media_id = int(payload.get("mediaId") or payload.get("media_id") or 0)
+        except (TypeError, ValueError):
+            media_id = 0
+        if not media_id:
+            return self.json_response({"ok": False, "error": "mediaId required"})
+        add = bool(payload.get("add", True))
+        set_watchlist(int(user["id"]), media_type, media_id, add)
+        return self.json_response({"ok": True, "mediaType": media_type, "mediaId": media_id, "inWatchlist": add})
 
     def api_playback_mode_get(self, user):
         return self.json_response({"ok": True, "mode": read_global_playback_mode()})
@@ -5444,6 +6767,7 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
 
     def dispatch(self, head: bool = False):
         path = self.path.split("?", 1)[0]
+        self._cinevault_theme = DEFAULT_THEME
         if path.startswith("/posters/"):
             try:
                 return movie_app.Handler.serve_poster(self, path)
@@ -5459,11 +6783,22 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
             if self.current_user():
                 return self.redirect("/")
             return self.login_page()
+        if path == "/api/tv/open":
+            parsed = urllib.parse.urlsplit(self.path)
+            query = urllib.parse.parse_qs(parsed.query)
+            token = (query.get("access_token") or [""])[-1]
+            next_url = (query.get("next") or ["/"])[-1]
+            if not token or not self.current_user():
+                return self.send_error(401, "TV session expired")
+            if not next_url.startswith("/") or next_url.startswith("//"):
+                next_url = "/"
+            return self.redirect(next_url, cookie=token)
         if path == "/logout":
             return self.logout()
         if path == "/api/homepage/status":
             return self.json_response(homepage_status_payload(self))
         user = self.current_user()
+        self._cinevault_theme = theme_for_row(user)
         if not user:
             return self.require_auth(path)
         movie_id_routes = (
@@ -5492,6 +6827,8 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
             return self.admin_users_page(user)
         if path == "/downloads":
             return self.downloads_page(user)
+        if path == "/account":
+            return self.account_page(user)
         if path == "/admin/activity":
             if not user["is_admin"]:
                 return self.send_error(403)
@@ -5500,6 +6837,22 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
             if not user["is_admin"]:
                 return self.send_error(403)
             return self.admin_hls_page(user)
+        if path == "/admin/usage":
+            if not user["is_admin"]:
+                return self.send_error(403)
+            return self.admin_usage_page(user)
+        if path == "/api/admin/usage/active":
+            if not user["is_admin"]:
+                return self.send_error(403)
+            return self.api_admin_usage_active(user)
+        if path == "/api/admin/usage/history":
+            if not user["is_admin"]:
+                return self.send_error(403)
+            return self.api_admin_usage_history(user)
+        if path == "/api/admin/usage/users":
+            if not user["is_admin"]:
+                return self.send_error(403)
+            return self.api_admin_usage_users(user)
         if path == "/admin/modules":
             if not user["is_admin"]:
                 return self.send_error(403)
@@ -5529,13 +6882,29 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
             media = dvr_module.recording_media(path.rsplit("/", 1)[-1], int(user["id"]))
             if not media:
                 return self.send_error(404, "Recording not found")
-            return self.serve_file(media["path"], disposition="attachment")
+            return self.serve_file(media["path"], disposition="attachment", service="dvr")
         if path == "/live-tv" or path == "/dvr" or path.startswith("/dvr/") or path.startswith("/api/dvr/"):
             handled = dvr_module.handle_get(self, user, path)
             if handled is not False:
                 return handled
         if path == "/live-tv/simple":
             return self.live_tv_page()
+        if (
+            path.startswith("/vchannels")
+            or path == "/admin/vchannels"
+            or path.startswith("/api/vchannels/")
+            or path.startswith("/watch/vchannel/")
+        ):
+            handled = virtual_channels.handle_get(
+                self, user, path, movie_app, tv_app, vchannel_resolve_source, vchannel_captions,
+                vchannel_ensure_preview_source, vchannel_audio_markup,
+            )
+            if handled is not False:
+                return handled
+        if path.startswith("/genres/") or path.startswith("/api/genres/"):
+            handled = genre_catalog.handle_get(self, user, path, movie_app, tv_app)
+            if handled is not False:
+                return handled
         if path == "/actor":
             return self.actor_page()
         if path == "/movies":
@@ -5552,6 +6921,8 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
             return self.direct_player("tv", path.rsplit("/", 1)[-1])
         if path.startswith("/subtitles/"):
             return self.serve_subtitle(path, head_only=head)
+        if path.startswith("/hls/vpreview/"):
+            return self.serve_preview_hls(path)
         if path.startswith("/hls/"):
             return self.serve_hls(path)
         if path == "/api/refresh":
@@ -5590,6 +6961,22 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
             return self.api_video_wall_bandwidth(user)
         if path == "/api/hdhr/devices":
             return self.api_hdhr_devices(user)
+        if path == "/api/tv/home":
+            return self.api_tv_home(user)
+        if path == "/api/tv/movies":
+            return self.json_response({"ok": True, "movies": all_movies_payload()})
+        if path == "/api/tv/shows":
+            return self.json_response({"ok": True, "shows": all_shows_payload()})
+        if path.startswith("/api/tv/shows/"):
+            return self.api_tv_show_detail(path.rsplit("/", 1)[-1])
+        if path.startswith("/api/tv/movie/"):
+            return self.api_tv_movie_detail(user, path.rsplit("/", 1)[-1])
+        if path.startswith("/api/tv/episode/"):
+            return self.api_tv_episode_detail(user, path.rsplit("/", 1)[-1])
+        if path == "/api/tv/last-channel":
+            return self.api_tv_last_channel_get(user)
+        if path == "/api/tv/library-match":
+            return self.api_tv_library_match(user)
         if path.startswith("/mobile-download/file/"):
             return self.mobile_download_file(user, path.rsplit("/", 1)[-1])
         if path == "/api/continue-metadata":
@@ -5603,6 +6990,19 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
             return self.json_response({"ok": True, "items": items})
         if path == "/api/movies":
             return movie_app.Handler.api_movies(self)
+        if path == "/api/shows":
+            shows = []
+            for show in tv_app.tv_index.shows:
+                metadata = tv_app.metadata_for(show)
+                shows.append({
+                    "id": show.id,
+                    "title": metadata.get("title") or show.title,
+                    "year": metadata.get("year") or "",
+                    "poster": tv_app.poster_url_for(show),
+                    "episode_count": show.count,
+                    "size_label": tv_app.human_size(show.size),
+                })
+            return self.json_response({"ok": True, "shows": shows})
         if path.startswith("/tv/show/"):
             return tv_app.Handler.show_detail(self, path.rsplit("/", 1)[-1])
         if path.startswith("/movie/fix-match/"):
@@ -5630,15 +7030,17 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
     def landing(self):
         user = self.current_user()
         initial = (user["username"][:1].upper() if user and user["username"] else "U")
-        account_links = ['<a href="/downloads">Downloads</a>', '<a href="/logout">Logout</a>']
+        account_links = ['<a href="/downloads">Downloads</a>', '<a href="/account">Settings</a>', '<a href="/logout">Logout</a>']
         if user and user["is_admin"]:
             pending_count = pending_user_count()
             badge = f"<span class='badge'>{pending_count}</span>" if pending_count else ""
             account_links = [
                 '<a href="/downloads">Downloads</a>',
+                '<a href="/account">Settings</a>',
                 '<a href="/admin/users">Users</a>',
                 '<a href="/admin/modules">Modules</a>',
                 '<a href="/admin/hls">Live Streams</a>',
+                '<a href="/admin/usage">Usage</a>',
                 '<a href="/logout">Logout</a>',
             ]
         else:
@@ -5648,14 +7050,19 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
             f'aria-label="Account menu">{html.escape(initial)}{badge}</button>'
             f'<div class="account-menu" id="accountMenu">{"".join(account_links)}</div></div>'
         )
+        added_times = recent_added_timestamps()
         recent_movies = sorted(
             [item for item in movie_app.movie_index.items if item.modified],
-            key=lambda item: item.modified,
+            key=lambda item: added_times.get(movie_media_key(item), 0),
             reverse=True,
         )[:15]
         recent_shows = sorted(
             [show for show in tv_app.tv_index.shows if tv_app.show_modified(show)],
-            key=tv_app.show_modified,
+            key=lambda show: max(
+                (added_times.get(episode_media_key(episode), 0)
+                 for season in show.seasons.values() for episode in season.episodes),
+                default=0,
+            ),
             reverse=True,
         )[:15]
         recent_released = recently_released_items(15)
@@ -5677,6 +7084,7 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
             .replace("{{GLOBAL_PLAYBACK_MODE_CLASS}}", "hls" if playback_mode == "hls" else "")
             .replace('<div class="avatar">J</div>', avatar)
         )
+        body = inject_theme(body, getattr(self, "_cinevault_theme", DEFAULT_THEME))
         data = body.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -5706,6 +7114,7 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
             .replace("{{SUBTITLE}}", html.escape(subtitle))
             .replace("{{RESULTS}}", cards)
         )
+        body = inject_theme(body, getattr(self, "_cinevault_theme", DEFAULT_THEME))
         data = body.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -5723,6 +7132,7 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
         body = (SEARCH_PAGE.replace("{{QUERY}}", html.escape(name)).replace("{{TITLE}}", html.escape(name or "Actor"))
                 .replace("{{SUBTITLE}}", html.escape(f"{len(results)} movie and TV title(s) in your library."))
                 .replace("{{RESULTS}}", cards))
+        body = inject_theme(body, getattr(self, "_cinevault_theme", DEFAULT_THEME))
         data = body.encode("utf-8")
         self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
 
@@ -6062,13 +7472,14 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
 <title>CineMediaVault Downloads</title><style>
 :root {{ color-scheme:dark; --bg:#080a0f; --panel:#11151d; --line:#263041; --gold:#f5b73f; --muted:#aab4c3; }}
 * {{ box-sizing:border-box; }} body {{ margin:0; background:var(--bg); color:#fff; font-family:Inter,system-ui,Segoe UI,sans-serif; }}
-header {{ position:sticky; top:0; z-index:3; display:flex; justify-content:space-between; align-items:center; gap:12px; padding:18px 22px; background:rgba(8,10,15,.94); border-bottom:1px solid var(--line); }}
-a {{ color:#fff; }} main {{ padding:22px; max-width:920px; margin:0 auto; }} h1,h2,p {{ margin-top:0; }}
+header {{ position:sticky; top:0; z-index:3; display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:12px; padding:18px 22px; padding-top:calc(18px + env(safe-area-inset-top)); padding-left:calc(22px + env(safe-area-inset-left)); padding-right:calc(22px + env(safe-area-inset-right)); background:rgba(8,10,15,.94); border-bottom:1px solid var(--line); }}
+a {{ color:#fff; }} main {{ padding:22px; padding-bottom:calc(22px + env(safe-area-inset-bottom)); max-width:920px; margin:0 auto; }} h1,h2,p {{ margin-top:0; }}
+nav {{ display:flex; flex-wrap:wrap; gap:4px 6px; align-items:center; }} nav a {{ min-height:44px; display:inline-flex; align-items:center; padding:0 6px; }}
 .summary {{ display:flex; flex-wrap:wrap; gap:10px; margin-bottom:18px; }}
 .pill {{ min-height:34px; display:inline-flex; align-items:center; padding:0 12px; border-radius:999px; background:#151b25; border:1px solid var(--line); color:#dbe3ef; font-weight:850; }}
 .grid {{ display:grid; gap:14px; }}
 .download-card {{ border:1px solid var(--line); border-radius:18px; background:var(--panel); padding:15px; }}
-.download-head {{ display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }}
+.download-head {{ display:flex; flex-wrap:wrap; justify-content:space-between; align-items:flex-start; gap:12px; }}
 .download-head a {{ color:#fff; text-decoration:none; min-width:0; }}
 .download-head h2 {{ margin:0 0 6px; font-size:20px; line-height:1.14; }}
 .meta {{ color:var(--muted); font-size:13px; margin:7px 0; overflow-wrap:anywhere; }}
@@ -6076,7 +7487,7 @@ a {{ color:#fff; }} main {{ padding:22px; max-width:920px; margin:0 auto; }} h1,
 .bar i {{ display:block; height:100%; border-radius:999px; background:var(--gold); }}
 .state {{ flex:0 0 auto; border-radius:999px; padding:5px 9px; background:#202836; color:#dbe3ef; font-size:12px; font-weight:900; }}
 .state.ready {{ background:#15351f; color:#baffc4; }} .state.error {{ background:#411924; color:#ffd9df; }} .state.running,.state.queued {{ background:#3a2b0c; color:#ffdc8a; }}
-.download-link {{ display:inline-flex; min-height:36px; align-items:center; margin-top:10px; padding:0 13px; border-radius:999px; background:#1d7f3a; color:#fff; text-decoration:none; font-weight:900; }}
+.download-link {{ display:inline-flex; min-height:44px; align-items:center; margin-top:10px; padding:0 13px; border-radius:999px; background:#1d7f3a; color:#fff; text-decoration:none; font-weight:900; }}
 .empty {{ color:var(--muted); padding:14px; border:1px dashed var(--line); border-radius:14px; }}
 @media (max-width:650px) {{ main {{ padding:16px; }} header {{ padding:14px 16px; align-items:flex-start; flex-direction:column; }} .download-head h2 {{ font-size:17px; }} }}
 </style></head><body><header><strong>CineMediaVault Downloads</strong><nav><a href="/">Home</a> &middot; <a href="/movies">Movies</a> &middot; <a href="/tv">TV Shows</a> &middot; <a href="/logout">Logout</a></nav></header>
@@ -6238,6 +7649,12 @@ a {{ color:#fff; }} main {{ padding:22px; max-width:920px; margin:0 auto; }} h1,
         }
         with DIRECT_STREAM_LOCK:
             DIRECT_STREAMS[stream_id] = stream
+        usage_key = f"direct:{stream_id}"
+        cinevault_usage.session_start(
+            usage_key, user=user, service=kind, delivery="direct", media_type=kind, media_id=media_id,
+            title=stream["title"], subtitle=stream["subtitle"], transcoding=False,
+            client=self.headers.get("User-Agent", ""), kind="hold",
+        )
         try:
             with path.open("rb") as handle:
                 handle.seek(start)
@@ -6251,6 +7668,7 @@ a {{ color:#fff; }} main {{ padding:22px; max-width:920px; margin:0 auto; }} h1,
                         break
                     self.wfile.write(chunk)
                     remaining -= len(chunk)
+                    cinevault_usage.record_bytes(user, kind, "direct", len(chunk), session_key=usage_key)
                     sent = length - remaining
                     byte_position = min(file_size, start + sent)
                     position = (byte_position / file_size) * duration if file_size > 0 and duration > 0 else 0.0
@@ -6270,6 +7688,7 @@ a {{ color:#fff; }} main {{ padding:22px; max-width:920px; margin:0 auto; }} h1,
                 if current:
                     current["done"] = True
                 DIRECT_STREAMS.pop(stream_id, None)
+            cinevault_usage.session_end(usage_key)
 
     def admin_hls_page(self, user, message: str = ""):
         items = self.hls_cache_items()
@@ -6352,10 +7771,11 @@ a {{ color:#fff; }} main {{ padding:22px; max-width:920px; margin:0 auto; }} h1,
 <title>CineMediaVault HLS Streams</title><style>
 :root {{ color-scheme:dark; --bg:#080a0f; --panel:#11151d; --line:#263041; --gold:#f5b73f; --danger:#cf3448; --muted:#aab4c3; }}
 * {{ box-sizing:border-box; }} body {{ margin:0; background:var(--bg); color:#fff; font-family:Inter,system-ui,Segoe UI,sans-serif; }}
-header {{ position:sticky; top:0; z-index:3; display:flex; justify-content:space-between; align-items:center; gap:12px; padding:18px 22px; background:rgba(8,10,15,.94); border-bottom:1px solid var(--line); }}
-a {{ color:#fff; }} main {{ padding:22px; max-width:1180px; margin:0 auto; }} h1,h2,h3,p {{ margin-top:0; }} .summary {{ display:flex; flex-wrap:wrap; gap:10px; margin-bottom:18px; }}
+header {{ position:sticky; top:0; z-index:3; display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:12px; padding:18px 22px; padding-top:calc(18px + env(safe-area-inset-top)); padding-left:calc(22px + env(safe-area-inset-left)); padding-right:calc(22px + env(safe-area-inset-right)); background:rgba(8,10,15,.94); border-bottom:1px solid var(--line); }}
+a {{ color:#fff; }} main {{ padding:22px; padding-bottom:calc(22px + env(safe-area-inset-bottom)); max-width:1180px; margin:0 auto; }} h1,h2,h3,p {{ margin-top:0; }} .summary {{ display:flex; flex-wrap:wrap; gap:10px; margin-bottom:18px; }}
+nav {{ display:flex; flex-wrap:wrap; gap:4px 6px; align-items:center; }} nav a {{ min-height:44px; display:inline-flex; align-items:center; padding:0 6px; }}
 .pill {{ min-height:34px; display:inline-flex; align-items:center; padding:0 12px; border-radius:999px; background:#151b25; border:1px solid var(--line); color:#dbe3ef; font-weight:850; }}
-.controls {{ display:flex; gap:10px; flex-wrap:wrap; margin:0 0 22px; }} button {{ min-height:38px; border:0; border-radius:999px; padding:0 15px; background:var(--gold); color:#111; font-weight:950; cursor:pointer; }} button:disabled {{ opacity:.45; cursor:not-allowed; }} .danger-btn {{ background:var(--danger); color:#fff; }}
+.controls {{ display:flex; gap:10px; flex-wrap:wrap; margin:0 0 22px; }} button {{ min-height:44px; border:0; border-radius:999px; padding:0 15px; background:var(--gold); color:#111; font-weight:950; cursor:pointer; }} button:disabled {{ opacity:.45; cursor:not-allowed; }} .danger-btn {{ background:var(--danger); color:#fff; }}
 .note {{ padding:12px 14px; border-radius:12px; background:#15351f; color:#dfffe7; font-weight:800; margin-bottom:16px; }}
 .section {{ margin:0 0 28px; }} .grid {{ display:grid; gap:14px; }} .stream-card {{ display:grid; grid-template-columns:110px minmax(0,1fr); gap:16px; border:1px solid var(--line); border-radius:18px; background:var(--panel); padding:14px; }}
 .poster-link img,.poster {{ width:110px; aspect-ratio:2/3; object-fit:cover; border-radius:10px; background:#07090d; }} .poster.missing {{ display:grid; place-items:center; color:#8290a3; font-size:12px; font-weight:900; border:1px solid var(--line); text-align:center; }}
@@ -6363,14 +7783,14 @@ h3 {{ margin:0 0 4px; font-size:20px; }} p {{ color:#dbe2ec; margin:0 0 8px; }} 
 .bar {{ width:100%; height:8px; border-radius:999px; background:#030507; overflow:hidden; margin:5px 0; }} .bar i {{ display:block; height:100%; border-radius:999px; background:var(--gold); }}
 .users {{ display:grid; gap:9px; margin:12px 0; }} .user-row {{ border:1px solid rgba(255,255,255,.10); border-radius:12px; padding:9px; background:rgba(255,255,255,.04); }} .user-row span {{ display:block; color:var(--muted); font-size:12px; margin-top:3px; }}
 .mobile-card,.settings-card {{ border:1px solid var(--line); border-radius:18px; background:var(--panel); padding:14px; margin-bottom:18px; }}
-.mobile-head {{ display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }}
+.mobile-head {{ display:flex; flex-wrap:wrap; justify-content:space-between; align-items:flex-start; gap:12px; }}
 .mobile-head a {{ color:#fff; text-decoration:none; }}
 .state {{ flex:0 0 auto; border-radius:999px; padding:5px 9px; background:#202836; color:#dbe3ef; font-size:12px; font-weight:900; }}
 .state.ready {{ background:#15351f; color:#baffc4; }} .state.error {{ background:#411924; color:#ffd9df; }} .state.running,.state.queued {{ background:#3a2b0c; color:#ffdc8a; }}
-.download-link {{ display:inline-flex; min-height:34px; align-items:center; margin-top:10px; padding:0 12px; border-radius:999px; background:#1d7f3a; color:#fff; text-decoration:none; font-weight:900; }} .job-actions {{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; }} .small-btn {{ min-height:34px; padding:0 12px; margin-top:10px; }} label {{ display:inline-flex; gap:7px; align-items:center; min-height:38px; padding:0 12px; border:1px solid var(--line); border-radius:999px; background:#151b25; font-weight:850; }}
+.download-link {{ display:inline-flex; min-height:44px; align-items:center; margin-top:10px; padding:0 12px; border-radius:999px; background:#1d7f3a; color:#fff; text-decoration:none; font-weight:900; }} .job-actions {{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; }} .small-btn {{ min-height:40px; padding:0 12px; margin-top:10px; }} label {{ display:inline-flex; gap:7px; align-items:center; min-height:44px; padding:0 12px; border:1px solid var(--line); border-radius:999px; background:#151b25; font-weight:850; }}
 .empty {{ color:var(--muted); padding:14px; border:1px dashed var(--line); border-radius:14px; }}
 @media (max-width:650px) {{ main {{ padding:16px; }} header {{ padding:14px 16px; align-items:flex-start; flex-direction:column; }} .stream-card {{ grid-template-columns:82px minmax(0,1fr); gap:12px; padding:12px; }} .poster-link img,.poster {{ width:82px; }} h3 {{ font-size:17px; }} }}
-</style></head><body><header><strong>CineMediaVault HLS Admin</strong><nav><a href="/admin/activity">Activity</a> | <a href="/admin/users">Users</a> &middot; <a href="/">Home</a></nav></header>
+</style></head><body><header><strong>CineMediaVault HLS Admin</strong><nav><a href="/admin/activity">Activity</a> | <a href="/admin/users">Users</a> &middot; <a href="/admin/usage">Usage</a> &middot; <a href="/">Home</a></nav></header>
 <main>{note}<div class="summary"><span class="pill">{len(active)} active HLS stream(s)</span><span class="pill">{len(direct_items)} active direct stream(s)</span><span class="pill">{len(items)} cache folder(s)</span><span class="pill">{movie_app.human_size(cache_size)} cache used</span></div>
 <div class="summary"><span class="pill">{len(mobile_items)} mobile download job(s)</span><span class="pill">{movie_app.human_size(mobile_cache_size)} mobile cache used</span></div>
 <form class="controls" method="post" action="/admin/hls"><button class="danger-btn" name="action" value="stop_all" type="submit">Stop All ffmpeg HLS</button><button class="danger-btn" name="action" value="clear_cache" type="submit" onclick="return confirm('Stop all HLS streams and clear the HLS cache')">Clear HLS Cache</button><button class="danger-btn" name="action" value="clear_mobile_cache" type="submit" onclick="return confirm('Clear prepared compressed mobile downloads')">Clear Mobile Download Cache</button></form>
@@ -6560,7 +7980,8 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
                         "subtitle": str(meta.get("year") or "Movie"),
                         "poster": movie_app.poster_url_for(item) or "",
                         "stream_url": f"/play/{item.id}", "hls_url": f"/hls/movie/{item.id}/index.m3u8",
-                        "requires_hls": compatibility["requires_hls"], "media_path": str(item.path)}
+                        "requires_hls": compatibility["requires_hls"], "media_path": str(item.path),
+                        "media_key": movie_media_key(item)}
             episode = next((value for value in tv_app.tv_index.episode_by_id.values() if media_path and str(value.path) == media_path), None)
             episode = episode or tv_app.safe_episode(str(media_id))
             show = show_for_episode(episode)
@@ -6572,12 +7993,15 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
                     "subtitle": f"{episode_label(episode)} - {episode_meta.get('title') or episode.title}",
                     "poster": (tv_app.poster_url_for(show) if show else "") or "",
                     "stream_url": f"/play/episode/{episode.id}", "hls_url": f"/hls/tv/{episode.id}/index.m3u8",
-                    "requires_hls": compatibility["requires_hls"], "media_path": str(episode.path)}
+                    "requires_hls": compatibility["requires_hls"], "media_path": str(episode.path),
+                    "media_key": episode_media_key(episode)}
         except Exception:
             return None
 
     def video_wall_page(self):
-        return self.render_html(VIDEO_WALL_PAGE)
+        user = self.current_user()
+        usage_link = '<a class="button" href="/admin/usage">Full Usage Details</a>' if user and user["is_admin"] else ""
+        return self.render_html(VIDEO_WALL_PAGE.replace("{{USAGE_LINK}}", usage_link))
 
     def live_tv_page(self):
         return self.render_html(LIVE_TV_PAGE)
@@ -6747,11 +8171,19 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
                 if sample_time >= now - window_seconds and sample_user == user_id
             )
         bytes_per_second = byte_count / window_seconds
+        snapshot = cinevault_usage.active_snapshot()
+        streams = [
+            {"kind": session["media_type"], "media_id": session["media_id"], "bps": session["bps"]}
+            for session in snapshot["sessions"]
+            if session["user_id"] == user_id and session["service"] in {"movie", "tv"}
+        ]
         return self.json_response({
             "ok": True,
             "window_seconds": window_seconds,
             "bytes_per_second": round(bytes_per_second, 2),
             "mbps": round(bytes_per_second * 8 / 1_000_000, 3),
+            "cpu_cinevault_pct": snapshot.get("cpu_cinevault_pct"),
+            "streams": streams,
         })
 
     def watch_media(self, kind: str, item_id: str):
@@ -6763,6 +8195,7 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
             .replace("{{BACK}}", item["back"])
             .replace("{{PLAYLIST}}", stream["playlist_url"])
         )
+        body = inject_theme(body, getattr(self, "_cinevault_theme", DEFAULT_THEME))
         data = body.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -6795,7 +8228,14 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
         playback_mode = (query.get("mode", [read_global_playback_mode()])[0] or "direct").lower()
         if playback_mode not in {"direct", "hls"}:
             playback_mode = "direct"
-        context = direct_player_context(kind, item_id, playback_mode=playback_mode)
+        audio_index = None
+        try:
+            audio_raw = query.get("audio", [""])[0]
+            audio_index = int(audio_raw) if audio_raw != "" else None
+        except (TypeError, ValueError):
+            audio_index = None
+        context = direct_player_context(kind, item_id, playback_mode=playback_mode, audio_index=audio_index)
+        playback_mode = context["playback_mode"]
         if user and user["is_admin"]:
             context["more_menu"] += more_menu_link("A", "Admin", "File details and administrative controls", f"/admin/media/{kind}/{item_id}")
         direct_play = query.get("play", [""])[0] == "1"
@@ -6807,6 +8247,7 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
             .replace("{{TITLE}}", html.escape(context["title"]))
             .replace("{{SUBTITLE}}", html.escape(context["subtitle"]))
             .replace("{{BACK}}", context["back"])
+            .replace("{{GUIDE_URL}}", "/vchannels/movies" if kind == "movie" else "/vchannels/tv")
             .replace("{{SOURCE}}", context["source"])
             .replace("{{BACKGROUND_STYLE}}", context["background"])
             .replace("{{POSTER}}", context["poster"])
@@ -6818,6 +8259,7 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
             .replace("{{VIDEO_LABEL}}", html.escape(context["video_label"]))
             .replace("{{SUBTITLE_TRACKS}}", context["caption_tracks"])
             .replace("{{CAPTION_CONTROL}}", context["caption_control"])
+            .replace("{{AUDIO_CONTROL}}", context["audio_control"])
             .replace("{{SUBTITLE_SUMMARY}}", html.escape(context["caption_summary"]))
             .replace("{{DIRECT_MODE_CLASS}}", "active" if playback_mode == "direct" else "")
             .replace("{{HLS_MODE_CLASS}}", "active" if playback_mode == "hls" else "")
@@ -6840,6 +8282,7 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
             .replace("{{PREV_JSON}}", json.dumps(context["prev"]))
             .replace("{{NEXT_JSON}}", json.dumps(context["next"]))
         )
+        body = inject_theme(body, getattr(self, "_cinevault_theme", DEFAULT_THEME))
         data = body.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -6897,6 +8340,12 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
         if "/" in filename or "\\" in filename or filename.startswith("."):
             self.send_error(403, "Invalid HLS filename")
             return
+        audio_index = None
+        try:
+            audio_raw = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get("audio", [""])[0]
+            audio_index = int(audio_raw) if audio_raw != "" else None
+        except (TypeError, ValueError):
+            audio_index = None
         if kind == "tuner":
             channel = hdhr_channel(int(item_id))
             if not channel:
@@ -6913,18 +8362,40 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
             stream = ensure_hls_stream(kind, item_id, item["path"])
         else:
             item = media_for_kind(kind, item_id)
-            stream = ensure_hls_stream(kind, item_id, item["path"])
+            stream = ensure_hls_stream(kind, item_id, item["path"], audio_index=audio_index)
         user = self.current_user()
+        usage_key = None
+        usage_service = {"tuner": "live_tv", "dvr": "dvr"}.get(kind, kind)
         if user:
             user_id = int(user["id"])
             remote = self.client_address[0] if self.client_address else ""
-            viewer_key = f"{stream['key']}:{user_id}:{remote}"
+            # A source IP is not a viewer identity: phones, TVs and load-test
+            # players commonly share one address behind NAT. Bind HLS activity
+            # to the authenticated session and an optional per-player hint so
+            # separate video elements are counted without exposing either value.
+            session_token = self.cookie_value(CINEVAULT_SESSION_COOKIE) or ""
+            player_hint = (self.headers.get("X-CineVault-Player-ID", "") or "").strip()[:80]
+            if player_hint and not re.fullmatch(r"[A-Za-z0-9._:-]+", player_hint):
+                player_hint = ""
+            identity_source = f"{session_token}:{player_hint}" if session_token else f"{remote}:{player_hint}"
+            viewer_identity = hashlib.sha256(identity_source.encode("utf-8")).hexdigest()[:20]
+            viewer_key = f"{stream['key']}:{user_id}:{viewer_identity}"
+            usage_key = f"hls:{viewer_key}"
             segment_match = re.search(r"(\d+)(?=\.[^.]+$)", filename)
             with HLS_VIEWER_LOCK:
                 previous = HLS_VIEWERS.get(viewer_key, {})
                 position = float(previous.get("position") or 0)
                 if segment_match:
                     position = (int(segment_match.group(1)) + 1) * max(1.0, float(HLS_SEGMENT_SECONDS))
+                if previous.get("usage_title"):
+                    usage_title, usage_subtitle = previous["usage_title"], previous.get("usage_subtitle", "")
+                elif kind == "tuner":
+                    usage_title, usage_subtitle = f"{channel['guide_number']} {channel['guide_name']}", "Live TV"
+                elif kind == "dvr":
+                    usage_title, usage_subtitle = item.get("title") or "DVR Recording", "DVR"
+                else:
+                    summary = self.hls_media_summary(kind, item_id)
+                    usage_title, usage_subtitle = summary.get("title") or f"{kind} {item_id}", summary.get("subtitle") or ""
                 HLS_VIEWERS[viewer_key] = {
                     "kind": kind,
                     "item_id": str(item_id),
@@ -6934,10 +8405,18 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
                     "position": position,
                     "duration": float(item.get("duration") or (0 if kind == "tuner" else ffprobe_duration(item["path"])) or 0),
                     "updated_at": time.time(),
+                    "usage_title": usage_title,
+                    "usage_subtitle": usage_subtitle,
                 }
+            cinevault_usage.session_touch(
+                usage_key, user=user, service=usage_service, delivery="hls", media_type=kind, media_id=str(item_id),
+                title=usage_title, subtitle=usage_subtitle, transcoding=True,
+                client=self.headers.get("User-Agent", ""), pid=stream.get("pid"),
+            )
         if kind != "tuner" and filename.endswith(".m3u8") and HLS_VIRTUAL_VOD:
             data = virtual_vod_playlist(item["path"])
             if data:
+                data = rewrite_hls_playlist_for_token_and_params(data, self.bearer_or_query_token(), {"audio": audio_index})
                 try:
                     (stream["dir"] / ".last_access").write_text(str(time.time()), encoding="utf-8")
                 except OSError:
@@ -6948,6 +8427,8 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(data)
+                if usage_key:
+                    cinevault_usage.record_bytes(user, usage_service, "hls", len(data), session_key=usage_key)
                 return
         target = (stream["dir"] / filename).resolve()
         if not str(target).startswith(str(stream["dir"]) + os.sep):
@@ -6965,6 +8446,8 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
         except OSError:
             pass
         data = target.read_bytes()
+        if filename.endswith(".m3u8"):
+            data = rewrite_hls_playlist_for_token_and_params(data, self.bearer_or_query_token(), {"audio": audio_index})
         mime = hls_mime_type(filename)
         self.send_response(200)
         self.send_header("Content-Type", mime)
@@ -6972,11 +8455,59 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
         self.send_header("Cache-Control", "no-store" if filename.endswith(".m3u8") else "public, max-age=300")
         self.end_headers()
         self.wfile.write(data)
+        if usage_key:
+            cinevault_usage.record_bytes(user, usage_service, "hls", len(data), session_key=usage_key)
         query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         if query.get("wall", [""])[0] == "1":
             if user:
                 with DIRECT_STREAM_LOCK:
                     DIRECT_BANDWIDTH_SAMPLES.append((time.monotonic(), int(user["id"]), len(data)))
+
+    def serve_preview_hls(self, request_path: str):
+        """Segment/playlist server for virtual-channel guide mini-previews
+        only (/hls/vpreview/<key>/<file>). Deliberately separate from
+        serve_hls(): previews are never counted in HLS_VIEWERS/usage
+        analytics (they're a decorative background loop, not a real
+        "watch"), and this route only ever reads PREVIEW_TRANSCODES, so it
+        can never serve or touch a real playback stream."""
+        match = re.match(r"^/hls/vpreview/([^/]+)/([^/]+)$", request_path)
+        if not match:
+            self.send_error(404, "Invalid preview path")
+            return
+        key, filename = match.groups()
+        if "/" in filename or "\\" in filename or filename.startswith("."):
+            self.send_error(403, "Invalid preview filename")
+            return
+        with PREVIEW_LOCK:
+            stream = PREVIEW_TRANSCODES.get(key)
+        if not stream:
+            self.send_error(404, "Preview stream not found")
+            return
+        target = (stream["dir"] / filename).resolve()
+        if not str(target).startswith(str(stream["dir"]) + os.sep):
+            self.send_error(403, "Refusing path outside stream cache")
+            return
+        timeout = HLS_START_TIMEOUT if filename.endswith(".m3u8") else HLS_SEGMENT_WAIT_TIMEOUT
+        deadline = time.time() + timeout
+        while not target.is_file() and time.time() < deadline:
+            time.sleep(0.25)
+        if not target.is_file():
+            self.send_error(404, "Preview segment not ready")
+            return
+        with PREVIEW_LOCK:
+            live = PREVIEW_TRANSCODES.get(key)
+            if live is not None:
+                live["last_touch"] = time.time()
+        data = target.read_bytes()
+        if filename.endswith(".m3u8"):
+            data = rewrite_hls_playlist_for_token(data, self.bearer_or_query_token())
+        mime = hls_mime_type(filename)
+        self.send_response(200)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
 
     def serve_asset(self, request_path: str):
         name = request_path.rsplit("/", 1)[-1]
@@ -7021,10 +8552,10 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
     def serve_media(self, item_id: str, disposition: str, head_only: bool = False):
         return movie_app.Handler.serve_media(self, item_id, disposition=disposition, head_only=head_only)
 
-    def serve_file(self, path: Path, disposition: str = "attachment"):
-        return tv_app.Handler.serve_file(self, path, disposition=disposition)
+    def serve_file(self, path: Path, disposition: str = "attachment", service: str = "tv"):
+        return tv_app.Handler.serve_file(self, path, disposition=disposition, service=service)
 
-    def serve_download_package(self, path: Path):
+    def serve_download_package(self, path: Path, service: str = "movie"):
         encoded_name = urllib.parse.quote(path.name)
         data_size = path.stat().st_size
         self.send_response(200)
@@ -7033,8 +8564,19 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
         self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{encoded_name}")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
-        with path.open("rb") as handle:
-            shutil.copyfileobj(handle, self.wfile)
+        user = self.current_user()
+        session_key = f"download:{secrets.token_urlsafe(8)}"
+        cinevault_usage.session_start(session_key, user=user, service=service, delivery="download",
+                                       media_type=service, title=path.name, transcoding=False,
+                                       client=self.headers.get("User-Agent", ""), kind="hold")
+        counted = cinevault_usage.CountingWriter(
+            self.wfile, lambda n: cinevault_usage.record_bytes(user, service, "download", n, session_key=session_key)
+        )
+        try:
+            with path.open("rb") as handle:
+                shutil.copyfileobj(handle, counted)
+        finally:
+            cinevault_usage.session_end(session_key)
 
 
 def media_for_kind(kind: str, item_id: str) -> dict:
@@ -7053,6 +8595,54 @@ def media_for_kind(kind: str, item_id: str) -> dict:
             "back": "/tv",
         }
     raise FileNotFoundError("Unknown media kind")
+
+
+def rewrite_hls_playlist_for_token(data: bytes, token: str) -> bytes:
+    """Append ?access_token=... to every segment/sub-playlist URI in an HLS playlist.
+
+    A bearer/query-token client (the packaged Tizen widget, which cannot rely on the
+    session cookie) only ever requests the manifest URL with the token attached.
+    Browsers resolve the *relative* segment URIs inside that manifest against the
+    manifest's path, dropping its query string per normal URL-resolution rules, so
+    without this rewrite every segment request after the first arrives unauthenticated
+    and current_user() rejects it. Only non-comment, non-blank lines are segment/media
+    playlist references; absolute http(s) URIs are left untouched.
+    """
+    return rewrite_hls_playlist_for_token_and_params(data, token, None)
+
+
+def rewrite_hls_playlist_for_token_and_params(data: bytes, token: str, extra_params: dict | None = None) -> bytes:
+    """Like rewrite_hls_playlist_for_token(), but can also stamp arbitrary
+    extra query params (e.g. audio=<index>) onto every segment/sub-playlist
+    URI - needed so a non-default audio-track selection survives past the
+    first manifest fetch: relative segment URIs drop the manifest's own
+    query string per normal URL-resolution rules, exactly the same problem
+    access_token already had to solve here."""
+    if not token and not extra_params:
+        return data
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data
+    out_lines = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            out_lines.append(line)
+            continue
+        params = []
+        if token:
+            params.append("access_token=" + urllib.parse.quote(token))
+        for param_key, param_value in (extra_params or {}).items():
+            if param_value is None or param_value == "":
+                continue
+            params.append(f"{param_key}=" + urllib.parse.quote(str(param_value)))
+        if not params:
+            out_lines.append(line)
+            continue
+        sep = "&" if "?" in line else "?"
+        out_lines.append(line + sep + "&".join(params))
+    return "\n".join(out_lines).encode("utf-8")
 
 
 def hls_mime_type(filename: str) -> str:
@@ -7089,7 +8679,11 @@ def browser_media_compatibility(path: Path) -> dict:
                 audio_codec = codec_name
     except Exception:
         pass
-    direct_video = {"h264", "vp8", "vp9", "av1"}
+    # HEVC is directly supported by the Samsung Tizen client, Safari/Apple
+    # devices, and a growing set of hardware-backed desktop browsers. Let the
+    # client attempt it and fall back to HLS on an actual playback error rather
+    # than rejecting every HEVC file up front.
+    direct_video = {"h264", "hevc", "h265", "vp8", "vp9", "av1"}
     direct_audio = {"aac", "mp3", "opus", "vorbis"}
     requires_hls = not video_codec or video_codec not in direct_video or (audio_codec and audio_codec not in direct_audio)
     value = {"requires_hls": requires_hls, "video_codec": video_codec, "audio_codec": audio_codec}
@@ -7218,8 +8812,9 @@ def wait_for_hls_ready(stream_dir: Path, playlist: Path, process: subprocess.Pop
         time.sleep(0.25)
 
 
-def hls_ffmpeg_command(path: Path, stream_dir: Path, playlist: Path) -> list[str]:
+def hls_ffmpeg_command(path: Path, stream_dir: Path, playlist: Path, audio_index: int | None = None) -> list[str]:
     segment_seconds = str(HLS_SEGMENT_SECONDS)
+    audio_map = f"0:a:{int(audio_index)}" if audio_index is not None else "0:a:0"
     common_output = [
         "-f",
         "hls",
@@ -7258,7 +8853,7 @@ def hls_ffmpeg_command(path: Path, stream_dir: Path, playlist: Path) -> list[str
             "-map",
             "0:v:0",
             "-map",
-            "0:a:0",
+            audio_map,
             "-vf",
             "scale_vaapi=format=nv12",
             "-c:v",
@@ -7284,7 +8879,7 @@ def hls_ffmpeg_command(path: Path, stream_dir: Path, playlist: Path) -> list[str
         "-map",
         "0:v:0",
         "-map",
-        "0:a:0",
+        audio_map,
         "-c:v",
         "libx264",
         "-preset",
@@ -7308,17 +8903,27 @@ def hls_ffmpeg_command(path: Path, stream_dir: Path, playlist: Path) -> list[str
     ] + common_output
 
 
-def stream_key(kind: str, item_id: str, path: Path) -> str:
+def stream_key(kind: str, item_id: str, path: Path, audio_index: int | None = None) -> str:
     stat = path.stat()
     safe_id = re.sub(r"[^a-zA-Z0-9_-]+", "-", item_id)
-    return f"{kind}-{safe_id}-{int(stat.st_mtime)}-{stat.st_size}"
+    suffix = f"-a{int(audio_index)}" if audio_index is not None else ""
+    return f"{kind}-{safe_id}-{int(stat.st_mtime)}-{stat.st_size}{suffix}"
 
 
-def ensure_hls_stream(kind: str, item_id: str, path: Path) -> dict:
-    key = stream_key(kind, item_id, path)
+def ensure_hls_stream(kind: str, item_id: str, path: Path, audio_index: int | None = None) -> dict:
+    """audio_index selects a non-default embedded audio track via an
+    explicit ffmpeg -map, for browsers/devices that can't switch audio
+    tracks on an already-playing direct-play <video> (see
+    vchannel_ensure_preview_source()'s sibling, direct_player_context(), and
+    Tizen's playMedia() for the three callers). A distinct audio_index gets
+    its own cache key/directory, so switching tracks never reuses or
+    clobbers the default-track stream another viewer might still be on."""
+    key = stream_key(kind, item_id, path, audio_index)
     stream_dir = HLS_CACHE_DIR / key
     playlist = stream_dir / "index.m3u8"
     playlist_url = f"/hls/{kind}/{item_id}/index.m3u8"
+    if audio_index is not None:
+        playlist_url += f"?audio={int(audio_index)}"
     pid_file = stream_dir / "ffmpeg.pid"
     with TRANSCODE_LOCK:
         existing = TRANSCODES.get(key)
@@ -7340,6 +8945,7 @@ def ensure_hls_stream(kind: str, item_id: str, path: Path) -> dict:
                     "playlist": playlist,
                     "playlist_url": playlist_url,
                     "process": None,
+                    "pid": pid,
                     "started_at": time.time(),
                     "source": str(path),
                     "log": stream_dir / "ffmpeg.log",
@@ -7355,6 +8961,7 @@ def ensure_hls_stream(kind: str, item_id: str, path: Path) -> dict:
                 "playlist": playlist,
                 "playlist_url": playlist_url,
                 "process": None,
+                "pid": None,
                 "started_at": time.time(),
                 "source": str(path),
                 "log": stream_dir / "ffmpeg.log",
@@ -7365,7 +8972,7 @@ def ensure_hls_stream(kind: str, item_id: str, path: Path) -> dict:
             shutil.rmtree(stream_dir, ignore_errors=True)
             stream_dir.mkdir(parents=True, exist_ok=True)
         log_path = stream_dir / "ffmpeg.log"
-        command = hls_ffmpeg_command(path, stream_dir, playlist)
+        command = hls_ffmpeg_command(path, stream_dir, playlist, audio_index)
         log_handle = log_path.open("ab")
         try:
             log_handle.write(("COMMAND " + " ".join(command) + "\n").encode("utf-8", errors="ignore"))
@@ -7379,6 +8986,7 @@ def ensure_hls_stream(kind: str, item_id: str, path: Path) -> dict:
             "playlist": playlist,
             "playlist_url": playlist_url,
             "process": process,
+            "pid": process.pid,
             "started_at": time.time(),
             "source": str(path),
             "log": log_path,
@@ -7405,7 +9013,7 @@ def ensure_live_hls(item_id: str, stream_url: str) -> dict:
                 old_pid = int(pid_file.read_text(encoding="utf-8").strip())
                 os.kill(old_pid, 0)
                 return {"key": key, "dir": stream_dir, "playlist": playlist, "playlist_url": playlist_url,
-                        "process": None, "started_at": time.time(), "source": stream_url,
+                        "process": None, "pid": old_pid, "started_at": time.time(), "source": stream_url,
                         "log": stream_dir / "ffmpeg.log"}
             except (OSError, ValueError):
                 pid_file.unlink(missing_ok=True)
@@ -7426,11 +9034,238 @@ def ensure_live_hls(item_id: str, stream_url: str) -> dict:
             log_handle.flush()
             process = subprocess.Popen(command, stdout=log_handle, stderr=subprocess.STDOUT, close_fds=True)
         stream = {"key": key, "dir": stream_dir, "playlist": playlist, "playlist_url": playlist_url,
-                  "process": process, "started_at": time.time(), "source": stream_url, "log": log_path}
+                  "process": process, "pid": process.pid, "started_at": time.time(), "source": stream_url, "log": log_path}
         pid_file.write_text(str(process.pid), encoding="utf-8")
         TRANSCODES[key] = stream
         wait_for_hls_ready(stream_dir, playlist, process)
         return stream
+
+
+def _preview_stream_key(kind: str, item_id, path: Path, source_offset: int = 0) -> str:
+    stat = path.stat()
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(item_id))
+    seek_bucket = max(0, int(source_offset) // 300 * 300)
+    return f"vprev-{kind}-{safe_id}-{int(stat.st_mtime)}-{stat.st_size}-{seek_bucket}"
+
+
+def _peek_playback_stream(kind: str, item_id, path: Path):
+    """Read-only lookup of an already-running/complete *real playback* HLS
+    stream (the normal Watch Live / Play namespace) for this exact item, so a
+    guide mini-preview never spins up a redundant transcode when someone is
+    already watching this same title full-screen elsewhere."""
+    try:
+        key = stream_key(kind, str(item_id), path)
+    except OSError:
+        return None
+    with TRANSCODE_LOCK:
+        stream = TRANSCODES.get(key)
+        if not stream:
+            return None
+        process = stream.get("process")
+        if process and process.poll() is None:
+            return stream
+        if hls_playlist_is_complete(path, stream["playlist"]):
+            return stream
+        return None
+
+
+def _preview_ffmpeg_command(path: Path, stream_dir: Path, playlist: Path, source_offset: int, include_audio: bool = False) -> list[str]:
+    segment_seconds = str(HLS_SEGMENT_SECONDS)
+    # Tiny/low-bitrate profile deliberately distinct from hls_ffmpeg_command():
+    # small fixed width, no audio at all (previews are always muted client
+    # side, so encoding audio would be pure wasted CPU), aggressive CRF.
+    audio_args = ["-map", "0:a:0?", "-c:a", "aac", "-b:a", "128k", "-ac", "2"] if include_audio else ["-an"]
+    return [
+        ffmpeg_bin(), "-hide_banner", "-nostdin", "-y",
+        "-ss", str(max(0, int(source_offset))),
+        "-i", str(path),
+        "-map", "0:v:0", *audio_args,
+        "-vf", f"scale={PREVIEW_VIDEO_WIDTH}:-2",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "30",
+        "-maxrate", PREVIEW_VIDEO_MAXRATE, "-bufsize", PREVIEW_VIDEO_BUFSIZE,
+        "-pix_fmt", "yuv420p",
+        "-force_key_frames", f"expr:gte(t,n_forced*{segment_seconds})",
+        "-f", "hls", "-hls_time", segment_seconds, "-hls_list_size", "0",
+        "-hls_playlist_type", "event",
+        "-hls_flags", "independent_segments+program_date_time",
+        "-hls_segment_filename", str(stream_dir / "seg_%05d.ts"),
+        str(playlist),
+    ]
+
+
+def ensure_preview_hls_stream(kind: str, item_id, path: Path, requested_offset: int = 0, include_audio: bool = False):
+    """Small/cheap HLS rendition for guide mini-previews only. Returns None
+    (rather than blocking) when PREVIEW_SEMAPHORE is already at its cap, so
+    callers can degrade to a static thumbnail instead of piling up ffmpeg
+    work - this is the concurrency safeguard that keeps ten simultaneous
+    guide tiles from ever becoming ten simultaneous transcodes."""
+    source_offset = max(0, int(requested_offset) // 300 * 300)
+    key = _preview_stream_key(kind, item_id, path, source_offset)
+    if include_audio:
+        key += "-audio"
+    stream_dir = PREVIEW_HLS_CACHE_DIR / key
+    playlist = stream_dir / "index.m3u8"
+    playlist_url = f"/hls/vpreview/{key}/index.m3u8"
+    with PREVIEW_LOCK:
+        existing = PREVIEW_TRANSCODES.get(key)
+        if existing:
+            process = existing.get("process")
+            if (process and process.poll() is None) or hls_playlist_is_complete(path, playlist):
+                existing["last_touch"] = time.time()
+                return existing
+            if existing.get("_acquired"):
+                PREVIEW_SEMAPHORE.release()
+            PREVIEW_TRANSCODES.pop(key, None)
+        if not PREVIEW_SEMAPHORE.acquire(blocking=False):
+            return None
+        if stream_dir.exists():
+            shutil.rmtree(stream_dir, ignore_errors=True)
+        stream_dir.mkdir(parents=True, exist_ok=True)
+        log_path = stream_dir / "ffmpeg.log"
+        command = _preview_ffmpeg_command(path, stream_dir, playlist, source_offset, include_audio)
+        log_handle = log_path.open("ab")
+        try:
+            log_handle.write(("COMMAND " + " ".join(command) + "\n").encode("utf-8", errors="ignore"))
+            log_handle.flush()
+            process = subprocess.Popen(command, stdout=log_handle, stderr=subprocess.STDOUT, close_fds=True)
+        finally:
+            log_handle.close()
+        stream = {
+            "key": key, "dir": stream_dir, "playlist": playlist, "playlist_url": playlist_url,
+            "process": process, "pid": process.pid, "started_at": time.time(),
+            "last_touch": time.time(), "source": str(path), "log": log_path, "_acquired": True,
+            "source_offset": source_offset,
+        }
+        PREVIEW_TRANSCODES[key] = stream
+        wait_for_hls_ready(stream_dir, playlist, process)
+        return stream
+
+
+def cleanup_preview_streams_once() -> None:
+    """Fast-cadence reaper for guide mini-preview transcodes. Runs far more
+    often than the general HLS idle-stop pass (which is tuned for real
+    playback's much longer idle grace period) because a preview that's no
+    longer being watched needs its ffmpeg process released within seconds,
+    not minutes, to keep the concurrency cap useful."""
+    cutoff = time.time() - PREVIEW_IDLE_STOP_SECONDS
+    with PREVIEW_LOCK:
+        stale = [(key, s) for key, s in PREVIEW_TRANSCODES.items() if s.get("last_touch", 0) < cutoff]
+        for key, stream in stale:
+            if stream.get("_acquired"):
+                PREVIEW_SEMAPHORE.release()
+            PREVIEW_TRANSCODES.pop(key, None)
+    for _key, stream in stale:
+        process = stream.get("process")
+        if process:
+            stop_process(process)
+        shutil.rmtree(stream["dir"], ignore_errors=True)
+
+
+def start_preview_cleanup_thread() -> None:
+    def worker() -> None:
+        while True:
+            try:
+                cleanup_preview_streams_once()
+            except Exception as exc:
+                print(f"Preview cleanup error: {exc}", flush=True)
+            time.sleep(max(2.0, PREVIEW_CLEANUP_INTERVAL_SECONDS))
+
+    threading.Thread(target=worker, daemon=True, name="cinevault-vchannel-preview-cleanup").start()
+
+
+def vchannel_ensure_preview_source(kind: str, item_id, path: Path, requested_offset: int = 0,
+                                   force_hls: bool = False, include_audio: bool = False):
+    """Resolve the cheapest possible source for a virtual-channel guide's
+    mini live-preview, in priority order: (1) the file is already directly
+    browser-playable, so just point at it - zero transcode cost regardless
+    of resolution; (2) a real Watch Live / Play HLS stream already exists
+    for this exact title, so reuse it verbatim - it is never stopped by
+    preview teardown, since real viewers may depend on it; (3) start a
+    dedicated tiny/low-bitrate preview-only transcode, gated by
+    PREVIEW_SEMAPHORE. Returns None if none of these are available right
+    now (server already at its preview-transcode cap), so the guide can
+    degrade to a static tile instead of blocking or queuing."""
+    compat = browser_media_compatibility(path)
+    # Silent guide tiles only need compatible video. Audible promo clips must
+    # also have browser-compatible audio; otherwise use the small AAC HLS
+    # rendition so the barker never appears to play silently.
+    direct_video = {"h264", "hevc", "h265", "vp8", "vp9", "av1"}
+    video_can_direct = compat.get("video_codec") in direct_video
+    audio_can_direct = not compat.get("audio_codec") or compat.get("audio_codec") in {"aac", "mp3", "opus", "vorbis", "flac"}
+    if video_can_direct and (audio_can_direct or not include_audio) and not force_hls:
+        source = f"/play/{item_id}" if kind == "movie" else f"/play/episode/{item_id}"
+        return {"source": source, "is_hls": False, "shared": True, "client_offset": int(requested_offset)}
+    shared = _peek_playback_stream(kind, item_id, path)
+    if shared:
+        return {"source": shared["playlist_url"], "is_hls": True, "shared": True, "client_offset": int(requested_offset)}
+    stream = ensure_preview_hls_stream(kind, item_id, path, int(requested_offset), include_audio)
+    if not stream:
+        return None
+    return {"source": stream["playlist_url"], "is_hls": True, "shared": False,
+            "client_offset": max(0, int(requested_offset) - int(stream.get("source_offset", 0)))}
+
+
+def vchannel_stop_preview_source(kind: str, item_id, path: Path) -> None:
+    """Best-effort immediate release of a preview-only transcode when a guide
+    client reports it is tearing down (navigating away / launching real
+    playback). Only ever touches the preview-only namespace - a shared,
+    already-running real playback stream from _peek_playback_stream() is
+    never reachable through this key and is therefore never affected. If a
+    second guide viewer is still using the same preview, cleanup_preview_
+    streams_once()/the client's own next fetch will simply restart it - a
+    short reconnect blip, not a correctness issue, and the same tradeoff the
+    rest of this codebase already makes by not tracking per-stream viewer
+    counts anywhere."""
+    try:
+        source = str(path)
+    except OSError:
+        return
+    with PREVIEW_LOCK:
+        matches = [(key, stream) for key, stream in PREVIEW_TRANSCODES.items()
+                   if stream.get("source") == source]
+        for key, stream in matches:
+            PREVIEW_TRANSCODES.pop(key, None)
+            if stream.get("_acquired"):
+                PREVIEW_SEMAPHORE.release()
+    for _key, stream in matches:
+        process = stream.get("process")
+        if process:
+            stop_process(process)
+        shutil.rmtree(stream["dir"], ignore_errors=True)
+
+
+def vchannel_resolve_source(kind: str, item_id, path: Path, playback_mode: str, audio_index: int | None = None) -> dict:
+    """Give virtual_channels.py the same Direct/HLS choice normal playback
+    uses, without that module needing to import any main.py internals. A
+    non-default audio_index forces HLS with an explicit ffmpeg -map, same
+    rule and same reasoning as direct_player_context()'s non_default_audio."""
+    compat = browser_media_compatibility(path)
+    if audio_index is not None or playback_mode == "hls" or compat.get("requires_hls"):
+        stream = ensure_hls_stream(kind, str(item_id), path, audio_index=audio_index)
+        return {"source": stream["playlist_url"], "is_hls": True}
+    source = f"/play/{item_id}" if kind == "movie" else f"/play/episode/{item_id}"
+    return {"source": source, "is_hls": False}
+
+
+def vchannel_captions(path: Path, kind: str, item_id) -> str:
+    try:
+        tracks = discover_subtitles(path, kind, str(item_id))
+        track_html, _control, _summary = subtitle_markup(tracks)
+        return track_html
+    except Exception:
+        return ""
+
+
+def vchannel_audio_markup(path: Path, audio_index: int | None):
+    """Same enumeration/markup direct_player_context() uses for ordinary
+    movies/episodes, given to virtual_channels.py as a callback (like
+    vchannel_resolve_source/vchannel_captions) so it never needs to import
+    probe_audio_tracks()/audio_markup() directly."""
+    try:
+        tracks = probe_audio_tracks(path)
+        return audio_markup(tracks, audio_index)
+    except Exception:
+        return "", None
 
 
 def latest_mtime(path: Path) -> float:
@@ -7563,25 +9398,32 @@ def main():
     tv_app.load_poster_map()
     tv_app.load_metadata_map()
     migrated_movie_states = migrate_legacy_movie_state_keys()
+    migrated_tv_states = migrate_legacy_tv_state_keys()
     actor_stats = rebuild_actor_index()
     movie_app.movie_index.refresh_background()
     tv_app.tv_index.refresh_background()
     start_hls_cleanup_thread()
+    start_preview_cleanup_thread()
     start_hdhr_guide_thread()
+    cinevault_usage.start_background_thread()
     dvr_module.initialize()
-    start_upstream_media_sync_thread()
+    virtual_channels.initialize(movie_app, tv_app)
+    if UPSTREAM_MEDIA_SYNC_ENABLED:
+        start_upstream_media_sync_thread()
 
     print(f"Loaded {len(movie_app.movie_index.items)} movies", flush=True)
     print(f"Loaded {len(tv_app.tv_index.shows)} shows and {len(tv_app.tv_index.episode_by_id)} episodes", flush=True)
     print(f"Indexed {actor_stats['actors']} actors across {actor_stats['links']} library links", flush=True)
     print(f"Migrated {migrated_movie_states} legacy movie state key(s) to stable identities", flush=True)
+    print(f"Migrated {migrated_tv_states} legacy TV state key(s) to stable identities", flush=True)
     print(f"Migrated {migrated_movie_overrides} legacy manual movie override(s) to stable identities", flush=True)
     print(
         f"HLS cache cleanup: {HLS_CACHE_DIR} older than {HLS_CACHE_MAX_AGE_HOURS:g} hour(s), every {HLS_CLEANUP_INTERVAL_MINUTES:g} minute(s)",
         flush=True,
     )
     print(
-        f"Lab media sync: production caches every {UPSTREAM_SYNC_INTERVAL_SECONDS:g}s after {UPSTREAM_SYNC_DEBOUNCE_SECONDS:g}s stable",
+        (f"Legacy media sync enabled: every {UPSTREAM_SYNC_INTERVAL_SECONDS:g}s after {UPSTREAM_SYNC_DEBOUNCE_SECONDS:g}s stable"
+         if UPSTREAM_MEDIA_SYNC_ENABLED else "Legacy media sync disabled: this is the authoritative CineVault instance"),
         flush=True,
     )
     tls_cert = os.environ.get("CINEVAULT_TLS_CERT", "")
@@ -7589,16 +9431,31 @@ def main():
     scheme = "https" if tls_cert and tls_key else "http"
     print(f"Serving combined media library on {scheme}://{args.host}:{args.port}/", flush=True)
     server = ThreadingHTTPServer((args.host, args.port), CombinedHandler)
+    http_server = None
     if tls_cert and tls_key:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(tls_cert, tls_key)
         server.socket = context.wrap_socket(server.socket, server_side=True)
+        # Samsung TV development apps cannot trust a private self-signed TLS
+        # certificate. Keep the normal HTTPS listener intact and expose a
+        # separate LAN HTTP endpoint for the signed TV client.
+        http_port = int(os.environ.get("CINEVAULT_HTTP_PORT", str(args.port + 1)))
+        http_server = ThreadingHTTPServer((args.host, http_port), CombinedHandler)
+        threading.Thread(
+            target=http_server.serve_forever,
+            daemon=True,
+            name="samsung-tv-http-listener",
+        ).start()
+        print(f"Serving Samsung TV LAN client on http://{args.host}:{http_port}/", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         server.server_close()
+        if http_server is not None:
+            http_server.shutdown()
+            http_server.server_close()
 
 
 if __name__ == "__main__":

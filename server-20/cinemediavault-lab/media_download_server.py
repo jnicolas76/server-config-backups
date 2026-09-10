@@ -1190,7 +1190,7 @@ PAGE_TEMPLATE = """<!doctype html>
     :root { color-scheme: dark; --bg:#11151b; --panel:#191f28; --tile:#0d1117; --line:#2b3440; --text:#f4f7fb; --muted:#a8b2bf; --accent:#28a2ff; --accent2:#f5a524; }
     * { box-sizing: border-box; }
     html { scroll-behavior:smooth; }
-    body { margin:0; font-family: Arial, Helvetica, sans-serif; background:var(--bg); color:var(--text); min-height:100vh; overflow-x:hidden; }
+    body { margin:0; font-family: Arial, Helvetica, sans-serif; background:var(--bg); color:var(--text); min-height:100vh; min-height:100dvh; overflow-x:hidden; }
     .library-backdrop { position:fixed; inset:-90px -160px auto -160px; height:calc(100vh + 190px); z-index:0; display:grid; grid-template-columns:repeat(15, minmax(58px, 1fr)); gap:10px; transform:rotate(-10deg) translateY(-34px); opacity:.34; pointer-events:none; overflow:hidden; filter:saturate(1.12) contrast(1.04); }
     .library-backdrop::after { content:""; position:absolute; inset:-20px; background:linear-gradient(180deg,rgba(17,21,27,.58) 0%,rgba(17,21,27,.76) 52%,rgba(17,21,27,.96) 100%),linear-gradient(90deg,rgba(17,21,27,.82),rgba(17,21,27,.18),rgba(17,21,27,.82)); }
     .library-backdrop img { width:100%; aspect-ratio:2/3; object-fit:cover; border-radius:10px; box-shadow:0 18px 36px rgba(0,0,0,.55); }
@@ -1212,7 +1212,7 @@ PAGE_TEMPLATE = """<!doctype html>
     .duplicate-check input { width:16px; height:16px; padding:0; margin:0; accent-color:var(--accent2); box-shadow:none; cursor:pointer; }
     .modal { position:fixed; inset:0; z-index:20; display:none; align-items:end; background:rgba(8,10,15,.72); }
     .modal.open { display:flex; }
-    .sheet { width:100%; max-width:640px; margin:0 auto; background:#050506; border-radius:22px 22px 0 0; padding:18px 24px 24px; box-shadow:0 -20px 70px rgba(0,0,0,.55); }
+    .sheet { width:100%; max-width:640px; margin:0 auto; max-height:85vh; max-height:85dvh; overflow:auto; -webkit-overflow-scrolling:touch; background:#050506; border-radius:22px 22px 0 0; padding:18px 24px calc(24px + env(safe-area-inset-bottom)); box-shadow:0 -20px 70px rgba(0,0,0,.55); }
     .sheet h2 { margin:18px 0 18px; text-align:center; font-size:22px; }
     .sheet-list { border-top:1px solid var(--line); border-bottom:1px solid var(--line); padding:8px 0; }
     .sheet-item { display:grid; grid-template-columns:44px 1fr auto; align-items:center; gap:14px; min-height:78px; color:#fff; text-decoration:none; }
@@ -1263,7 +1263,7 @@ PAGE_TEMPLATE = """<!doctype html>
       .movie-grid { grid-template-columns:repeat(auto-fill, minmax(120px, 1fr)); gap:18px 14px; }
       .shelf-row .movie-card, .shelf-extra, .see-all-card { flex-basis:120px; }
     }
-    @media (min-width: 900px) {
+    @media (max-width: 359px) {
       header { padding:18px 16px 10px; }
       .top-row { gap:12px; }
       .header-actions { gap:8px; }
@@ -1503,8 +1503,8 @@ DETAIL_TEMPLATE = """<!doctype html>
   <style>
     :root { color-scheme: dark; --bg:#070a0f; --text:#f7fbff; --muted:#c9d2df; --soft:rgba(255,255,255,.16); --line:rgba(255,255,255,.18); --green:#2ee66b; --gold:#f5a524; }
     * { box-sizing:border-box; }
-    body { margin:0; min-height:100vh; font-family:Arial, Helvetica, sans-serif; background:var(--bg); color:var(--text); }
-    .detail-page { position:relative; min-height:100vh; overflow-x:hidden; padding:22px clamp(22px,4vw,56px) 54px; }
+    body { margin:0; min-height:100vh; min-height:100dvh; font-family:Arial, Helvetica, sans-serif; background:var(--bg); color:var(--text); }
+    .detail-page { position:relative; min-height:100vh; min-height:100dvh; overflow-x:hidden; padding:22px clamp(22px,4vw,56px) calc(54px + env(safe-area-inset-bottom)); }
     .detail-page::before { content:""; position:fixed; inset:-26px; background-image:var(--poster-bg); background-size:cover; background-position:center top; opacity:.66; filter:blur(7px) saturate(1.25); transform:scale(1.08); }
     .detail-page::after { content:""; position:fixed; inset:0; background:linear-gradient(180deg,rgba(0,0,0,.12) 0%,rgba(0,0,0,.38) 28%,rgba(18,34,13,.82) 100%), linear-gradient(90deg,rgba(0,0,0,.88) 0%,rgba(0,0,0,.50) 48%,rgba(0,0,0,.76) 100%); }
     .topbar { position:relative; z-index:2; display:flex; justify-content:space-between; align-items:center; max-width:1220px; margin:0 auto; }
