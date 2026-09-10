@@ -1379,8 +1379,8 @@ window.cinevaultSetActiveProgram=info=>barker.external(info);
 window.cinevaultClearActiveProgram=()=>barker.resume();
 window.cinevaultBarkerRect=()=>{const el=document.querySelector('.barker-video-wrap');if(!el)return null;const r=el.getBoundingClientRect();return{left:r.left,top:r.top,width:r.width,height:r.height}};
 function scheduleBarkerRefresh(){const now=new Date(),next=new Date(now);next.setHours(24,0,5,0);setTimeout(()=>{barker.refresh().finally(scheduleBarkerRefresh)},Math.max(1000,next-now))}
-scheduleBarkerRefresh();
-setInterval(()=>barker.refresh(),15*60*1000);
+const embeddedGuide=new URLSearchParams(location.search).get('embedded')==='1';
+if(!embeddedGuide){scheduleBarkerRefresh();setInterval(()=>barker.refresh(),15*60*1000)}
 const previews=(()=>{
   const active=new Map();
   const storageKey='cinevault.virtualChannelPreviews.enabled';
@@ -1527,7 +1527,7 @@ document.addEventListener('keydown',e=>{
 });
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')previews.teardownAll();else if(previews.isEnabled())document.querySelectorAll('.chan-preview').forEach(el=>previews.watch(el))});
 window.addEventListener('pagehide',()=>{barker.stop();previews.teardownAll()});
-barker.load();loadGuide();setInterval(loadGuide,60000);
+if(!embeddedGuide)barker.load();loadGuide();setInterval(loadGuide,60000);
 </script></body></html>'''
 
 COMBINED_BARKER_PAGE = r'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>CineMediaVault Promo Channel</title><style>
@@ -1572,7 +1572,7 @@ video::-webkit-media-controls-wireless-playback-picker-button{display:none!impor
 <video id="v" autoplay playsinline disableRemotePlayback x-webkit-airplay="deny" __SOURCE_ATTR__>__CAPTION_TRACK__</video>
 <div class="bar">__PLAY_BEGINNING__<button id="fullScreen" type="button">Full Screen</button><button id="openGuide" type="button">Guide</button><span id="audioControlHost">__AUDIO_CONTROL__</span><label>CC <select id="captionSelect"><option value="off">Off</option></select></label></div>
 <section id="nowInfo" class="now-info"><img id="nowPoster" alt=""><div><div class="now-kicker">NOW PLAYING</div><h1 id="nowTitle"></h1><div id="nowMeta" class="now-meta"></div><p id="nowDescription" class="now-description"></p></div></section>
-<div class="guide-drawer" id="guideDrawer"><button class="guide-close" id="closeGuide" type="button">Return to Player</button><iframe id="guideFrame" title="CineVault Guide" data-src="/vchannels/__KIND_PATH__"></iframe></div>
+<div class="guide-drawer" id="guideDrawer"><button class="guide-close" id="closeGuide" type="button">Return to Player</button><iframe id="guideFrame" title="CineVault Guide" data-src="/vchannels/__KIND_PATH__?embedded=1"></iframe></div>
 <section id="upNext" class="up-next hidden" aria-live="polite"><img id="nextPoster" class="next-poster" alt=""><div><div class="next-label">Up Next</div><h1 id="nextTitle" class="next-title"></h1><div id="nextSubtitle" class="next-subtitle"></div><div class="next-countdown">Starting in <span id="nextCount" class="count-number">10</span> seconds</div></div></section>
 <script src="/assets/hls.min.js"></script>
 <script>
@@ -1585,7 +1585,7 @@ function guideInfo(){return{title:currentInfo?.title||'Now Playing',subtitle:cur
 function syncGuidePlayer(){if(!document.body.classList.contains('guide-open'))return;try{const win=guideFrame.contentWindow,rect=win?.cinevaultBarkerRect?.();if(!rect)return;Object.assign(v.style,{left:rect.left+'px',top:rect.top+'px',width:rect.width+'px',height:rect.height+'px'});win.cinevaultSetActiveProgram?.(guideInfo())}catch(_e){}}
 function bindGuideFrame(){try{const doc=guideFrame.contentDocument;if(!doc)return;doc.addEventListener('scroll',syncGuidePlayer,true);doc.defaultView.addEventListener('resize',syncGuidePlayer);doc.defaultView.cinevaultSetActiveProgram?.(guideInfo())}catch(_e){}syncGuidePlayer()}
 function openGuide(){guideDrawer.classList.add('open');document.body.classList.add('guide-open');if(!guideFrame.src){guideFrame.addEventListener('load',bindGuideFrame,{once:true});guideFrame.src=guideFrame.dataset.src}else bindGuideFrame();clearInterval(guidePlacementTimer);guidePlacementTimer=setInterval(syncGuidePlayer,250)}
-function closeGuide(){clearInterval(guidePlacementTimer);guidePlacementTimer=null;try{guideFrame.contentWindow?.cinevaultClearActiveProgram?.()}catch(_e){}guideDrawer.classList.remove('open');document.body.classList.remove('guide-open');['left','top','width','height'].forEach(k=>v.style[k]='')}
+function closeGuide(){clearInterval(guidePlacementTimer);guidePlacementTimer=null;guideDrawer.classList.remove('open');document.body.classList.remove('guide-open');['left','top','width','height'].forEach(k=>v.style[k]='')}
 document.getElementById('openGuide').onclick=openGuide;
 document.getElementById('closeGuide').onclick=closeGuide;
 v.onclick=()=>{if(document.body.classList.contains('guide-open'))closeGuide()};
