@@ -1570,7 +1570,7 @@ video::-webkit-media-controls-wireless-playback-picker-button{display:none!impor
 </style></head><body>
 <header><div id="pageTitle">__TITLE__</div><a class="btn" href="/vchannels/__KIND_PATH__">Back to Guide</a></header>
 <video id="v" autoplay playsinline disableRemotePlayback x-webkit-airplay="deny" __SOURCE_ATTR__>__CAPTION_TRACK__</video>
-<div class="bar">__PLAY_BEGINNING__<button id="openGuide" type="button">Guide</button><span id="audioControlHost">__AUDIO_CONTROL__</span><label>CC <select id="captionSelect"><option value="off">Off</option></select></label></div>
+<div class="bar">__PLAY_BEGINNING__<button id="fullScreen" type="button">Full Screen</button><button id="openGuide" type="button">Guide</button><span id="audioControlHost">__AUDIO_CONTROL__</span><label>CC <select id="captionSelect"><option value="off">Off</option></select></label></div>
 <section id="nowInfo" class="now-info"><img id="nowPoster" alt=""><div><div class="now-kicker">NOW PLAYING</div><h1 id="nowTitle"></h1><div id="nowMeta" class="now-meta"></div><p id="nowDescription" class="now-description"></p></div></section>
 <div class="guide-drawer" id="guideDrawer"><button class="guide-close" id="closeGuide" type="button">Return to Player</button><iframe id="guideFrame" title="CineVault Guide" data-src="/vchannels/__KIND_PATH__"></iframe></div>
 <section id="upNext" class="up-next hidden" aria-live="polite"><img id="nextPoster" class="next-poster" alt=""><div><div class="next-label">Up Next</div><h1 id="nextTitle" class="next-title"></h1><div id="nextSubtitle" class="next-subtitle"></div><div class="next-countdown">Starting in <span id="nextCount" class="count-number">10</span> seconds</div></div></section>
@@ -1589,6 +1589,12 @@ function closeGuide(){clearInterval(guidePlacementTimer);guidePlacementTimer=nul
 document.getElementById('openGuide').onclick=openGuide;
 document.getElementById('closeGuide').onclick=closeGuide;
 v.onclick=()=>{if(document.body.classList.contains('guide-open'))closeGuide()};
+document.getElementById('fullScreen').onclick=()=>{
+  const enter=v.requestFullscreen||v.webkitRequestFullscreen||v.webkitEnterFullscreen||v.msRequestFullscreen;
+  if(enter){try{const result=enter.call(v);if(result&&result.catch)result.catch(()=>{})}catch(_e){}}
+  else document.body.classList.add('channel-fullscreen');
+  v.play().catch(()=>{});
+};
 window.addEventListener('message',event=>{if(event.origin!==location.origin||!event.data||event.data.type!=='cinevault-guide-navigate')return;const href=String(event.data.href||'');if(!href.startsWith(location.origin+'/'))return;v.pause();if(hls){try{hls.destroy()}catch(_e){}hls=null}v.removeAttribute('src');v.load();closeGuide();location.href=href});
 if(new URLSearchParams(location.search).get('fullscreen')==='1')document.body.classList.add('channel-fullscreen');
 /* Seamless (same-document) transitions only: navigating away with
