@@ -1304,7 +1304,7 @@ nav button,nav a{border-radius:999px}
 nav button.active,nav a.active{background:linear-gradient(180deg,var(--accent2),var(--accent));color:#04101f;border-color:var(--accent)}
 main{padding:16px;max-width:1700px;margin:0 auto}
 .toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
-.barker{position:sticky;top:105px;z-index:30;isolation:isolate;display:grid;grid-template-columns:minmax(220px,40%) 1fr;gap:22px;align-items:center;margin-bottom:16px;padding:14px;border:1px solid rgba(150,195,255,.55);border-radius:16px;background:rgba(8,24,55,.99);box-shadow:0 12px 35px rgba(0,5,18,.65)}.barker-video-wrap{position:relative;aspect-ratio:16/9;background:#000;border-radius:12px;overflow:hidden;border:1px solid rgba(124,195,255,.35)}.barker video{width:100%;height:100%;object-fit:contain;background:#000;display:block;cursor:pointer}.barker.external-active .barker-video-wrap{visibility:hidden}.barker-copy{min-width:0}.barker-kicker{color:#7cc3ff;font-weight:900;letter-spacing:.14em}.barker h2{font-size:clamp(22px,3vw,38px);margin:8px 0}.barker-meta{font-weight:800;color:#fff}.barker-summary{color:#dce9fb;line-height:1.45}.barker-poster{float:left;width:78px;aspect-ratio:2/3;object-fit:cover;margin:0 14px 8px 0;border-radius:7px}
+.barker{position:sticky;top:105px;z-index:30;isolation:isolate;display:grid;grid-template-columns:minmax(220px,40%) 1fr;gap:22px;align-items:center;margin-bottom:16px;padding:14px;border:1px solid rgba(150,195,255,.55);border-radius:16px;background:rgba(8,24,55,.99);box-shadow:0 12px 35px rgba(0,5,18,.65)}.barker-video-wrap{position:relative;aspect-ratio:16/9;background:#000;border-radius:12px;overflow:hidden;border:1px solid rgba(124,195,255,.35)}.barker video{width:100%;height:100%;object-fit:contain;background:#000;display:block;cursor:pointer}.barker-mute{position:absolute;right:8px;bottom:8px;z-index:2;min-height:38px;padding:7px 11px;background:rgba(5,10,18,.9)}.barker.external-active .barker-video-wrap{visibility:hidden}.barker-copy{min-width:0}.barker-kicker{color:#7cc3ff;font-weight:900;letter-spacing:.14em}.barker h2{font-size:clamp(22px,3vw,38px);margin:8px 0}.barker-meta{font-weight:800;color:#fff}.barker-summary{color:#dce9fb;line-height:1.45}.barker-poster{float:left;width:78px;aspect-ratio:2/3;object-fit:cover;margin:0 14px 8px 0;border-radius:7px}
 video::-webkit-media-controls-wireless-playback-picker-button{display:none!important}
 .muted{color:var(--muted)}
 .guide-wrap{overflow:auto;max-height:60vh;border:1px solid var(--line-strong);border-radius:14px;position:relative;background:var(--panel);box-shadow:0 10px 40px rgba(0,8,24,.45),inset 0 1px 0 rgba(255,255,255,.04);-webkit-overflow-scrolling:touch;touch-action:pan-x pan-y;overscroll-behavior:contain}
@@ -1351,7 +1351,7 @@ input[type=date]{min-height:44px;padding:9px;background:var(--panel-strong);colo
 GUIDE_PAGE = r'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>CineMediaVault Virtual Channels</title><style>__STYLE__</style></head><body>
 <header><div class="top"><div class="brand">CineMedia<b>Vault</b> Virtual Channels</div><div><a class="btn" href="/live-tv">Physical Live TV</a><a class="btn" href="/">Home</a></div></div>
 <nav><button data-kind="movie" class="__MOVIE_ACTIVE__">Virtual Movies</button><button data-kind="tv" class="__TV_ACTIVE__">Virtual TV</button><button id="miniPreviewToggle" type="button" aria-pressed="true">Channel Previews: On</button></nav></header>
-<main><section class="barker" id="barker"><div class="barker-video-wrap"><video id="barkerVideo" autoplay playsinline preload="metadata" disableRemotePlayback x-webkit-airplay="deny" aria-label="Upcoming programme preview; tap if audio is blocked"></video></div><div class="barker-copy"><div id="barkerKicker" class="barker-kicker">COMING UP ON CINEMEDIAVAULT</div><img id="barkerPoster" class="barker-poster" alt=""><h2 id="barkerTitle">Building your preview reel…</h2><div id="barkerMeta" class="barker-meta"></div><p id="barkerSummary" class="barker-summary"></p></div></section>
+<main><section class="barker" id="barker"><div class="barker-video-wrap"><video id="barkerVideo" autoplay playsinline preload="metadata" disableRemotePlayback x-webkit-airplay="deny" aria-label="Upcoming programme preview; tap if audio is blocked"></video><button id="barkerMute" class="barker-mute" type="button" aria-pressed="false">Mute</button></div><div class="barker-copy"><div id="barkerKicker" class="barker-kicker">COMING UP ON CINEMEDIAVAULT</div><img id="barkerPoster" class="barker-poster" alt=""><h2 id="barkerTitle">Building your preview reel…</h2><div id="barkerMeta" class="barker-meta"></div><p id="barkerSummary" class="barker-summary"></p></div></section>
 <div class="toolbar"><button id="prev">&larr; Earlier</button><button id="today" class="primary">Now</button><button id="next">Later &rarr;</button>
 <input type="date" id="day" min="__MIN_DATE__" max="__MAX_DATE__" value="__TODAY__"><span id="guideInfo" class="muted"></span></div>
 <div class="guide-wrap"><div id="grid" class="guide">Loading&hellip;</div></div>
@@ -1365,16 +1365,18 @@ function dt(t){return new Date(t*1000).toLocaleTimeString([],{hour:'numeric',min
 function promoDt(t){const d=new Date(t*1000);return `${d.toLocaleDateString([],{weekday:'short',month:'short',day:'numeric'})} · ${d.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})}`}
 function fmtRemaining(sec){if(sec<=0)return'';const h=Math.floor(sec/3600),m=Math.round((sec%3600)/60);return h>0?`${h}h ${m}m`:`${m}m`}
 const barker=(()=>{
-  const video=document.getElementById('barkerVideo');let state=null,infoTimer=null,soundEnabled=false,loadedSlot=null;
+  const video=document.getElementById('barkerVideo'),mute=document.getElementById('barkerMute');let state=null,infoTimer=null,soundEnabled=false,loadedSlot=null,userMuted=localStorage.getItem('cinevault.barkerMuted')==='true';
   function clearMedia(){clearInterval(infoTimer);infoTimer=null;loadedSlot=null;try{video.pause();video.removeAttribute('src');video.load()}catch(_e){}}
   function show(item){document.getElementById('barkerTitle').textContent=item?.title||'Coming up';document.getElementById('barkerMeta').textContent=item?`${promoDt(item.airtime)} · ${item.channel_number||''} ${item.channel||''}${item.subtitle?' · '+item.subtitle:''}`:'';document.getElementById('barkerSummary').textContent=item?.summary||'';const p=document.getElementById('barkerPoster');p.src=item?.poster||'';p.style.display=item?.poster?'block':'none'}
   function sync(){const list=state?.programmes||[];if(!list.length)return;const duration=Math.max(1,Number(state.duration)||3600),position=((Date.now()/1000-Number(state.slot_start))%duration+duration)%duration,index=Math.floor(position/60)%list.length;show(list[index]);if(Math.abs((Number(video.currentTime)||0)-position)>4&&Number.isFinite(video.duration))video.currentTime=Math.min(position,Math.max(0,video.duration-.25))}
-  function startAudible(){video.muted=false;return video.play().then(()=>{soundEnabled=true;localStorage.setItem('cinevault.barkerSound','on')}).catch(()=>{video.muted=true;return video.play().catch(()=>{})})}
+  function renderMute(){mute.textContent=userMuted?'Unmute':'Mute';mute.setAttribute('aria-pressed',String(userMuted))}
+  function startAudible(){video.muted=userMuted;if(userMuted)return video.play().catch(()=>{});return video.play().then(()=>{soundEnabled=true;localStorage.setItem('cinevault.barkerSound','on')}).catch(()=>{video.muted=true;return video.play().catch(()=>{})})}
   async function load(){if(document.getElementById('barker').classList.contains('external-active'))return;try{const response=await fetch('/api/vchannels/barker/status',{cache:'no-store'}),next=await response.json();if(!next.available){show({title:'The new preview reel is being prepared',summary:'The guide remains available while CineMediaVault finishes the next video.'});return}state=next;const duration=Math.max(1,Number(state.duration)||3600),position=((Date.now()/1000-Number(state.slot_start))%duration+duration)%duration;if(loadedSlot!==state.slot_start){loadedSlot=state.slot_start;video.src='/api/vchannels/barker/video?v='+state.slot_start;video.addEventListener('loadedmetadata',()=>{video.currentTime=Math.min(position,Math.max(0,video.duration-.25));video.muted=false;startAudible()},{once:true})}else if(video.paused){startAudible()}sync();clearInterval(infoTimer);infoTimer=setInterval(sync,1000)}catch(_e){show({title:'Preview temporarily unavailable',summary:'CineMediaVault will retry automatically.'})}}
   function suspend(){clearInterval(infoTimer);infoTimer=null;video.pause()}
   function resume(){document.getElementById('barker').classList.remove('external-active');document.getElementById('barkerKicker').textContent='COMING UP ON CINEMEDIAVAULT';load()}
   function external(info){suspend();document.getElementById('barker').classList.add('external-active');document.getElementById('barkerKicker').textContent='NOW PLAYING';show(info||{})}
-  video.addEventListener('click',()=>{soundEnabled=true;video.muted=false;localStorage.setItem('cinevault.barkerSound','on');video.play().catch(()=>{})});video.addEventListener('ended',load);return{load,refresh:load,stop:clearMedia,suspend,resume,external};
+  mute.addEventListener('click',event=>{event.stopPropagation();userMuted=!userMuted;localStorage.setItem('cinevault.barkerMuted',String(userMuted));video.muted=userMuted;renderMute();if(!userMuted)video.play().catch(()=>{})});renderMute();
+  video.addEventListener('click',()=>{soundEnabled=true;userMuted=false;video.muted=false;localStorage.setItem('cinevault.barkerMuted','false');localStorage.setItem('cinevault.barkerSound','on');renderMute();video.play().catch(()=>{})});video.addEventListener('ended',load);return{load,refresh:load,stop:clearMedia,suspend,resume,external};
 })();
 window.cinevaultSetActiveProgram=info=>barker.external(info);
 window.cinevaultClearActiveProgram=()=>barker.resume();
@@ -1960,11 +1962,15 @@ def promo_payload(channel_id, start_ts, movie_app, tv_app, preview_source_fn, fo
         return {"available": False, "reason": "unavailable"}
     kind, item_id, path, title = resolved
     duration = max(1, int(prog["stop_ts"] - prog["start_ts"]))
-    # Stable daily selection: avoid credits/opening where possible and keep
-    # the same promo reel on every device until the schedule/day changes.
-    room = max(1, duration - 75)
+    # Stable selection inside the programme's safe middle: keep clear of
+    # opening titles/recaps and closing credits/trailers.
+    clip_seconds = 45
+    lead_guard = max(90, int(duration * 0.10))
+    tail_guard = max(120, int(duration * 0.12))
+    first = min(lead_guard, max(0, duration - clip_seconds))
+    last = max(first, duration - clip_seconds - tail_guard)
     stable_number = sum((idx + 1) * ord(ch) for idx, ch in enumerate(f"{channel_id}:{start_ts}"))
-    clip_offset = min(max(15, 15 + (stable_number % room)), max(0, duration - 35))
+    clip_offset = first if last <= first else first + (stable_number % (last - first + 1))
     source = preview_source_fn(kind, item_id, path, int(clip_offset), bool(force_hls), True)
     if not source:
         return {"available": False, "reason": "busy"}

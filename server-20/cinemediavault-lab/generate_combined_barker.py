@@ -111,8 +111,14 @@ def render_segment(item, narration_path, output, text_path, segment_seconds, tim
     if duration <= 1:
         raise RuntimeError("source has no usable duration")
     rng = random.Random(f"{seed}:{source}:{item.get('airtime')}")
-    offset = min(max(10, rng.uniform(10, max(11, duration - segment_seconds - 10))),
-                 max(0, duration - segment_seconds))
+    # Avoid title sequences/recaps at the front and credits/previews at the
+    # back. Percentage guards scale for films while the minimum guards keep
+    # ordinary TV episodes away from both edges as well.
+    lead_guard = max(90.0, duration * 0.10)
+    tail_guard = max(120.0, duration * 0.12)
+    first = min(lead_guard, max(0.0, duration - segment_seconds))
+    last = max(first, duration - segment_seconds - tail_guard)
+    offset = rng.uniform(first, last) if last > first else first
     text_path.write_text(display_copy(item, timezone), encoding="utf-8")
     font = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
     # Metadata is rendered by the synchronized blue UI panel, never burned
