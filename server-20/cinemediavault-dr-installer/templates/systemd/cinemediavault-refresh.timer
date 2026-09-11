@@ -1,0 +1,13 @@
+[Unit]
+Description=CineMediaVault library refresh schedule
+
+[Timer]
+OnBootSec=10min
+OnCalendar={{ refresh_calendar }}
+AccuracySec=1min
+Persistent=true
+RandomizedDelaySec=60
+Unit=cinemediavault-refresh.service
+
+[Install]
+WantedBy=timers.target

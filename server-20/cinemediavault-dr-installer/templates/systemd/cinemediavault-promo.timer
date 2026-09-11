@@ -1,0 +1,12 @@
+[Unit]
+Description=CineMediaVault promo/barker channel render schedule
+
+[Timer]
+OnCalendar={{ promo_calendar }}
+AccuracySec=1min
+Persistent=false
+RandomizedDelaySec=60
+Unit=cinemediavault-promo.service
+
+[Install]
+WantedBy=timers.target

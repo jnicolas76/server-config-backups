@@ -1,0 +1,1 @@
+"""CineMediaVault installer test suite."""

@@ -1,0 +1,18 @@
+# CineMediaVault health check and self-heal.
+#
+# GENERATED FILE - regenerate with `cinevaultctl apply`.
+
+[Unit]
+Description=CineMediaVault health check
+After=cinemediavault.service
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile={{ env_file }}
+ExecStart={{ scripts_dir }}/cinemediavault-health.sh
+# A failing probe is information, not a unit failure: the script decides
+# whether the situation warrants a restart.
+SuccessExitStatus=0 1
+TimeoutStartSec=60
+SyslogIdentifier=cinemediavault-health

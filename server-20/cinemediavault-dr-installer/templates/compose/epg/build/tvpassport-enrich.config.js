@@ -1,0 +1,57 @@
+// CineMediaVault overlay for the upstream tvpassport.com site configuration.
+//
+// The upstream parser discards three attributes the station pages actually
+// carry and that the CineMediaVault DVR relies on:
+//
+//   data-new_show      drives "New episodes only" series rules
+//   data-episodeNumber shown in the guide and used for duplicate suppression
+//   data-year          fills the programme date when nothing else supplies one
+//
+// This wrapper delegates all of the real parsing to the untouched upstream
+// config (renamed to tvpassport.com.base.js when the image is built) and only
+// re-attaches those fields. It is intentionally fail-safe: any problem here
+// leaves the upstream result exactly as it was, so an upstream page change can
+// never break a collection.
+
+const cheerio = require('cheerio')
+const base = require('./tvpassport.com.base.js')
+
+function attr($item, name) {
+  return $item.attr('data-' + name) || $item.attr('data-' + name.toLowerCase()) || ''
+}
+
+function extras(content) {
+  const $ = cheerio.load(content)
+  return $('.station-listings .list-group-item').toArray().map(el => {
+    const $item = $(el)
+    const episode = parseInt(attr($item, 'episodeNumber'), 10)
+    const year = parseInt(attr($item, 'year'), 10)
+    return {
+      isNew: attr($item, 'new_show') === '1',
+      episode: Number.isFinite(episode) && episode > 0 ? episode : null,
+      year: Number.isFinite(year) && year > 1880 ? year : null
+    }
+  })
+}
+
+module.exports = {
+  ...base,
+  async parser(ctx) {
+    const programs = await base.parser(ctx)
+    try {
+      const extra = extras(ctx.content)
+      // Only enrich when the two parses agree item-for-item. A mismatch means
+      // the page layout changed, and guessing would corrupt the guide.
+      if (Array.isArray(programs) && extra.length === programs.length) {
+        programs.forEach((program, i) => {
+          if (extra[i].isNew) program.new = true
+          if (extra[i].episode !== null) program.episode = extra[i].episode
+          if (extra[i].year !== null && !program.date) program.date = extra[i].year
+        })
+      }
+    } catch {
+      // Enrichment is best-effort; never fail a grab because of it.
+    }
+    return programs
+  }
+}

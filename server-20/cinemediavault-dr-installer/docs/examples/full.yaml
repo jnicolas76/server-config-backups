@@ -1,0 +1,112 @@
+# CineMediaVault - a fuller unattended configuration.
+#
+# Shows Live TV, the DVR, the extended guide, music, books, comics, games and
+# the creator toolchains together. Trim it to what you actually want.
+
+meta:
+  instance_name: Home Vault
+
+deployment:
+  mode: everything
+  timezone: America/Denver
+  accept_licenses: true
+
+admin:
+  username: admin
+  full_name: CineMediaVault Administrator
+  email: admin@example.com
+  password: "CHANGE-ME-to-a-real-passphrase-9"
+
+network:
+  hostname: vault.home.arpa
+  listen_address: 0.0.0.0
+  https_port: 5000
+  enable_http: false
+  tls_mode: self_signed
+  trusted_networks:
+    - 192.168.0.0/16
+    - 10.0.0.0/8
+  configure_firewall: true
+
+media:
+  movies_root: /srv/cinemediavault/Movies
+  tv_root: /srv/cinemediavault/TV Shows
+  music_root: /srv/cinemediavault/Music
+  books_root: /srv/cinemediavault/Books
+  comics_root: /srv/cinemediavault/Comics
+  comic_library_root: /srv/cinemediavault/comic-library
+  games_root: /srv/cinemediavault/Games
+  recordings_root: /srv/cinemediavault/Recordings
+  create_missing: true
+  # Mount a NAS share and add a boot-safe fstab entry for it.
+  mounts:
+    - type: cifs
+      source: //nas.home.arpa/Movies
+      mountpoint: /srv/cinemediavault/Movies
+      options: vers=3.0,uid=cinevault,gid=cinevault
+      # Create this yourself, mode 0600, with username= and password= lines.
+      credentials_file: /root/.smbcredentials
+      manage_fstab: true
+
+metadata:
+  tmdb_api_key: ""
+  refresh_cron: "*/15 * * * *"
+  fetch_on_install: false
+
+livetv:
+  enabled: true
+  discovery: manual
+  device_address: 192.168.1.50
+  tuner_count: 2
+  # Keep one tuner free so live viewing always works.
+  reserved_tuners: 1
+
+epg:
+  mode: extended
+  collector_bind_address: 192.168.1.10
+  collector_port: 3010
+  horizon_days: 14
+  refresh_time: "03:20"
+  request_delay_ms: 2500
+  # Your own verified channels.xml. Without one the collector produces an empty
+  # guide and the tuner's own guide is used unchanged.
+  channel_map: /root/channels.xml
+
+dvr:
+  enabled: true
+  padding_start_seconds: 60
+  padding_end_seconds: 120
+  retention_days: 0          # never delete automatically
+  conflict_policy: priority
+  min_free_gb: 50
+
+subtitles:
+  use_existing: true
+  languages: [en, es]
+  subdl_enabled: false
+  whisper_enabled: false
+
+integrations:
+  homepage_enabled: true
+
+modules:
+  movies: true
+  tv: true
+  music: true
+  bookvault: true
+  comics: true
+  video_wall: true
+  downloads: true
+  games: [nes, sega, dos, mame]
+  creators: [comics, books, games]
+
+transcode:
+  hls_enabled: true
+  hls_encoder: auto
+  default_playback_mode: direct
+  # Rewrites source media. Installed stopped; the installer will not start it.
+  library_queue_enabled: false
+
+resources:
+  app_memory_limit_mb: 4096
+  app_cpu_quota_percent: 0

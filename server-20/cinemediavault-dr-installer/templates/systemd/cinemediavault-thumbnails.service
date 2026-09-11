@@ -1,0 +1,24 @@
+# TV episode thumbnail generation.
+#
+# GENERATED FILE - regenerate with `cinevaultctl apply`.
+
+[Unit]
+Description=CineMediaVault TV episode thumbnails
+After=cinemediavault.service remote-fs.target
+
+[Service]
+Type=oneshot
+User={{ service_user }}
+Group={{ service_group }}
+EnvironmentFile={{ env_file }}
+ExecStart=/usr/bin/python3 {{ app_dir }}/tv-download-library/generate_tv_episode_thumbnails.py --limit {{ thumbnail_limit }}
+TimeoutStartSec=10800
+Nice=19
+IOSchedulingClass=idle
+CPUQuota={{ thumbnail_cpu_quota }}%
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths={{ state_root }} {{ log_root }} {{ cache_root }}
+SyslogIdentifier=cinemediavault-thumbnails

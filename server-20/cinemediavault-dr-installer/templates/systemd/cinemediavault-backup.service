@@ -1,0 +1,22 @@
+# Daily database backup.
+#
+# GENERATED FILE - regenerate with `cinevaultctl apply`.
+
+[Unit]
+Description=CineMediaVault database backup
+
+[Service]
+Type=oneshot
+User={{ service_user }}
+Group={{ service_group }}
+EnvironmentFile={{ env_file }}
+ExecStart=/usr/bin/python3 {{ scripts_dir }}/cinevault_db_backup.py
+TimeoutStartSec=1800
+Nice=15
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths={{ state_root }} {{ log_root }}
+SyslogIdentifier=cinemediavault-backup

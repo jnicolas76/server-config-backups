@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#090b0d">
+  <title>Sega Genesis Game Library</title>
+  <style>
+    :root { color-scheme: dark; font-family: Arial, Helvetica, sans-serif; }
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; min-height: 0; margin: 0; background: #050607; color: #f3f5f6; }
+    body { height: 100dvh; overflow: hidden; display: grid; grid-template-rows: auto minmax(0, 1fr); }
+    header { display: grid; grid-template-columns: auto minmax(180px, 1fr) minmax(220px, 2fr); gap: 10px; align-items: center; padding: 10px 14px; background: #111417; border-bottom: 1px solid #343a40; }
+    .brand { display: flex; align-items: center; gap: 9px; white-space: nowrap; font-weight: 800; }
+    .mark { width: 30px; height: 30px; display: grid; place-items: center; background: #c92432; border: 2px solid #f3f5f6; border-radius: 50%; font-size: 12px; }
+    input, select { width: 100%; height: 42px; border: 1px solid #4b535b; border-radius: 4px; background: #1b1f23; color: #f3f5f6; padding: 0 12px; font: inherit; }
+    input:focus, select:focus { outline: 2px solid #20a4d8; outline-offset: 1px; }
+    main { height: 100%; min-height: 0; overflow: hidden; position: relative; display: grid; place-items: stretch; background: #000; }
+    #game { width: 100%; height: 100%; min-height: 0; }
+    .empty { place-self: center; text-align: center; color: #aeb5bb; padding: 24px; }
+    .empty strong { display: block; color: #fff; font-size: 20px; margin-bottom: 8px; }
+    .empty code { color: #55c6ee; }
+    body.auth-locked > :not(#password-gate) { visibility: hidden; }
+    #password-gate { position: fixed; z-index: 9999; inset: 0; display: grid; place-items: center; padding: 18px; background: #050607; color: #f3f5f6; font-family: Arial, Helvetica, sans-serif; }
+    body:not(.auth-locked) #password-gate { display: none; }
+    .password-box { width: min(390px, 100%); display: grid; gap: 10px; padding: 18px; border: 1px solid #343a40; background: #111417; box-shadow: 0 16px 48px #000; }
+    .password-box strong { font-size: 16px; }
+    .password-box small { color: #aeb5bb; line-height: 1.4; }
+    .password-box input, .password-box button { width: 100%; height: 38px; border: 1px solid #4b535b; border-radius: 4px; background: #1b1f23; color: #f3f5f6; font: inherit; }
+    .password-box button { cursor: pointer; }
+    .password-error { min-height: 18px; color: #ff8178; font-size: 12px; }
+    @media (max-width: 720px) {
+      header { grid-template-columns: 1fr 1fr; }
+      .brand { grid-column: 1 / -1; }
+    }
+    @media (max-width: 480px) {
+      header { grid-template-columns: 1fr; padding: 8px; }
+      .brand { grid-column: auto; }
+    }
+  </style>
+</head>
+<body class="auth-locked">
+  <div id="password-gate" role="dialog" aria-modal="true" aria-labelledby="password-title">
+    <form class="password-box" id="password-form">
+      <strong id="password-title">Sega Genesis Game Library</strong>
+      <small>Enter password to continue.</small>
+      <input id="password-input" type="password" autocomplete="current-password" placeholder="Password" aria-label="Password">
+      <button type="submit">UNLOCK</button>
+      <div class="password-error" id="password-error" aria-live="polite"></div>
+    </form>
+  </div>
+  <header>
+    <div class="brand"><span class="mark">16</span><span>SEGA GENESIS</span></div>
+    <input id="search" type="search" placeholder="Search games" aria-label="Search games">
+    <select id="games" aria-label="Choose a game"><option>Loading library...</option></select>
+  </header>
+  <main id="stage"><div id="game"></div></main>
+  <script>
+    const PAGE_PASSWORD = "Spectrum1"; // Change this password whenever you want.
+    const AUTH_SESSION_KEY = `sega-auth:${location.pathname}`;
+
+    function requirePagePassword() {
+      return new Promise(resolve => {
+        const gate = document.getElementById("password-gate");
+        const form = document.getElementById("password-form");
+        const input = document.getElementById("password-input");
+        const error = document.getElementById("password-error");
+        const stored = (() => { try { return sessionStorage.getItem(AUTH_SESSION_KEY); } catch (_) { return ""; } })();
+        const unlock = () => {
+          try { sessionStorage.setItem(AUTH_SESSION_KEY, PAGE_PASSWORD); } catch (_) {}
+          document.body.classList.remove("auth-locked");
+          gate.remove();
+          resolve();
+        };
+        if (!PAGE_PASSWORD || stored === PAGE_PASSWORD) {
+          unlock();
+          return;
+        }
+        form.addEventListener("submit", event => {
+          event.preventDefault();
+          if (input.value === PAGE_PASSWORD) unlock();
+          else {
+            error.textContent = "Invalid password.";
+            input.select();
+          }
+        });
+        setTimeout(() => input.focus(), 0);
+      });
+    }
+
+    const select = document.getElementById("games");
+    const search = document.getElementById("search");
+    const stage = document.getElementById("stage");
+    let catalog = [];
+
+    function renderOptions(filter = "") {
+      const value = select.value;
+      const needle = filter.trim().toLowerCase();
+      const matches = catalog.filter(game => !needle || `${game.title} ${game.region}`.toLowerCase().includes(needle));
+      select.replaceChildren(...matches.map(game => {
+        const option = document.createElement("option");
+        option.value = game.id;
+        option.textContent = `${game.title} - ${game.region}`;
+        return option;
+      }));
+      if (matches.some(game => game.id === value)) select.value = value;
+    }
+
+    function launch(game) {
+      document.title = `${game.title} - Sega Genesis`;
+      window.EJS_player = "#game";
+      window.EJS_core = "segaMD";
+      window.EJS_pathtodata = "runtime/";
+      window.EJS_gameUrl = game.rom;
+      window.EJS_gameName = game.title;
+      window.EJS_gameID = game.id;
+      window.EJS_color = "#c92432";
+      window.EJS_volume = 0.75;
+      window.EJS_startOnLoaded = false;
+      window.EJS_threads = false;
+      window.EJS_disableAutoLang = false;
+      const loader = document.createElement("script");
+      loader.src = "runtime/loader.js";
+      document.body.appendChild(loader);
+    }
+
+    async function initialize() {
+      const response = await fetch("catalog.json", {cache: "no-store"});
+      if (!response.ok) throw new Error(`Catalog error ${response.status}`);
+      catalog = await response.json();
+      if (!catalog.length) {
+        select.innerHTML = "<option>No games found</option>";
+        select.disabled = true;
+        search.disabled = true;
+        stage.innerHTML = '<div class="empty"><strong>NO GENESIS GAMES FOUND</strong>Place ROM files in <code>source</code>, then run the build script.</div>';
+        return;
+      }
+      renderOptions();
+      const requested = new URLSearchParams(location.search).get("game");
+      const game = catalog.find(item => item.id === requested) || catalog[0];
+      select.value = game.id;
+      launch(game);
+    }
+
+    search.addEventListener("input", () => renderOptions(search.value));
+    select.addEventListener("change", () => {
+      location.search = new URLSearchParams({game: select.value}).toString();
+    });
+    requirePagePassword().then(initialize).catch(error => {
+      stage.innerHTML = `<div class="empty"><strong>LIBRARY ERROR</strong>${error.message}</div>`;
+    });
+  </script>
+</body>
+</html>

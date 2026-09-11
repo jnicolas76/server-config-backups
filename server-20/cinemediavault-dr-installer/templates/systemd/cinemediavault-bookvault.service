@@ -1,0 +1,43 @@
+# Book Vault (ebooks and audiobooks).
+#
+# GENERATED FILE - regenerate with `cinevaultctl apply`.
+
+[Unit]
+Description=CineMediaVault Book Vault
+After=network.target remote-fs.target cinemediavault.service
+PartOf=cinemediavault.service
+
+[Service]
+Type=simple
+User={{ service_user }}
+Group={{ service_group }}
+EnvironmentFile={{ env_file }}
+EnvironmentFile=-{{ secrets_file }}
+WorkingDirectory={{ state_root }}/bookvault
+ExecStart=/usr/bin/python3 {{ app_dir }}/bookvault/bookvault_server.py --host {{ bind_address }} --port {{ port }} --book-root {{ book_root }}
+
+Restart=on-failure
+RestartSec=15
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6
+CapabilityBoundingSet=
+ReadWritePaths={{ state_root }} {{ log_root }}
+ReadOnlyPaths={{ book_root }}
+MemoryMax=768M
+TasksMax=96
+SyslogIdentifier=cinemediavault-bookvault
+
+[Install]
+WantedBy=multi-user.target

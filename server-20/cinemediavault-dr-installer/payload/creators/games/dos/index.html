@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DOS Game Library</title>
+  <link rel="stylesheet" href="runtime/js-dos.css">
+  <style>
+    :root { color-scheme: dark; --panel: #101512; --line: #39423b; --text: #f2f4ed; --muted: #9da79f; --accent: #63d18b; }
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #050706; }
+    body { display: grid; grid-template-rows: 54px minmax(0, 1fr); font-family: Consolas, "Courier New", monospace; color: var(--text); }
+    header { display: grid; grid-template-columns: auto 90px minmax(160px, 1fr) minmax(220px, 1.5fr) auto auto auto; align-items: center; gap: 10px; padding: 7px 12px; border-bottom: 1px solid var(--line); background: var(--panel); }
+    .brand { white-space: nowrap; font-weight: 700; font-size: 14px; }
+    select, input, button { min-width: 0; height: 34px; border: 1px solid #49534c; border-radius: 4px; background: #080b09; color: var(--text); font: inherit; font-size: 12px; }
+    select, input { width: 100%; padding: 0 9px; }
+    button { padding: 0 10px; cursor: pointer; }
+    select:focus, input:focus, button:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+    button:hover { border-color: var(--accent); }
+    #status { color: var(--muted); font-size: 11px; white-space: nowrap; }
+    #status.error { color: #ff7b72; }
+    #stage, #dos { width: 100%; height: 100%; min-width: 0; min-height: 0; }
+    #stage { position: relative; overflow: hidden; }
+    #joystick-toggle[aria-pressed="true"] { border-color: var(--accent); background: #153021; }
+    #keyboard-toggle[aria-pressed="true"] { border-color: var(--accent); background: #153021; }
+    #touch-joystick { position: absolute; z-index: 30; inset: 0; display: none; align-items: flex-end; justify-content: space-between; padding: 18px 22px; pointer-events: none; user-select: none; -webkit-user-select: none; }
+    body.joystick-visible #touch-joystick { display: flex; }
+    body.joystick-visible.keyboard-visible #touch-joystick { padding-bottom: 250px; }
+    .joystick-base { position: relative; width: 142px; height: 142px; border: 3px solid #090b09; border-radius: 50%; background: rgba(28, 34, 30, .88); box-shadow: inset 0 0 0 2px #687168, 0 3px 12px #000; pointer-events: auto; touch-action: none; }
+    .joystick-base::before, .joystick-base::after { content: ""; position: absolute; background: #687168; opacity: .45; }
+    .joystick-base::before { left: 18px; right: 18px; top: 68px; height: 2px; }
+    .joystick-base::after { top: 18px; bottom: 18px; left: 68px; width: 2px; }
+    .joystick-knob { position: absolute; left: 43px; top: 43px; width: 56px; height: 56px; border: 2px solid #0a0c0a; border-radius: 50%; background: #475149; box-shadow: inset 0 0 0 2px #8b968d, 0 3px 5px #000; pointer-events: none; transform: translate(0, 0); }
+    .joystick-buttons { display: flex; gap: 15px; align-items: flex-end; padding-bottom: 8px; pointer-events: auto; }
+    .fire-button { width: 72px; height: 72px; padding: 0; border: 3px solid #5b1110; border-radius: 50%; background: #bd3732; box-shadow: inset 0 0 0 2px #e47670, 0 4px 0 #330807; color: white; font-size: 20px; font-weight: 700; touch-action: none; -webkit-tap-highlight-color: transparent; }
+    .fire-button.pressed { transform: translateY(3px); box-shadow: inset 0 0 0 2px white, 0 1px 0 #330807; }
+    #virtual-keyboard { position: absolute; z-index: 35; left: 0; right: 0; bottom: 0; display: none; gap: 4px; padding: 8px; border-top: 1px solid #59625b; background: rgba(11, 14, 12, .97); box-shadow: 0 -8px 24px #000; pointer-events: auto; user-select: none; -webkit-user-select: none; }
+    body.keyboard-visible #virtual-keyboard { display: grid; }
+    .keyboard-row { display: flex; gap: 4px; min-width: 0; }
+    .keyboard-key { flex: 1 1 0; height: 34px; min-width: 0; padding: 0 3px; border-color: #555e57; background: #252a26; box-shadow: inset 0 -2px 0 #101310; font-size: 11px; font-weight: 700; touch-action: none; -webkit-tap-highlight-color: transparent; }
+    .keyboard-key.wide { flex-grow: 1.55; }
+    .keyboard-key.extra-wide { flex-grow: 2.2; }
+    .keyboard-key.space { flex-grow: 6; }
+    .keyboard-key.pressed { transform: translateY(2px); border-color: var(--accent); background: #34443a; box-shadow: inset 0 0 0 1px var(--accent); }
+    body.auth-locked > :not(#password-gate) { visibility: hidden; }
+    #password-gate { position: fixed; z-index: 9999; inset: 0; display: grid; place-items: center; padding: 18px; background: #050706; color: var(--text); font-family: Consolas, "Courier New", monospace; }
+    body:not(.auth-locked) #password-gate { display: none; }
+    .password-box { width: min(390px, 100%); display: grid; gap: 10px; padding: 18px; border: 1px solid var(--line); background: #101512; box-shadow: 0 16px 48px #000; }
+    .password-box strong { font-size: 16px; }
+    .password-box small { color: var(--muted); line-height: 1.4; }
+    .password-box input, .password-box button { width: 100%; height: 38px; }
+    .password-error { min-height: 18px; color: #ff7b72; font-size: 12px; }
+    @media (max-width: 760px) {
+      body { grid-template-rows: 96px minmax(0, 1fr); }
+      header { grid-template-columns: 70px 50px 50px minmax(0, 1fr); grid-template-rows: 34px 34px; gap: 6px; }
+      .brand { display: none; }
+      #year { grid-column: 1; grid-row: 1; }
+      #joystick-toggle { grid-column: 2; grid-row: 1; }
+      #keyboard-toggle { grid-column: 3; grid-row: 1; }
+      #status { grid-column: 4; grid-row: 1; text-align: right; overflow: hidden; text-overflow: ellipsis; }
+      #search { grid-column: 1 / 4; grid-row: 2; }
+      #game { grid-column: 4; grid-row: 2; }
+      #touch-joystick { padding: 12px; }
+      body.joystick-visible.keyboard-visible #touch-joystick { padding-bottom: 224px; }
+      .joystick-base { width: 124px; height: 124px; }
+      .joystick-base::before { top: 59px; }
+      .joystick-base::after { left: 59px; }
+      .joystick-knob { left: 37px; top: 37px; width: 50px; height: 50px; }
+      .fire-button { width: 62px; height: 62px; }
+      #virtual-keyboard { gap: 3px; padding: 5px; }
+      .keyboard-row { gap: 3px; }
+      .keyboard-key { height: 31px; padding: 0 1px; font-size: 9px; }
+    }
+  </style>
+  <script>
+    try { if (navigator.keyboard?.lock) navigator.keyboard.lock = () => Promise.resolve(); } catch (_) {}
+    (() => {
+      const nativeGetGamepads = navigator.getGamepads?.bind(navigator) || (() => []);
+      const buttons = Array.from({length: 17}, () => ({pressed: false, touched: false, value: 0}));
+      const gamepad = {
+        id: "DOS Touch Joystick", index: 0, connected: false, mapping: "standard",
+        axes: [0, 0, 0, 0], buttons, timestamp: 0,
+      };
+      const api = window.virtualDosJoystick = {
+        gamepad,
+        setEnabled(enabled) {
+          if (gamepad.connected === enabled) return;
+          gamepad.connected = enabled;
+          gamepad.timestamp = performance.now();
+          const event = new Event(enabled ? "gamepadconnected" : "gamepaddisconnected");
+          Object.defineProperty(event, "gamepad", {value: gamepad});
+          dispatchEvent(event);
+        },
+        setAxes(x, y) {
+          gamepad.axes[0] = Math.max(-1, Math.min(1, x));
+          gamepad.axes[1] = Math.max(-1, Math.min(1, y));
+          gamepad.timestamp = performance.now();
+        },
+        setButton(index, pressed) {
+          buttons[index] = {pressed, touched: pressed, value: pressed ? 1 : 0};
+          gamepad.timestamp = performance.now();
+        },
+      };
+      Object.defineProperty(navigator, "getGamepads", {
+        configurable: true,
+        value() {
+          const pads = Array.from(nativeGetGamepads() || []);
+          if (!gamepad.connected) return pads;
+          const index = pads.findIndex(pad => !pad);
+          gamepad.index = index < 0 ? pads.length : index;
+          pads[gamepad.index] = gamepad;
+          return pads;
+        },
+      });
+    })();
+  </script>
+  <script src="runtime/js-dos.js"></script>
+</head>
+<body class="auth-locked">
+  <div id="password-gate" role="dialog" aria-modal="true" aria-labelledby="password-title">
+    <form class="password-box" id="password-form">
+      <strong id="password-title">DOS Game Library</strong>
+      <small>Enter password to continue.</small>
+      <input id="password-input" type="password" autocomplete="current-password" placeholder="Password" aria-label="Password">
+      <button type="submit">UNLOCK</button>
+      <div class="password-error" id="password-error" aria-live="polite"></div>
+    </form>
+  </div>
+  <header>
+    <div class="brand">DOS GAME LIBRARY</div>
+    <select id="year" aria-label="Filter by year"><option value="">ALL YEARS</option></select>
+    <input id="search" type="search" placeholder="SEARCH GAMES" aria-label="Search games">
+    <select id="game" aria-label="Choose a game"></select>
+    <button id="joystick-toggle" type="button" title="Show or hide DOS joystick" aria-pressed="false">JOY</button>
+    <button id="keyboard-toggle" type="button" title="Show or hide DOS keyboard" aria-pressed="false">KEY</button>
+    <span id="status">READING LIBRARY</span>
+  </header>
+  <main id="stage">
+    <div id="dos" aria-label="DOS game player"></div>
+    <div id="touch-joystick" aria-label="DOS touch joystick">
+      <div class="joystick-base" id="joystick-base" aria-label="Joystick direction">
+        <div class="joystick-knob" id="joystick-knob"></div>
+      </div>
+      <div class="joystick-buttons">
+        <button class="fire-button" type="button" data-joy-button="1" aria-label="Joystick button 2">B</button>
+        <button class="fire-button" type="button" data-joy-button="0" aria-label="Joystick button 1">A</button>
+      </div>
+    </div>
+    <div id="virtual-keyboard" aria-label="DOS virtual keyboard"></div>
+  </main>
+  <script>
+    const PAGE_PASSWORD = "Spectrum1"; // Change this password whenever you want.
+    const AUTH_SESSION_KEY = `dos-auth:${location.pathname}`;
+
+    function requirePagePassword() {
+      return new Promise(resolve => {
+        const gate = document.getElementById("password-gate");
+        const form = document.getElementById("password-form");
+        const input = document.getElementById("password-input");
+        const error = document.getElementById("password-error");
+        const stored = (() => { try { return sessionStorage.getItem(AUTH_SESSION_KEY); } catch (_) { return ""; } })();
+        const unlock = () => {
+          try { sessionStorage.setItem(AUTH_SESSION_KEY, PAGE_PASSWORD); } catch (_) {}
+          document.body.classList.remove("auth-locked");
+          gate.remove();
+          resolve();
+        };
+        if (!PAGE_PASSWORD || stored === PAGE_PASSWORD) {
+          unlock();
+          return;
+        }
+        form.addEventListener("submit", event => {
+          event.preventDefault();
+          if (input.value === PAGE_PASSWORD) unlock();
+          else {
+            error.textContent = "Invalid password.";
+            input.select();
+          }
+        });
+        setTimeout(() => input.focus(), 0);
+      });
+    }
+
+    const yearSelect = document.getElementById("year");
+    const gameSelect = document.getElementById("game");
+    const search = document.getElementById("search");
+    const status = document.getElementById("status");
+    const joystickToggle = document.getElementById("joystick-toggle");
+    const keyboardToggle = document.getElementById("keyboard-toggle");
+    const virtualKeyboard = document.getElementById("virtual-keyboard");
+    const joystickBase = document.getElementById("joystick-base");
+    const joystickKnob = document.getElementById("joystick-knob");
+    const activeFirePointers = new Map();
+    const activeKeyPointers = new Map();
+    let joystickPointer = null;
+    let catalog = [];
+
+    function centerJoystick() {
+      window.virtualDosJoystick.setAxes(0, 0);
+      joystickKnob.style.transform = "translate(0px, 0px)";
+    }
+
+    function setJoystickVisible(visible) {
+      document.body.classList.toggle("joystick-visible", visible);
+      joystickToggle.setAttribute("aria-pressed", String(visible));
+      window.virtualDosJoystick.setEnabled(visible);
+      if (!visible) {
+        centerJoystick();
+        activeFirePointers.forEach((_button, pointerId) => releaseFireButton(pointerId));
+      }
+    }
+
+    function updateJoystick(event) {
+      if (event.pointerId !== joystickPointer) return;
+      const rect = joystickBase.getBoundingClientRect();
+      const limit = (rect.width - joystickKnob.offsetWidth) / 2;
+      let x = event.clientX - (rect.left + rect.width / 2);
+      let y = event.clientY - (rect.top + rect.height / 2);
+      const distance = Math.hypot(x, y);
+      if (distance > limit) {
+        x = x / distance * limit;
+        y = y / distance * limit;
+      }
+      joystickKnob.style.transform = `translate(${x}px, ${y}px)`;
+      window.virtualDosJoystick.setAxes(x / limit, y / limit);
+    }
+
+    function releaseJoystick(event) {
+      if (event.pointerId !== joystickPointer) return;
+      joystickPointer = null;
+      centerJoystick();
+    }
+
+    function releaseFireButton(pointerId) {
+      const button = activeFirePointers.get(pointerId);
+      if (!button) return;
+      activeFirePointers.delete(pointerId);
+      const index = Number(button.dataset.joyButton);
+      if (![...activeFirePointers.values()].some(active => active === button)) {
+        button.classList.remove("pressed");
+        window.virtualDosJoystick.setButton(index, false);
+      }
+    }
+
+    joystickBase.addEventListener("pointerdown", event => {
+      event.preventDefault();
+      if (joystickPointer !== null) return;
+      joystickPointer = event.pointerId;
+      joystickBase.setPointerCapture(event.pointerId);
+      updateJoystick(event);
+    });
+    joystickBase.addEventListener("pointermove", updateJoystick);
+    ["pointerup", "pointercancel", "lostpointercapture"].forEach(type => {
+      joystickBase.addEventListener(type, releaseJoystick);
+    });
+    document.querySelectorAll("[data-joy-button]").forEach(button => {
+      button.addEventListener("contextmenu", event => event.preventDefault());
+      button.addEventListener("pointerdown", event => {
+        event.preventDefault();
+        button.setPointerCapture(event.pointerId);
+        activeFirePointers.set(event.pointerId, button);
+        button.classList.add("pressed");
+        window.virtualDosJoystick.setButton(Number(button.dataset.joyButton), true);
+      });
+      ["pointerup", "pointercancel", "lostpointercapture"].forEach(type => {
+        button.addEventListener(type, event => releaseFireButton(event.pointerId));
+      });
+    });
+    addEventListener("blur", () => {
+      if (joystickPointer !== null) releaseJoystick({pointerId: joystickPointer});
+      [...activeFirePointers.keys()].forEach(releaseFireButton);
+    });
+    joystickToggle.addEventListener("click", () => {
+      setJoystickVisible(!document.body.classList.contains("joystick-visible"));
+    });
+
+    function dispatchVirtualKey(type, definition) {
+      const activeDefinitions = [...activeKeyPointers.values()].map(entry => entry.definition);
+      const event = new KeyboardEvent(type, {
+        key: definition.key,
+        code: definition.code,
+        bubbles: true,
+        cancelable: true,
+        repeat: false,
+        shiftKey: activeDefinitions.some(key => key.code.startsWith("Shift")),
+        ctrlKey: activeDefinitions.some(key => key.code.startsWith("Control")),
+        altKey: activeDefinitions.some(key => key.code.startsWith("Alt")),
+      });
+      Object.defineProperty(event, "keyCode", {get: () => definition.keyCode});
+      Object.defineProperty(event, "which", {get: () => definition.keyCode});
+      const target = document.querySelector("#dos canvas") || document.getElementById("dos");
+      target.focus?.({preventScroll: true});
+      target.dispatchEvent(event);
+      virtualKeyboard.dataset.lastEvent = `${type}:${definition.code}`;
+    }
+
+    function releaseVirtualKey(pointerId) {
+      const entry = activeKeyPointers.get(pointerId);
+      if (!entry) return;
+      dispatchVirtualKey("keyup", entry.definition);
+      activeKeyPointers.delete(pointerId);
+      if (![...activeKeyPointers.values()].some(active => active.button === entry.button)) {
+        entry.button.classList.remove("pressed");
+      }
+    }
+
+    function releaseAllVirtualKeys() {
+      [...activeKeyPointers.keys()].forEach(releaseVirtualKey);
+    }
+
+    function setKeyboardVisible(visible) {
+      document.body.classList.toggle("keyboard-visible", visible);
+      keyboardToggle.setAttribute("aria-pressed", String(visible));
+      if (!visible) releaseAllVirtualKeys();
+    }
+
+    function keyboardDefinition(label, key, code, keyCode, size = "") {
+      return {label, key, code, keyCode, size};
+    }
+
+    const keyboardRows = [
+      [keyboardDefinition("ESC", "Escape", "Escape", 27), ...Array.from({length: 10}, (_, index) => keyboardDefinition(`F${index + 1}`, `F${index + 1}`, `F${index + 1}`, 112 + index))],
+      [
+        ..."1234567890".split("").map(value => keyboardDefinition(value, value, `Digit${value}`, 48 + Number(value) % 10)),
+        keyboardDefinition("-", "-", "Minus", 189), keyboardDefinition("=", "=", "Equal", 187),
+        keyboardDefinition("BACK", "Backspace", "Backspace", 8, "extra-wide"),
+      ],
+      [
+        keyboardDefinition("TAB", "Tab", "Tab", 9, "wide"),
+        ..."QWERTYUIOP".split("").map(value => keyboardDefinition(value, value.toLowerCase(), `Key${value}`, value.charCodeAt(0))),
+        keyboardDefinition("[", "[", "BracketLeft", 219), keyboardDefinition("]", "]", "BracketRight", 221),
+        keyboardDefinition("\\", "\\", "Backslash", 220),
+      ],
+      [
+        keyboardDefinition("CAPS", "CapsLock", "CapsLock", 20, "wide"),
+        ..."ASDFGHJKL".split("").map(value => keyboardDefinition(value, value.toLowerCase(), `Key${value}`, value.charCodeAt(0))),
+        keyboardDefinition(";", ";", "Semicolon", 186), keyboardDefinition("'", "'", "Quote", 222),
+        keyboardDefinition("ENTER", "Enter", "Enter", 13, "extra-wide"),
+      ],
+      [
+        keyboardDefinition("SHIFT", "Shift", "ShiftLeft", 16, "extra-wide"),
+        ..."ZXCVBNM".split("").map(value => keyboardDefinition(value, value.toLowerCase(), `Key${value}`, value.charCodeAt(0))),
+        keyboardDefinition(",", ",", "Comma", 188), keyboardDefinition(".", ".", "Period", 190),
+        keyboardDefinition("/", "/", "Slash", 191), keyboardDefinition("UP", "ArrowUp", "ArrowUp", 38),
+        keyboardDefinition("DEL", "Delete", "Delete", 46),
+      ],
+      [
+        keyboardDefinition("CTRL", "Control", "ControlLeft", 17, "wide"),
+        keyboardDefinition("ALT", "Alt", "AltLeft", 18, "wide"),
+        keyboardDefinition("SPACE", " ", "Space", 32, "space"),
+        keyboardDefinition("LEFT", "ArrowLeft", "ArrowLeft", 37),
+        keyboardDefinition("DOWN", "ArrowDown", "ArrowDown", 40),
+        keyboardDefinition("RIGHT", "ArrowRight", "ArrowRight", 39),
+      ],
+    ];
+
+    keyboardRows.forEach(definitions => {
+      const row = document.createElement("div");
+      row.className = "keyboard-row";
+      definitions.forEach(definition => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = `keyboard-key ${definition.size}`.trim();
+        button.textContent = definition.label;
+        button.addEventListener("contextmenu", event => event.preventDefault());
+        button.addEventListener("pointerdown", event => {
+          event.preventDefault();
+          button.setPointerCapture(event.pointerId);
+          activeKeyPointers.set(event.pointerId, {button, definition});
+          button.classList.add("pressed");
+          dispatchVirtualKey("keydown", definition);
+        });
+        ["pointerup", "pointercancel", "lostpointercapture"].forEach(type => {
+          button.addEventListener(type, event => releaseVirtualKey(event.pointerId));
+        });
+        row.append(button);
+      });
+      virtualKeyboard.append(row);
+    });
+
+    keyboardToggle.addEventListener("click", () => {
+      setKeyboardVisible(!document.body.classList.contains("keyboard-visible"));
+    });
+    addEventListener("blur", releaseAllVirtualKeys);
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) releaseAllVirtualKeys();
+    });
+
+    function selectedId() {
+      const params = new URLSearchParams(location.search);
+      return params.get("game") || (params.has("digger") ? catalog.find(g => /digger/i.test(g.title))?.id : null) || "earl2025";
+    }
+
+    function renderGames() {
+      const query = search.value.trim().toLowerCase();
+      const year = yearSelect.value;
+      const current = selectedId();
+      const games = catalog.filter(g => (!year || g.year === year) && (!query || g.title.toLowerCase().includes(query)));
+      gameSelect.replaceChildren(...games.map(g => {
+        const option = document.createElement("option");
+        option.value = g.id;
+        option.textContent = `${g.year} - ${g.title}${g.available ? "" : " (unavailable)"}`;
+        option.disabled = !g.available;
+        option.selected = g.id === current;
+        return option;
+      }));
+    }
+
+    function launch(game) {
+      document.title = `${game.title} - DOS Game Library`;
+      status.textContent = `LOADING ${game.title.toUpperCase()}`;
+      window.dosPlayer = Dos(document.getElementById("dos"), {
+        url: `${game.bundle}?v=2`, pathPrefix: "runtime/emulators/", autoStart: true,
+        backendLocked: true, kiosk: true, mouseCapture: false, workerThread: false,
+        renderBackend: "canvas", renderAspect: "4/3", theme: "dark",
+        onEvent(event) {
+          if (event === "emu-ready") status.textContent = "DOSBOX READY";
+          if (event === "bnd-play") status.textContent = "STARTING GAME";
+          if (event === "ci-ready") {
+            status.textContent = game.title.toUpperCase();
+            if (document.body.classList.contains("joystick-visible")) {
+              window.virtualDosJoystick.setEnabled(false);
+              window.virtualDosJoystick.setEnabled(true);
+            }
+          }
+        }
+      });
+    }
+
+    gameSelect.addEventListener("change", () => {
+      const params = new URLSearchParams({game: gameSelect.value});
+      if (document.body.classList.contains("joystick-visible")) params.set("joystick", "1");
+      if (document.body.classList.contains("keyboard-visible")) params.set("keyboard", "1");
+      location.search = params.toString();
+    });
+    yearSelect.addEventListener("change", renderGames);
+    search.addEventListener("input", renderGames);
+    setJoystickVisible(new URLSearchParams(location.search).get("joystick") === "1");
+    setKeyboardVisible(new URLSearchParams(location.search).get("keyboard") === "1");
+
+    requirePagePassword().then(() => fetch("games/catalog.json?v=1")).then(response => {
+      if (!response.ok) throw new Error(`Catalog error ${response.status}`);
+      return response.json();
+    }).then(data => {
+      catalog = data;
+      const years = [...new Set(catalog.map(g => g.year))].sort();
+      yearSelect.append(...years.map(value => new Option(value, value)));
+      renderGames();
+      const game = catalog.find(g => g.id === selectedId() && g.available) || catalog[0];
+      launch(game);
+    }).catch(reason => {
+      status.textContent = reason instanceof Error ? reason.message : String(reason);
+      status.classList.add("error");
+    });
+  </script>
+</body>
+</html>

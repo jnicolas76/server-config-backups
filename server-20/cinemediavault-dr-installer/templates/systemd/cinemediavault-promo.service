@@ -1,0 +1,44 @@
+# Promo/barker channel render pass.
+#
+# GENERATED FILE - regenerate with `cinevaultctl apply`.
+#
+# Renders one spoken-narration preview reel of upcoming virtual-channel
+# programming with Kokoro ONNX text-to-speech and ffmpeg. Optional and off by
+# default; installed only when promo_channel.enabled is true.
+
+[Unit]
+Description=CineMediaVault promo/barker channel render
+After=network.target cinemediavault.service
+Requisite=cinemediavault.service
+
+[Service]
+Type=oneshot
+User={{ service_user }}
+Group={{ service_group }}
+EnvironmentFile={{ env_file }}
+EnvironmentFile=-{{ secrets_file }}
+ExecStart={{ promo_venv }}/bin/python {{ app_dir }}/generate_combined_barker.py --root {{ promo_reels_dir }} --model {{ promo_model }} --voices {{ promo_voices }} --minutes {{ promo_minutes }}
+
+# One reel takes minutes, never hours; a stuck ffmpeg must not run forever.
+TimeoutStartSec=2700
+Nice=10
+IOSchedulingClass=idle
+CPUQuota={{ promo_cpu_quota }}%
+MemoryMax={{ promo_memory_mb }}M
+TasksMax=64
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+ReadWritePaths={{ state_root }} {{ log_root }}
+SyslogIdentifier=cinemediavault-promo
+
+[Install]
+WantedBy=multi-user.target

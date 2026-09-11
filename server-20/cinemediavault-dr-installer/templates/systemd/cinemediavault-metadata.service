@@ -1,0 +1,35 @@
+# TMDb metadata and poster fetch.
+#
+# GENERATED FILE - regenerate with `cinevaultctl apply`.
+#
+# Deliberately separate from the library refresh: a refresh must stay fast and
+# must never be blocked by a rate-limited provider.
+
+[Unit]
+Description=CineMediaVault metadata and artwork fetch
+After=network-online.target cinemediavault.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User={{ service_user }}
+Group={{ service_group }}
+EnvironmentFile={{ env_file }}
+EnvironmentFile=-{{ secrets_file }}
+{% if movies %}
+ExecStart=/usr/bin/python3 {{ app_dir }}/media-download-library/fetch_tmdb_movie_metadata.py
+ExecStart=/usr/bin/python3 {{ app_dir }}/media-download-library/fetch_tmdb_posters.py
+{% endif %}
+{% if tv %}
+ExecStart=/usr/bin/python3 {{ app_dir }}/tv-download-library/fetch_tmdb_tv_metadata.py
+ExecStart=/usr/bin/python3 {{ app_dir }}/tv-download-library/fetch_tmdb_tv_posters.py
+{% endif %}
+TimeoutStartSec=21600
+Nice=15
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths={{ state_root }} {{ log_root }}
+SyslogIdentifier=cinemediavault-metadata

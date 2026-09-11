@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#090b0d">
+  <title>Arcade MAME Game Library</title>
+  <style>
+    :root { color-scheme: dark; --panel:#111417; --line:#343a40; --text:#f3f5f6; --muted:#aeb5bb; --accent:#35a7ff; --danger:#ff8178; font-family: Arial, Helvetica, sans-serif; }
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; min-height: 0; margin: 0; background: #050607; color: var(--text); }
+    body { height: 100dvh; overflow: hidden; display: grid; grid-template-rows: auto minmax(0, 1fr); }
+    header { display: grid; grid-template-columns: auto minmax(170px, 1fr) minmax(220px, 2fr) auto; gap: 10px; align-items: center; padding: 10px 14px; background: var(--panel); border-bottom: 1px solid var(--line); }
+    .brand { display: flex; align-items: center; gap: 9px; white-space: nowrap; font-weight: 800; }
+    .mark { min-width: 36px; height: 30px; padding: 0 8px; display: grid; place-items: center; background: #202833; border: 2px solid var(--accent); border-radius: 4px; font-size: 11px; }
+    input, select, button { height: 40px; border: 1px solid #4b535b; border-radius: 4px; background: #1b1f23; color: var(--text); padding: 0 12px; font: inherit; }
+    input, select { width: 100%; min-width: 0; }
+    button { cursor: pointer; }
+    input:focus, select:focus, button:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+    .actions { display: flex; gap: 7px; }
+    main { height: 100%; min-height: 0; overflow: hidden; position: relative; display: grid; place-items: stretch; background: #000; }
+    #game { width: 100%; height: 100%; min-height: 0; }
+    .empty { place-self: center; text-align: center; color: var(--muted); padding: 24px; max-width: 620px; line-height: 1.5; }
+    .empty strong { display: block; color: #fff; font-size: 20px; margin-bottom: 8px; }
+    .empty code { color: #55c6ee; }
+    #status { position: absolute; left: 12px; bottom: 10px; z-index: 5; padding: 5px 8px; background: rgba(0,0,0,.72); color: var(--muted); font: 12px Consolas, "Courier New", monospace; pointer-events: none; }
+    body.controller-visible #touch-controller { display: flex; }
+    #touch-controller { position: absolute; z-index: 12; left: 12px; right: 12px; bottom: 10px; height: 152px; display: none; align-items: center; justify-content: space-between; pointer-events: none; user-select: none; -webkit-user-select: none; }
+    .controller-cluster { pointer-events: auto; }
+    .dpad { width: 138px; height: 138px; display: grid; grid-template: repeat(3, 46px) / repeat(3, 46px); }
+    .pad-button, .action-button, .system-button, .shoulder-button { touch-action: none; -webkit-tap-highlight-color: transparent; border: 2px solid #060706; background: #242824; color: #f4f3eb; box-shadow: inset 0 0 0 1px #5c625d, 0 2px 0 #000; font-weight: 800; }
+    .pad-button { min-width: 0; width: 46px; height: 46px; padding: 0; border-radius: 3px; font-size: 22px; }
+    .pad-up { grid-area: 1 / 2; } .pad-left { grid-area: 2 / 1; } .pad-center { grid-area: 2 / 2; background: #171a17; border: 2px solid #060706; } .pad-right { grid-area: 2 / 3; } .pad-down { grid-area: 3 / 2; }
+    .middle-controls { display: grid; gap: 8px; align-self: flex-end; padding-bottom: 18px; pointer-events: auto; }
+    .shoulders, .system-buttons { display: flex; gap: 8px; justify-content: center; }
+    .system-button, .shoulder-button { min-width: 62px; height: 30px; padding: 0 8px; border-radius: 3px; font-size: 10px; }
+    .action-buttons { min-width: 198px; display: grid; grid-template-columns: repeat(3, 62px); grid-auto-rows: 62px; gap: 8px; align-items: center; justify-content: end; transform: rotate(-10deg); pointer-events: auto; }
+    .action-button { min-width: 0; width: 62px; height: 62px; padding: 0; border-radius: 50%; background: #bd302b; border-color: #5c100e; box-shadow: inset 0 0 0 2px #e36a63, 0 3px 0 #340706; font-size: 16px; }
+    .pad-button.pressed, .action-button.pressed, .system-button.pressed, .shoulder-button.pressed { transform: translateY(2px); box-shadow: inset 0 0 0 2px #f4f3eb; filter: brightness(1.28); }
+    #controller-toggle[aria-pressed="true"] { border-color: var(--accent); background: #1a3242; }
+    body.auth-locked > :not(#password-gate) { visibility: hidden; }
+    #password-gate { position: fixed; z-index: 9999; inset: 0; display: grid; place-items: center; padding: 18px; background: #050607; color: var(--text); }
+    body:not(.auth-locked) #password-gate { display: none; }
+    .password-box { width: min(390px, 100%); display: grid; gap: 10px; padding: 18px; border: 1px solid var(--line); background: var(--panel); box-shadow: 0 16px 48px #000; }
+    .password-box strong { font-size: 16px; }
+    .password-box small { color: var(--muted); line-height: 1.4; }
+    .password-box input, .password-box button { width: 100%; height: 38px; }
+    .password-error { min-height: 18px; color: var(--danger); font-size: 12px; }
+    @media (max-width: 760px) {
+      body { grid-template-rows: auto minmax(0, 1fr); }
+      header { grid-template-columns: 1fr; padding: 8px; gap: 6px; }
+      .actions { justify-content: stretch; }
+      .actions button { flex: 1; padding: 0 8px; }
+      #touch-controller { left: 8px; right: 8px; height: 138px; }
+      .dpad { width: 120px; height: 120px; grid-template: repeat(3, 40px) / repeat(3, 40px); }
+      .pad-button { width: 40px; height: 40px; }
+      .action-buttons { min-width: 132px; grid-template-columns: repeat(2, 58px); grid-auto-rows: 58px; gap: 6px; }
+      .action-button { width: 58px; height: 58px; }
+      .middle-controls { position: absolute; left: 50%; bottom: 0; transform: translateX(-50%); padding: 0; }
+      .shoulder-button { display: none; }
+      .system-button { min-width: 58px; height: 28px; font-size: 9px; }
+    }
+  </style>
+</head>
+<body class="auth-locked">
+  <div id="password-gate" role="dialog" aria-modal="true" aria-labelledby="password-title">
+    <form class="password-box" id="password-form">
+      <strong id="password-title">Arcade MAME Game Library</strong>
+      <small>Enter password to continue.</small>
+      <input id="password-input" type="password" autocomplete="current-password" placeholder="Password" aria-label="Password">
+      <button type="submit">UNLOCK</button>
+      <div class="password-error" id="password-error" aria-live="polite"></div>
+    </form>
+  </div>
+  <header>
+    <div class="brand"><span class="mark">MAME</span><span>ARCADE MAME</span></div>
+    <input id="search" type="search" placeholder="Search games" aria-label="Search games">
+    <select id="games" aria-label="Choose a game"><option>Loading library...</option></select>
+    <div class="actions"><button id="controller-toggle" type="button" aria-pressed="false">CTRL</button><button id="fullscreen" type="button">FULL</button></div>
+  </header>
+  <main id="stage">
+    <div id="game"></div>
+    <div id="touch-controller" aria-label="Touch controller">
+      <div class="dpad controller-cluster" aria-label="Directional pad">
+        <button class="pad-button pad-up" type="button" data-key="ArrowUp" aria-label="Up">&#9650;</button>
+        <button class="pad-button pad-left" type="button" data-key="ArrowLeft" aria-label="Left">&#9664;</button>
+        <div class="pad-center" aria-hidden="true"></div>
+        <button class="pad-button pad-right" type="button" data-key="ArrowRight" aria-label="Right">&#9654;</button>
+        <button class="pad-button pad-down" type="button" data-key="ArrowDown" aria-label="Down">&#9660;</button>
+      </div>
+      <div class="middle-controls">
+        <div class="shoulders"><button class="shoulder-button" type="button" data-key="KeyQ">L</button><button class="shoulder-button" type="button" data-key="KeyE">R</button></div>
+        <div class="system-buttons"><button class="system-button" type="button" data-key="ShiftRight">SELECT</button><button class="system-button" type="button" data-key="Enter">START</button></div>
+      </div>
+      <div class="action-buttons controller-cluster" aria-label="Action buttons">
+        <button class="action-button" type="button" data-key="KeyZ">A</button>
+        <button class="action-button" type="button" data-key="KeyX">B</button>
+        <button class="action-button" type="button" data-key="KeyA">X</button>
+        <button class="action-button" type="button" data-key="KeyS">Y</button>
+        <button class="action-button" type="button" data-key="KeyC">C</button>
+        <button class="action-button" type="button" data-key="KeyV">D</button>
+      </div>
+    </div>
+    <div id="status">READING LIBRARY</div>
+  </main>
+  <script>
+    const PAGE_PASSWORD = "Spectrum1"; // Change this password whenever you want.
+    const SYSTEM_NAME = "Arcade MAME";
+    const SYSTEM_SHORT = "MAME";
+    const EJS_CORE_NAME = "mame2003_plus";
+    const EJS_CONTROL_SCHEME = "mame";
+    const BIOS_CANDIDATES = [];
+    const select = document.getElementById("games");
+    const search = document.getElementById("search");
+    const stage = document.getElementById("stage");
+    const status = document.getElementById("status");
+    const controllerToggle = document.getElementById("controller-toggle");
+    const touchController = document.getElementById("touch-controller");
+    const activeKeys = new Map();
+    let catalog = [];
+    let loaderAdded = false;
+
+    function requirePagePassword() {
+      const key = `${SYSTEM_SHORT.toLowerCase()}-auth:${location.pathname}`;
+      return new Promise(resolve => {
+        const gate = document.getElementById("password-gate");
+        const form = document.getElementById("password-form");
+        const input = document.getElementById("password-input");
+        const error = document.getElementById("password-error");
+        const stored = (() => { try { return sessionStorage.getItem(key); } catch (_) { return ""; } })();
+        const unlock = () => { try { sessionStorage.setItem(key, PAGE_PASSWORD); } catch (_) {} document.body.classList.remove("auth-locked"); gate.remove(); resolve(); };
+        if (!PAGE_PASSWORD || stored === PAGE_PASSWORD) return unlock();
+        form.addEventListener("submit", event => {
+          event.preventDefault();
+          if (input.value === PAGE_PASSWORD) unlock();
+          else { error.textContent = "Invalid password."; input.select(); }
+        });
+        setTimeout(() => input.focus(), 0);
+      });
+    }
+
+    function setStatus(message, error = false) { status.textContent = message; status.style.color = error ? "#ff8178" : ""; }
+    function renderOptions(filter = "") {
+      const value = select.value;
+      const needle = filter.trim().toLowerCase();
+      const matches = catalog.filter(game => !needle || (game.title + " " + game.region).toLowerCase().includes(needle));
+      select.replaceChildren(...matches.map(game => new Option(game.title + " - " + game.region, game.id)));
+      if (matches.some(game => game.id === value)) select.value = value;
+    }
+    async function exists(url) {
+      try { const response = await fetch(url, {method: "HEAD", cache: "no-store"}); return response.ok; }
+      catch (_) { return false; }
+    }
+    async function findBios() {
+      for (const name of BIOS_CANDIDATES) {
+        const url = "bios/" + encodeURIComponent(name);
+        if (await exists(url)) return url;
+      }
+      return "";
+    }
+    async function launch(game) {
+      document.title = game.title + " - " + SYSTEM_NAME;
+      setStatus("LOADING " + game.title.toUpperCase());
+      window.EJS_player = "#game";
+      window.EJS_core = EJS_CORE_NAME;
+      window.EJS_controlScheme = EJS_CONTROL_SCHEME;
+      window.EJS_pathtodata = "runtime/";
+      window.EJS_gameUrl = game.rom;
+      window.EJS_gameName = game.title;
+      window.EJS_gameID = game.id;
+      window.EJS_color = "#35a7ff";
+      window.EJS_volume = 0.75;
+      window.EJS_startOnLoaded = false;
+      window.EJS_threads = false;
+      window.EJS_disableAutoLang = false;
+      const bios = await findBios();
+      if (bios) window.EJS_biosUrl = bios;
+      if (!loaderAdded) {
+        loaderAdded = true;
+        const loader = document.createElement("script");
+        loader.src = "runtime/loader.js";
+        document.body.appendChild(loader);
+      }
+    }
+    async function initialize() {
+      const response = await fetch("catalog.json", {cache: "no-store"});
+      if (!response.ok) throw new Error("Catalog error " + response.status);
+      catalog = await response.json();
+      if (!catalog.length) {
+        select.innerHTML = "<option>No games found</option>";
+        select.disabled = true;
+        search.disabled = true;
+        stage.querySelector("#game").innerHTML = '<div class="empty"><strong>NO ' + SYSTEM_NAME.toUpperCase() + ' GAMES FOUND</strong>Place ROM files in <code>source</code>, then run the build script.</div>';
+        setStatus("NO GAMES FOUND", true);
+        return;
+      }
+      renderOptions();
+      const requested = new URLSearchParams(location.search).get("game");
+      const game = catalog.find(item => item.id === requested) || catalog[0];
+      select.value = game.id;
+      await launch(game);
+    }
+    function keyEvent(type, code) {
+      const event = new KeyboardEvent(type, {code, key: code.startsWith("Arrow") ? code.replace("Arrow", "") : code, bubbles: true, cancelable: true});
+      document.dispatchEvent(event);
+      window.dispatchEvent(event);
+      document.querySelector("canvas")?.dispatchEvent(event);
+    }
+    function releasePointer(pointerId) {
+      const button = activeKeys.get(pointerId);
+      if (!button) return;
+      activeKeys.delete(pointerId);
+      button.classList.remove("pressed");
+      keyEvent("keyup", button.dataset.key);
+    }
+    touchController.querySelectorAll("[data-key]").forEach(button => {
+      button.addEventListener("contextmenu", event => event.preventDefault());
+      button.addEventListener("pointerdown", event => { event.preventDefault(); button.setPointerCapture(event.pointerId); activeKeys.set(event.pointerId, button); button.classList.add("pressed"); keyEvent("keydown", button.dataset.key); });
+      ["pointerup", "pointercancel", "lostpointercapture"].forEach(type => button.addEventListener(type, event => releasePointer(event.pointerId)));
+    });
+    addEventListener("blur", () => [...activeKeys.keys()].forEach(releasePointer));
+    controllerToggle.addEventListener("click", () => { const visible = !document.body.classList.contains("controller-visible"); document.body.classList.toggle("controller-visible", visible); controllerToggle.setAttribute("aria-pressed", String(visible)); localStorage.setItem(`${SYSTEM_SHORT}-touch-controller`, visible ? "1" : "0"); });
+    if (localStorage.getItem(`${SYSTEM_SHORT}-touch-controller`) === "1") { document.body.classList.add("controller-visible"); controllerToggle.setAttribute("aria-pressed", "true"); }
+    document.getElementById("fullscreen").addEventListener("click", () => stage.requestFullscreen());
+    search.addEventListener("input", () => renderOptions(search.value));
+    select.addEventListener("change", () => { location.search = new URLSearchParams({game: select.value}).toString(); });
+    requirePagePassword().then(initialize).catch(error => { setStatus(error.message || String(error), true); stage.querySelector("#game").innerHTML = '<div class="empty"><strong>LIBRARY ERROR</strong>' + error.message + '</div>'; });
+  </script>
+</body>
+</html>

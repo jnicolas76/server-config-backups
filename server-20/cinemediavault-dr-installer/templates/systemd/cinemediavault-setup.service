@@ -1,0 +1,24 @@
+# First-run setup wizard.
+#
+# GENERATED FILE. Started by install.sh and stopped automatically once the
+# installation completes. It runs as root because it installs the system, and
+# is therefore bound to a private address, protected by a console-printed
+# bootstrap token, and never enabled at boot.
+
+[Unit]
+Description=CineMediaVault setup wizard
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory={{ package_root }}
+Environment=PYTHONUNBUFFERED=1
+Environment=CMV_PACKAGE_ROOT={{ package_root }}
+ExecStart=/usr/bin/python3 {{ package_root }}/wizard/server.py --host {{ bind_address }} --port {{ port }} --state {{ state_file }}
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+# Deliberately NOT WantedBy=multi-user.target: a privileged setup service must
+# never survive a reboot as an enabled unit.
+SyslogIdentifier=cinemediavault-setup

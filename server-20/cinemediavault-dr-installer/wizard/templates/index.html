@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CineMediaVault Setup</title>
+<link rel="stylesheet" href="/static/wizard.css">
+</head>
+<body>
+<div id="app">
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark">CMV</span>
+      <div>
+        <h1>CineMediaVault Setup</h1>
+        <p class="sub">Version {{VERSION}}</p>
+      </div>
+    </div>
+    <div id="topbar-actions"></div>
+  </header>
+
+  <div class="layout">
+    <nav id="steps" class="steps" aria-label="Setup steps"></nav>
+    <main id="stage" class="stage" aria-live="polite">
+      <div class="loading">Loading&hellip;</div>
+    </main>
+  </div>
+
+  <footer class="footer">
+    <p>This setup page is only reachable from your local network and stops
+       automatically when the installation finishes.</p>
+  </footer>
+</div>
+<script src="/static/wizard.js"></script>
+</body>
+</html>

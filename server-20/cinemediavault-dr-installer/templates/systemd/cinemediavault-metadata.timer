@@ -1,0 +1,13 @@
+[Unit]
+Description=CineMediaVault metadata fetch schedule
+
+[Timer]
+OnBootSec=30min
+OnCalendar=*-*-* 04:40:00
+AccuracySec=10min
+Persistent=true
+RandomizedDelaySec=900
+Unit=cinemediavault-metadata.service
+
+[Install]
+WantedBy=timers.target

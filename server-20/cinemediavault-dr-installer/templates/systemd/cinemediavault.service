@@ -1,0 +1,89 @@
+# CineMediaVault main application.
+#
+# GENERATED FILE - regenerate with `cinevaultctl apply`.
+
+[Unit]
+Description=CineMediaVault media server ({{ instance_name }})
+Documentation=file://{{ install_root }}/README.md
+After=network-online.target
+Wants=network-online.target
+{% if has_mount_units %}
+# Media shares are automounted; the service must not race them at boot.
+After=remote-fs.target
+Wants=remote-fs.target
+{% endif %}
+
+[Service]
+Type=simple
+User={{ service_user }}
+Group={{ service_group }}
+WorkingDirectory={{ app_dir }}
+
+EnvironmentFile={{ env_file }}
+EnvironmentFile=-{{ secrets_file }}
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+ExecStart=/usr/bin/python3 {{ app_dir }}/cinemediavault.py --host {{ listen_address }} --port {{ port }}
+
+# Restart on failure, but back off rather than loop: a service that cannot
+# start (bad certificate, missing mount) should be visible in `systemctl
+# status`, not hidden behind a restart storm.
+Restart=on-failure
+RestartSec=10
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+TimeoutStartSec=120
+TimeoutStopSec=45
+KillSignal=SIGTERM
+
+# --- Least privilege ------------------------------------------------------
+# The service reads its own code but can never write it, and it can only write
+# to the state, log and cache trees plus the media roots it was given.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices={{ private_devices }}
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+RemoveIPC=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+ReadWritePaths={{ state_root }} {{ log_root }} {{ cache_root }}
+{% if writable_media %}
+ReadWritePaths={{ writable_media }}
+{% endif %}
+{% if readable_media %}
+ReadOnlyPaths={{ readable_media }}
+{% endif %}
+
+# --- Resources -------------------------------------------------------------
+MemoryMax={{ memory_limit_mb }}M
+{% if cpu_quota %}
+CPUQuota={{ cpu_quota }}%
+{% endif %}
+TasksMax=512
+
+# --- Logging ---------------------------------------------------------------
+StandardOutput=append:{{ log_root }}/cinemediavault.log
+StandardError=append:{{ log_root }}/cinemediavault.err
+SyslogIdentifier=cinemediavault
+
+[Install]
+WantedBy=multi-user.target

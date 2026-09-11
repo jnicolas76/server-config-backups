@@ -1,0 +1,46 @@
+# Static module server (comics and the emulator libraries).
+#
+# GENERATED FILE - regenerate with `cinevaultctl apply`.
+#
+# One templated unit serves every static module. The instance name selects the
+# module directory and its port from the generated module environment file, so
+# adding a platform never means writing another unit by hand.
+
+[Unit]
+Description=CineMediaVault %i module
+After=network.target cinemediavault.service
+PartOf=cinemediavault.service
+
+[Service]
+Type=simple
+User={{ service_user }}
+Group={{ service_group }}
+EnvironmentFile={{ config_root }}/modules/%i.env
+WorkingDirectory={{ modules_dir }}/%i
+ExecStart=/usr/bin/python3 {{ scripts_dir }}/static_file_server.py --root ${MODULE_ROOT} --host ${MODULE_BIND} --port ${MODULE_PORT}
+
+Restart=on-failure
+RestartSec=15
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6
+CapabilityBoundingSet=
+MemoryMax=384M
+TasksMax=64
+SyslogIdentifier=cinemediavault-%i
+
+[Install]
+WantedBy=multi-user.target

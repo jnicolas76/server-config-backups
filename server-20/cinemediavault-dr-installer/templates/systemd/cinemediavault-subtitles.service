@@ -1,0 +1,58 @@
+# Whisper subtitle worker.
+#
+# GENERATED FILE - regenerate with `cinevaultctl apply`.
+#
+# Heavyweight and explicitly resource-limited. It is installed disabled unless
+# the operator asked for it to start, because the first pass over a full
+# catalogue runs for days.
+
+[Unit]
+Description=CineMediaVault subtitle worker (Whisper)
+After=network-online.target remote-fs.target cinemediavault.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ service_user }}
+Group={{ service_group }}
+EnvironmentFile={{ env_file }}
+EnvironmentFile=-{{ secrets_file }}
+Environment=WHISPER_MODEL={{ whisper_model }}
+Environment=WHISPER_DEVICE={{ whisper_device }}
+Environment=WHISPER_LANGUAGES={{ whisper_languages }}
+Environment=WHISPER_WORKERS={{ whisper_workers }}
+Environment=XDG_CACHE_HOME={{ cache_root }}/whisper
+WorkingDirectory={{ state_root }}/subtitles
+ExecStart={{ state_root }}/subtitles/venv/bin/python {{ scripts_dir }}/subtitle_worker.py
+
+Restart=on-failure
+RestartSec=60
+StartLimitBurst=3
+StartLimitIntervalSec=1800
+
+# The worker yields to interactive playback: it is background work, and a
+# transcription must never make a stream stutter.
+Nice=19
+IOSchedulingClass=idle
+CPUQuota={{ whisper_cpu_quota }}%
+MemoryMax={{ whisper_memory_mb }}M
+TasksMax=64
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+ReadWritePaths={{ state_root }} {{ log_root }} {{ cache_root }}
+{% if writable_media %}
+ReadWritePaths={{ writable_media }}
+{% endif %}
+SyslogIdentifier=cinemediavault-subtitles
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,48 @@
+# CineMediaVault - minimal unattended configuration.
+#
+#   cinevaultctl --config minimal.yaml validate
+#   sudo ./install.sh --dry-run --config minimal.yaml
+#   sudo ./install.sh --config minimal.yaml
+#
+# Everything not mentioned here falls back to a sensible default. See
+# docs/CONFIGURATION-REFERENCE.md for all 118 settings, or run
+# `cinevaultctl config example` for a fully commented file.
+
+meta:
+  instance_name: CineMediaVault
+
+deployment:
+  mode: standard
+  timezone: UTC
+  # Required before any component that downloads third-party software.
+  accept_licenses: true
+
+admin:
+  username: admin
+  full_name: CineMediaVault Administrator
+  # At least 12 characters, mixing three of: lower, upper, digits, symbols.
+  # Hashed on first read and blanked from this file by the installer.
+  password: "CHANGE-ME-to-a-real-passphrase-9"
+
+network:
+  hostname: cinemediavault.home.arpa
+  listen_address: 0.0.0.0
+  https_port: 5000
+  tls_mode: self_signed
+  trusted_networks:
+    - 192.168.0.0/16
+  configure_firewall: true
+
+media:
+  movies_root: /srv/cinemediavault/Movies
+  tv_root: /srv/cinemediavault/TV Shows
+  create_missing: false
+
+modules:
+  movies: true
+  tv: true
+
+# Add a TMDb key for posters and descriptions. It is moved to secrets.env
+# (mode 0640) and blanked here on the first write.
+metadata:
+  tmdb_api_key: ""

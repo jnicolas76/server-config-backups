@@ -1,0 +1,26 @@
+# Periodic library index refresh.
+#
+# GENERATED FILE - regenerate with `cinevaultctl apply`.
+
+[Unit]
+Description=CineMediaVault library refresh
+After=cinemediavault.service remote-fs.target
+
+[Service]
+Type=oneshot
+User={{ service_user }}
+Group={{ service_group }}
+EnvironmentFile={{ env_file }}
+EnvironmentFile=-{{ secrets_file }}
+ExecStart={{ scripts_dir }}/media-library-refresh.sh
+# A refresh walks the whole library; it must never overlap itself or run so
+# long that it collides with the next one.
+TimeoutStartSec=3600
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths={{ state_root }} {{ log_root }} {{ cache_root }}
+SyslogIdentifier=cinemediavault-refresh

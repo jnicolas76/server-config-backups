@@ -1,0 +1,12 @@
+[Unit]
+Description=CineMediaVault health check every minute
+After=cinemediavault.service
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Unit=cinemediavault-health.service
+
+[Install]
+WantedBy=timers.target

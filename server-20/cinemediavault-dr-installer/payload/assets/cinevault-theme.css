@@ -1,0 +1,31 @@
+/*
+ * CineVault account theme overrides.
+ *
+ * Every page defines its own default gold/amber palette inline (unchanged).
+ * This stylesheet only adds rules for the two alternate, account-selectable
+ * themes. Because `html[data-theme="..."]` (0,1,1) is more specific than the
+ * page's own `:root { ... }` (0,1,0), these rules win over the inline
+ * defaults whenever a non-default theme is active, regardless of load order.
+ *
+ * --gold / --accent / --accent2 are the CSS custom property names used
+ * across CineVault's pages for the primary interactive/brand accent
+ * (buttons, active tabs/nav, focus rings, progress/sliders, badges,
+ * outlines, checkboxes, links, selected cards). Semantic colors
+ * (--green status/live/completed, --red/--danger errors, --blue in the
+ * unauthenticated landing page) are intentionally left alone.
+ */
+
+html[data-theme="royal-blue"] {
+  --gold: #4d90fe;
+  --accent: #4d90fe;
+  --accent2: #4d90fe;
+}
+
+html[data-theme="green"] {
+  /* Deliberately a deeper/richer green than the fixed status/"live" green
+     (#2ee66b-ish) used elsewhere, so accent and health-state green never
+     read as the same color. */
+  --gold: #1f9d55;
+  --accent: #1f9d55;
+  --accent2: #1f9d55;
+}

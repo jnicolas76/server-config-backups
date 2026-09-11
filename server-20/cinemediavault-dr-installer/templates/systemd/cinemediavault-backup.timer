@@ -1,0 +1,11 @@
+[Unit]
+Description=CineMediaVault database backup schedule
+
+[Timer]
+OnCalendar=*-*-* {{ backup_time }}:00
+AccuracySec=5min
+Persistent=true
+Unit=cinemediavault-backup.service
+
+[Install]
+WantedBy=timers.target

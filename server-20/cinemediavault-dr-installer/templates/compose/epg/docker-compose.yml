@@ -1,0 +1,57 @@
+# CineMediaVault extended EPG collector.
+#
+# GENERATED FILE - regenerate with `cinevaultctl apply`.
+#
+# An isolated Compose project running the upstream iptv-org/epg grabber. It
+# shares no network, volume or name with any other Compose project on this host.
+# The guide it produces is advisory: CineMediaVault merges it only behind the
+# tuner's own horizon and only when overlapping programmes still agree.
+
+services:
+  cinevault-epg:
+    build:
+      context: ./build
+      dockerfile: Dockerfile
+    image: cinemediavault-epg:local
+    container_name: cinemediavault-epg
+    restart: unless-stopped
+    # Bound to a private address, never 0.0.0.0. The guide must not be
+    # reachable from outside the home network.
+    ports:
+      - "{{ bind_address }}:{{ port }}:3000"
+    environment:
+      TZ: "{{ timezone }}"
+      # The grabber holds every parsed programme in memory until the final
+      # write. Node sizes its heap from the container limit at startup; without
+      # an explicit ceiling a large collection dies part-way through with
+      # "JavaScript heap out of memory".
+      NODE_OPTIONS: "--max-old-space-size={{ node_heap_mb }}"
+      # The upstream source publishes a fixed number of days. Requesting more
+      # silently returns the same listings again, so this is a hard ceiling.
+      DAYS: "{{ days }}"
+      # Deliberately unhurried: one request at a time with a real pause between
+      # them. Faster settings get the collector blocked.
+      MAX_CONNECTIONS: "{{ max_connections }}"
+      DELAY: "{{ delay_ms }}"
+      TIMEOUT: "{{ timeout_ms }}"
+      CRON_SCHEDULE: "{{ cron_schedule }}"
+      RUN_AT_STARTUP: "true"
+    volumes:
+      - ./public:/epg/public
+    healthcheck:
+      # Healthy once a non-trivial guide is actually being served.
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:3000/guide.xml | head -c 200 | grep -q '<tv' || exit 1"]
+      interval: 5m
+      timeout: 30s
+      retries: 3
+      # The first collection legitimately takes most of an hour.
+      start_period: 90m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    mem_limit: {{ memory_limit_mb }}m
+    cpus: {{ cpu_limit }}
+    security_opt:
+      - no-new-privileges:true

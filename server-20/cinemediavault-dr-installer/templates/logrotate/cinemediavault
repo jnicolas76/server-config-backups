@@ -1,0 +1,17 @@
+# CineMediaVault log rotation.
+# GENERATED FILE - regenerate with `cinevaultctl apply`.
+
+{{ log_root }}/*.log {{ log_root }}/*.err {{ log_root }}/**/*.log {
+    daily
+    rotate {{ retain_days }}
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    su {{ service_user }} {{ service_group }}
+    create 0640 {{ service_user }} {{ service_group }}
+    # copytruncate is used rather than a restart hook: the application appends
+    # to its log file and a restart to release a handle would interrupt
+    # playback for every connected client.
+}
