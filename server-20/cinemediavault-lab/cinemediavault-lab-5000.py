@@ -2445,7 +2445,7 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
     .cast-list > li:not(.cast-person-card) { border:1px solid rgba(255,255,255,.16); background:rgba(255,255,255,.11); border-radius:14px; padding:10px 12px; }
     .cast-list a { color:inherit; text-decoration:none; }
     .cast-person-card a { display:flex; min-width:0; flex-direction:column; align-items:center; text-align:center; gap:9px; }
-    .cast-person-card img,.cast-portrait-placeholder { width:116px; height:116px; display:grid; place-items:center; border-radius:999px; object-fit:cover; object-position:center 22%; background:rgba(255,255,255,.10); border:2px solid rgba(255,255,255,.22); box-shadow:0 10px 24px rgba(0,0,0,.34); font-size:46px; }
+    .cast-person-card img,.cast-portrait-placeholder { width:116px; height:116px; display:grid; place-items:center; border-radius:999px; object-fit:contain; object-position:center; padding:5px; background:rgba(255,255,255,.10); border:2px solid rgba(255,255,255,.22); box-shadow:0 10px 24px rgba(0,0,0,.34); font-size:46px; }
     .cast-person-card a > span:last-child { display:block; width:100%; min-width:0; }
     .cast-person-card strong,.cast-person-card small { display:block; overflow:hidden; text-overflow:ellipsis; }
     .cast-person-card strong { color:#fff; font-size:14px; line-height:1.2; white-space:nowrap; }
