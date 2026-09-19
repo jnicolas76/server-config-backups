@@ -39,6 +39,8 @@ import epg_extend
 import cinevault_usage
 import genre_catalog
 import virtual_channels
+import weekly_guide
+import tmdb_people
 from cinevault_theme import THEME_ALLOWED, DEFAULT_THEME, normalize_theme, theme_for_row, inject_theme
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -75,6 +77,32 @@ SCAN_PROGRESS_FILE = Path(os.environ.get("SCAN_PROGRESS_FILE", "/home/jnicolas/c
 CINEVAULT_DB = Path(os.environ.get("CINEVAULT_DB", "/home/jnicolas/cinevault-data/cinevault.db")).resolve()
 CINEVAULT_BACKUP_DIR = Path(os.environ.get("CINEVAULT_BACKUP_DIR", str(CINEVAULT_DB.parent / "backups"))).resolve()
 CINEVAULT_BACKUP_KEEP = int(os.environ.get("CINEVAULT_BACKUP_KEEP", "10"))
+TIZEN_RELEASES_DIR = Path(os.environ.get("CINEVAULT_TIZEN_RELEASES_DIR", "/home/jnicolas/cinemediavault-lab/releases/tizen")).resolve()
+TIZEN_RELEASE_NAME_RE = re.compile(r"^CineMediaVault-TV-(\d+)\.(\d+)\.(\d+)\.wgt$")
+
+
+def tizen_releases() -> list[dict]:
+    """Every signed Tizen .wgt under TIZEN_RELEASES_DIR, newest first by
+    semantic version (parsed from the filename, not mtime - a re-uploaded
+    older build should never outrank a newer one just by touch time)."""
+    if not TIZEN_RELEASES_DIR.is_dir():
+        return []
+    found = []
+    for path in TIZEN_RELEASES_DIR.glob("CineMediaVault-TV-*.wgt"):
+        match = TIZEN_RELEASE_NAME_RE.match(path.name)
+        if not match:
+            continue
+        version_tuple = tuple(int(part) for part in match.groups())
+        sha_path = path.with_suffix(path.suffix + ".sha256")
+        sha256 = ""
+        if sha_path.is_file():
+            sha256 = sha_path.read_text(encoding="utf-8").strip().split()[0]
+        found.append({
+            "filename": path.name, "version": ".".join(match.groups()), "version_tuple": version_tuple,
+            "size": path.stat().st_size, "sha256": sha256,
+        })
+    found.sort(key=lambda r: r["version_tuple"], reverse=True)
+    return found
 CINEVAULT_SESSION_COOKIE = os.environ.get("CINEVAULT_SESSION_COOKIE", "cinevault_session")
 CINEVAULT_SESSION_DAYS = int(os.environ.get("CINEVAULT_SESSION_DAYS", "30"))
 PLAYBACK_MODE_FILE = Path(os.environ.get("CINEVAULT_PLAYBACK_MODE_FILE", str(CINEVAULT_DB.parent / "playback-mode.txt"))).resolve()
@@ -1044,6 +1072,10 @@ def reload_media_state() -> dict:
     migrate_legacy_movie_state_keys()
     migrate_legacy_tv_state_keys()
     rebuild_actor_index()
+    # Successful normal imports/scans invalidate the durable virtual-channel
+    # candidate revision immediately. The next scheduler tick rebuilds once
+    # from SQLite; ordinary five-minute ticks reuse the cached pools.
+    virtual_channels.invalidate_catalog_revision("media state reloaded after import/scan")
     return {
         "movies": len(movie_app.movie_index.items),
         "shows": len(tv_app.tv_index.shows),
@@ -1752,7 +1784,25 @@ HOME_PAGE = """<!doctype html>
     .top-actions { min-width:0; display:flex; align-items:center; gap:18px; color:#fff; }
     .home-search-panel { display:none; position:sticky; top:82px; z-index:4; padding:0 24px 14px; background:linear-gradient(180deg,rgba(5,5,6,.92),rgba(5,5,6,0)); }
     .home-search-panel.open { display:block; }
+    .home-search-panel form { display:flex; width:min(820px,100%); gap:8px; }
     .home-search-panel input { width:min(720px,100%); height:44px; border-radius:14px; border:1px solid rgba(88,166,255,.62); background:#20252d; color:#fff; padding:0 16px; font-size:17px; outline:none; box-shadow:0 0 0 3px rgba(47,157,255,.22); }
+    .home-search-submit { min-width:72px; min-height:44px; border-radius:14px; }
+    .home-search-results { display:none; width:min(1100px,100%); max-height:min(68vh,620px); overflow:auto; margin-top:10px; padding:12px; border:1px solid rgba(255,255,255,.16); border-radius:16px; background:rgba(8,10,14,.98); box-shadow:0 20px 55px rgba(0,0,0,.6); }
+    .home-search-results.open { display:block; }
+    .home-search-status { color:var(--muted); padding:8px; }
+    .home-result-group { margin:4px 0 18px; }
+    .home-result-group h3 { margin:5px 5px 9px; font-size:17px; }
+    .home-result-list { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:8px; }
+    .home-result { min-width:0; display:grid; grid-template-columns:48px 1fr; gap:10px; align-items:center; padding:8px; border-radius:10px; color:#fff; text-decoration:none; background:rgba(255,255,255,.07); }
+    .home-result img,.home-result-art { width:48px; height:68px; object-fit:cover; border-radius:6px; background:#18202b; }
+    .home-result > span { min-width:0; }
+    /* Long titles ("Terminator 2: Judgment Day") wrap onto up to 2 lines
+       instead of being clipped on one; only the (usually short) subtitle
+       still truncates with an ellipsis, and gets the accessible title=
+       attribute below so the full text is still available. */
+    .home-result strong { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; overflow-wrap:anywhere; }
+    .home-result small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .home-result small { color:var(--muted); margin-top:4px; }
     .icon { width:36px; height:36px; display:grid; place-items:center; border-radius:999px; color:#fff; text-decoration:none; font-size:22px; background:transparent; border:0; cursor:pointer; }
     .playback-toggle { min-height:34px; min-width:72px; display:inline-flex; align-items:center; justify-content:center; padding:0 12px; border-radius:999px; border:1px solid rgba(255,255,255,.18); background:rgba(255,255,255,.08); color:#fff; font-size:12px; font-weight:900; cursor:pointer; }
     .playback-toggle.hls { color:#06111c; background:var(--gold); border-color:var(--gold); }
@@ -1912,9 +1962,9 @@ HOME_PAGE = """<!doctype html>
     <div class="top-actions"><button class="scan-button" id="scanButton">Scan</button><button class="playback-toggle {{GLOBAL_PLAYBACK_MODE_CLASS}}" id="playbackModeButton" type="button" data-mode="{{GLOBAL_PLAYBACK_MODE}}" title="Default playback mode">{{GLOBAL_PLAYBACK_MODE_LABEL}}</button><button class="home-search-button" id="homeSearchToggle" type="button" aria-label="Search" title="Search"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.8 18.2a7.4 7.4 0 1 1 0-14.8 7.4 7.4 0 0 1 0 14.8Zm5.3-2.1 4.5 4.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg><span>Search</span></button><button class="icon cast-button" id="castButton" type="button" aria-label="Cast" title="Cast"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M5 10V7.5C5 6.1 6.1 5 7.5 5h17C25.9 5 27 6.1 27 7.5v17c0 1.4-1.1 2.5-2.5 2.5H22" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="M5 21c3.3 0 6 2.7 6 6M5 15c6.6 0 12 5.4 12 12M5 27h.1" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round"/></svg></button><div class="avatar">J</div></div>
   </header>
   <div class="scan-progress" id="scanProgress"><div class="scan-progress-row"><span id="scanProgressMessage">Preparing scan</span><strong id="scanProgressPercent">0%</strong></div><div class="scan-progress-track"><div class="scan-progress-fill" id="scanProgressFill"></div></div></div>
-  <div class="home-search-panel" id="homeSearchPanel"><input id="homeSearch" type="search" placeholder="Search movies, shows, actors, or genres"></div>
+  <div class="home-search-panel" id="homeSearchPanel"><form id="homeSearchForm" action="/search" method="get"><input id="homeSearch" name="q" type="search" placeholder="Search movies, shows, live TV, or virtual channels" autocomplete="off" required><button class="home-search-submit" type="submit">Go</button></form><div class="home-search-results" id="homeSearchResults" aria-live="polite"></div></div>
   <main>
-    <nav class="tabs"><a class="tab active" href="/">Home</a><a class="tab" href="/movies">Movies</a><a class="tab" href="/tv">TV Shows</a><a class="tab" href="/music">Music</a><a class="tab" href="/video-lists">My Lists</a><a class="tab" href="/live-tv">Live TV</a><a class="tab" href="/vchannels">Virtual Channels</a><a class="tab" href="/wall">Video Wall</a>{{MODULE_TABS}}</nav>
+    <nav class="tabs"><a class="tab active" href="/">Home</a><a class="tab" href="/movies">Movies</a><a class="tab" href="/tv">TV Shows</a><a class="tab" href="/music">Music</a><a class="tab" href="/video-lists">My Lists</a><a class="tab" href="/live-tv">Live TV</a><a class="tab" href="/vchannels">Virtual Channels</a><a class="tab" href="/weekly-guide" target="_blank">Weekly Guide</a><a class="tab" href="/wall">Video Wall</a>{{MODULE_TABS}}</nav>
     <section class="section" id="continueSection">
       <div class="section-head"><div><h2>Continue Watching</h2></div></div>
       <div class="rail" id="continueRail"></div>
@@ -1943,6 +1993,8 @@ HOME_PAGE = """<!doctype html>
     const homeSearchToggle = document.getElementById("homeSearchToggle");
     const homeSearchPanel = document.getElementById("homeSearchPanel");
     const homeSearch = document.getElementById("homeSearch");
+    const homeSearchForm = document.getElementById("homeSearchForm");
+    const homeSearchResults = document.getElementById("homeSearchResults");
     const continueSection = document.getElementById("continueSection");
     const scanButton = document.getElementById("scanButton");
     const playbackModeButton = document.getElementById("playbackModeButton");
@@ -1990,10 +2042,29 @@ HOME_PAGE = """<!doctype html>
         if (homeSearchPanel.classList.contains("open")) homeSearch.focus();
       });
       homeSearch.addEventListener("keydown", event => {
-        if (event.key === "Enter" && homeSearch.value.trim()) {
-          location.href = `/search?q=${encodeURIComponent(homeSearch.value.trim())}`;
-        }
         if (event.key === "Escape") homeSearchPanel.classList.remove("open");
+      });
+      if (homeSearchForm) homeSearchForm.addEventListener("submit", event => {
+        if (!homeSearch.value.trim()) event.preventDefault();
+      });
+      let searchTimer = null, searchRequest = null;
+      const renderLiveSearch = payload => {
+        const labels = {movies:"Movies",tv:"TV Shows",live:"Live TV",virtual:"Virtual Channels",people:"People"};
+        const groups = Object.keys(labels).map(key => {
+          const items = Array.isArray(payload[key]) ? payload[key] : [];
+          if (!items.length) return "";
+          const rows = items.map(item => `<a class="home-result" href="${esc(item.href||'#')}" aria-label="${esc(item.title||'Untitled')}${item.subtitle?' - '+esc(item.subtitle):''}">${item.poster?`<img src="${esc(item.poster)}" alt="">`:'<span class="home-result-art"></span>'}<span><strong title="${esc(item.title||'Untitled')}">${esc(item.title||'Untitled')}</strong><small title="${esc(item.subtitle||item.kind||'')}">${esc(item.subtitle||item.kind||'')}</small></span></a>`).join('');
+          return `<section class="home-result-group"><h3>${labels[key]}</h3><div class="home-result-list">${rows}</div></section>`;
+        }).join('');
+        homeSearchResults.innerHTML = groups || '<div class="home-search-status">No matching results.</div>';
+        homeSearchResults.classList.add('open');
+      };
+      homeSearch.addEventListener("input", () => {
+        clearTimeout(searchTimer); if (searchRequest) searchRequest.abort();
+        const query = homeSearch.value.trim();
+        if (query.length < 2) { homeSearchResults.classList.remove('open'); homeSearchResults.innerHTML=''; return; }
+        homeSearchResults.innerHTML='<div class="home-search-status">Searching…</div>'; homeSearchResults.classList.add('open');
+        searchTimer=setTimeout(async()=>{searchRequest=new AbortController();try{const response=await fetch('/api/search?q='+encodeURIComponent(query),{cache:'no-store',signal:searchRequest.signal});if(!response.ok)throw new Error('search failed');renderLiveSearch(await response.json())}catch(error){if(error.name!=='AbortError')homeSearchResults.innerHTML='<div class="home-search-status">Search temporarily unavailable.</div>'}},250);
       });
     }
     const castButton = document.getElementById("castButton");
@@ -2353,9 +2424,9 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
     .action.download span { font-size:27px; }
     .action.watched { color:#fff; }
     .action.watched span { background:rgba(245,183,63,.28); border-color:rgba(245,183,63,.56); }
-    .more-sheet { position:fixed; inset:0; z-index:40; display:none; align-items:end; justify-content:center; padding-top:80px; background:rgba(0,0,0,.66); backdrop-filter:blur(4px); }
+    .more-sheet { position:fixed; inset:0; z-index:40; display:none; align-items:center; justify-content:center; padding:24px; background:rgba(0,0,0,.66); backdrop-filter:blur(4px); }
     .more-sheet.open { display:flex; }
-    .more-card { width:min(560px,100%); max-height:calc(100svh - 80px); overflow:auto; padding:18px 18px calc(24px + env(safe-area-inset-bottom)); border-radius:24px 24px 0 0; background:#101114; border:1px solid rgba(255,255,255,.13); box-shadow:0 -24px 70px rgba(0,0,0,.60); }
+    .more-card { width:min(640px,100%); max-height:calc(100dvh - 48px); overflow:auto; overscroll-behavior:contain; padding:18px 18px calc(24px + env(safe-area-inset-bottom)); border-radius:24px; background:#101114; border:1px solid rgba(255,255,255,.13); box-shadow:0 24px 70px rgba(0,0,0,.60); }
     .more-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
     .more-head h2 { margin:0; font-size:22px; }
     .more-close { width:40px; height:40px; border:0; border-radius:999px; background:rgba(255,255,255,.10); color:#fff; font-size:28px; cursor:pointer; }
@@ -2366,11 +2437,19 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
     .more-menu strong { display:block; font-size:16px; }
     .more-menu small { display:block; margin-top:2px; color:#adb5c2; font-size:12px; }
     .summary { max-width:760px; font-size:18px; line-height:1.46; margin:0 auto 22px; text-align:left; color:#f1f5fb; text-shadow:0 2px 14px rgba(0,0,0,.42); }
-    .cast-panel { display:none; max-width:760px; width:100%; margin:0 auto 22px; text-align:left; }
+    .cast-panel { display:block; max-width:760px; width:100%; margin:0 auto 22px; text-align:left; }
     .cast-panel.open { display:block; }
     .cast-panel h2 { margin:0 0 12px; font-size:22px; }
-    .cast-list { display:flex; flex-wrap:wrap; gap:9px; padding:0; margin:0; list-style:none; }
-    .cast-list li { border:1px solid rgba(255,255,255,.16); background:rgba(255,255,255,.11); border-radius:999px; padding:8px 11px; color:#eef5ff; font-size:14px; }
+    .cast-list { display:grid; grid-auto-flow:column; grid-auto-columns:minmax(132px,156px); gap:15px; padding:4px 2px 12px; margin:0; list-style:none; overflow-x:auto; overscroll-behavior-inline:contain; scrollbar-width:thin; }
+    .cast-list li { min-width:0; color:#eef5ff; font-size:14px; }
+    .cast-list > li:not(.cast-person-card) { border:1px solid rgba(255,255,255,.16); background:rgba(255,255,255,.11); border-radius:14px; padding:10px 12px; }
+    .cast-list a { color:inherit; text-decoration:none; }
+    .cast-person-card a { display:flex; min-width:0; flex-direction:column; align-items:center; text-align:center; gap:9px; }
+    .cast-person-card img,.cast-portrait-placeholder { width:116px; height:116px; display:grid; place-items:center; border-radius:999px; object-fit:cover; object-position:center 22%; background:rgba(255,255,255,.10); border:2px solid rgba(255,255,255,.22); box-shadow:0 10px 24px rgba(0,0,0,.34); font-size:46px; }
+    .cast-person-card a > span:last-child { display:block; width:100%; min-width:0; }
+    .cast-person-card strong,.cast-person-card small { display:block; overflow:hidden; text-overflow:ellipsis; }
+    .cast-person-card strong { color:#fff; font-size:14px; line-height:1.2; white-space:nowrap; }
+    .cast-person-card small { margin-top:4px; color:rgba(238,245,255,.70); font-size:12px; line-height:1.18; min-height:28px; white-space:normal; }
     .file-grid { display:grid; grid-template-columns:120px minmax(0,1fr); gap:12px 22px; max-width:520px; width:100%; margin:0 auto; text-align:left; font-size:17px; }
     .label { color:rgba(236,243,255,.72); }
     .player-shell { display:none; min-height:100vh; min-height:100dvh; grid-template-rows:auto 1fr; }
@@ -2381,7 +2460,7 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
     .player-shell.fullscreen-mode .player-head:focus-within { opacity:1; }
     .player-shell.fullscreen-mode .video-wrap { min-height:100vh; min-height:100dvh; }
     .player-shell.fullscreen-mode video { width:100vw; height:100vh; height:100dvh; max-width:none; max-height:none; border-radius:0; object-fit:contain; }
-    .guide-drawer{display:none;position:fixed;inset:0;z-index:30;background:#05070b}.guide-drawer.open{display:block}.guide-drawer iframe{width:100%;height:100%;border:0;background:#05070b}.guide-drawer-close{position:fixed;right:18px;top:18px;z-index:33;border-radius:999px;padding:12px 18px;background:#111a27;color:#fff;border:2px solid var(--gold);font-weight:850}
+    .guide-drawer{display:none;position:fixed;inset:0;z-index:30;background:#05070b}.guide-drawer.open{display:block}.guide-drawer iframe{width:100%;height:100%;border:0;background:#05070b}
     .player-shell.guide-open .video-wrap{position:fixed;left:18px;top:18px;width:min(38vw,560px);height:auto;aspect-ratio:16/9;min-height:0!important;z-index:32;border:3px solid var(--gold);border-radius:12px;overflow:hidden;box-shadow:0 15px 45px #000;background:#000;cursor:pointer}.player-shell.guide-open .video-wrap video{width:100%;height:100%;max-width:none;max-height:none;object-fit:contain}.player-shell.guide-open .player-overlay,.player-shell.guide-open .up-next{display:none!important}
     .player-head { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:16px; padding:10px 0; }
     .player-title { min-width:0; }
@@ -2420,6 +2499,8 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
     .up-next-actions .play-next { background:#fff; color:#111; border-color:#fff; }
     .up-next-actions .cancel-next { min-width:104px; background:rgba(255,255,255,.10); }
     @media (max-width:640px) {
+      .more-sheet { align-items:end; padding:60px 0 0; }
+      .more-card { max-height:calc(100dvh - 60px); border-radius:24px 24px 0 0; }
       .watch-page { padding:18px 24px 30px; }
       .topbar { margin-bottom:10px; }
       .hero { min-height:calc(100svh - 96px); justify-content:end; padding-bottom:10px; }
@@ -2498,12 +2579,13 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
           </div>
         </div>
       </div>
-      <div class="guide-drawer" id="guideDrawer"><button type="button" class="guide-drawer-close" id="closeGuideDrawer">Return to Player</button><iframe id="guideFrame" title="CineVault Guide" data-src="{{GUIDE_URL}}"></iframe></div>
+      <div class="guide-drawer" id="guideDrawer"><iframe id="guideFrame" title="CineVault Guide" data-src="{{GUIDE_URL}}?embedded=1"></iframe></div>
     </section>
   </main>
   <script src="/assets/hls.min.js"></script>
   <script>
     const item = {{ITEM_JSON}};
+    const guideProgram = {{GUIDE_INFO_JSON}};
     const previousItem = {{PREV_JSON}};
     const nextItem = {{NEXT_JSON}};
     const playbackParams = new URLSearchParams(location.search);
@@ -2511,6 +2593,11 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
     const playlistPlayback = Number(playbackParams.get("playlist") || 0);
     const playlistPosition = Number(playbackParams.get("position") || 0);
     const video = document.getElementById("player");
+    let cinevaultPlayerId = localStorage.getItem("cinevaultPlayerId") || "";
+    if (!/^[A-Za-z0-9._:-]{12,80}$/.test(cinevaultPlayerId)) {
+      cinevaultPlayerId = "web-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 14);
+      localStorage.setItem("cinevaultPlayerId", cinevaultPlayerId);
+    }
     const captionSelect = document.getElementById("captionSelect");
     const captionSources = Array.from(video.querySelectorAll("track")).map(element => ({
       src: element.getAttribute("src"),
@@ -2575,10 +2662,14 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
     const playerShell = document.getElementById("playerShell");
     const guideDrawer = document.getElementById("guideDrawer");
     const guideFrame = document.getElementById("guideFrame");
-    function openGuideWhilePlaying(){if(!guideDrawer)return;if(!guideFrame.src)guideFrame.src=guideFrame.dataset.src;guideDrawer.classList.add("open");playerShell.classList.add("guide-open")}
-    function closeGuideWhilePlaying(){if(guideDrawer)guideDrawer.classList.remove("open");playerShell.classList.remove("guide-open")}
+    function preloadGuide(){if(guideFrame&&!guideFrame.src)guideFrame.src=guideFrame.dataset.src}
+    let guidePlacementTimer = null;
+    function syncGuidePlayer(){if(!playerShell.classList.contains("guide-open"))return;try{const win=guideFrame.contentWindow,rect=win?.cinevaultBarkerRect?.();if(!rect)return;const wrap=document.querySelector(".video-wrap");Object.assign(wrap.style,{left:rect.left+"px",top:rect.top+"px",width:rect.width+"px",height:rect.height+"px"});win.cinevaultSetActiveProgram?.(guideProgram,closeGuideWhilePlaying)}catch(_){}}
+    function bindGuideFrame(){try{const doc=guideFrame.contentDocument;if(!doc)return;doc.addEventListener("scroll",syncGuidePlayer,true);doc.defaultView.addEventListener("resize",syncGuidePlayer);doc.defaultView.cinevaultActivateEmbedded?.();doc.defaultView.cinevaultSetReturnAction?.(closeGuideWhilePlaying);doc.defaultView.cinevaultSetActiveProgram?.(guideProgram,closeGuideWhilePlaying);doc.defaultView.scrollTo(0,0)}catch(_){}syncGuidePlayer()}
+    function openGuideWhilePlaying(){if(!guideDrawer)return;preloadGuide();guideDrawer.classList.add("open");playerShell.classList.add("guide-open");bindGuideFrame();clearInterval(guidePlacementTimer);guidePlacementTimer=setInterval(syncGuidePlayer,250)}
+    function closeGuideWhilePlaying(){clearInterval(guidePlacementTimer);guidePlacementTimer=null;try{guideFrame.contentWindow?.cinevaultDeactivateEmbedded?.();guideFrame.contentWindow?.cinevaultSetReturnAction?.(null)}catch(_){}if(guideDrawer)guideDrawer.classList.remove("open");playerShell.classList.remove("guide-open");const wrap=document.querySelector(".video-wrap");["left","top","width","height"].forEach(key=>wrap.style[key]="")}
+    guideFrame?.addEventListener("load",()=>{if(playerShell.classList.contains("guide-open"))bindGuideFrame()});
     document.getElementById("guideWhilePlaying")?.addEventListener("click",openGuideWhilePlaying);
-    document.getElementById("closeGuideDrawer")?.addEventListener("click",closeGuideWhilePlaying);
     document.querySelector(".video-wrap")?.addEventListener("click",()=>{if(playerShell.classList.contains("guide-open"))closeGuideWhilePlaying()});
     window.addEventListener("message", event => {
       if (event.origin !== location.origin || !event.data || event.data.type !== "cinevault-guide-navigate") return;
@@ -2593,7 +2684,29 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
     });
     const resumeButton = document.getElementById("resumeButton");
     const key = "cinevaultContinue";
-    const mediaSource = video.dataset.source;
+    const mediaSourceUrl = new URL(video.dataset.source, location.origin);
+    mediaSourceUrl.searchParams.set("player_id", cinevaultPlayerId);
+    const mediaSource = mediaSourceUrl.pathname + mediaSourceUrl.search;
+    let playbackHeartbeatTimer = null;
+    function playbackLifecycle(action) {
+      const payload = JSON.stringify({player_id:cinevaultPlayerId, media_type:item.kind||"video", media_id:item.media_id||item.id||"", title:item.title||"", subtitle:item.subtitle||"", delivery:mediaSourceUrl.pathname.endsWith(".m3u8")?"hls":"direct", position:Number(video.currentTime||0)});
+      if (action === "stop" && navigator.sendBeacon) {
+        navigator.sendBeacon("/api/playback/stop", new Blob([payload], {type:"application/json"}));
+        return;
+      }
+      fetch("/api/playback/"+action,{method:"POST",headers:{"Content-Type":"application/json"},body:payload,keepalive:action==="stop"}).catch(()=>{});
+    }
+    function startPlaybackHeartbeat() {
+      clearInterval(playbackHeartbeatTimer);
+      playbackLifecycle("heartbeat");
+      playbackHeartbeatTimer=setInterval(()=>{if(!video.paused)playbackLifecycle("heartbeat")},10000);
+    }
+    function stopPlaybackHeartbeat() {
+      clearInterval(playbackHeartbeatTimer); playbackHeartbeatTimer=null; playbackLifecycle("stop");
+    }
+    video.addEventListener("play", startPlaybackHeartbeat);
+    video.addEventListener("ended", stopPlaybackHeartbeat);
+    window.addEventListener("pagehide", stopPlaybackHeartbeat);
     const downloadSizePanel = document.getElementById("downloadSizePanel");
     const downloadSizeSlider = document.getElementById("downloadSizeSlider");
     const downloadSizeValue = document.getElementById("downloadSizeValue");
@@ -2870,7 +2983,7 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
     function attachMediaSource(fromBeginning=false) {
       if (mediaAttached) return;
       mediaAttached = true;
-      if (mediaSource.endsWith(".m3u8") && window.Hls && Hls.isSupported()) {
+      if (mediaSourceUrl.pathname.endsWith(".m3u8") && window.Hls && Hls.isSupported()) {
         hlsController = new Hls({
           lowLatencyMode: false,
           startPosition: 0,
@@ -2892,7 +3005,7 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
       }
     }
     function startPlayback(fromBeginning=false, askFullscreen=true) {
-      if (selectedPlaybackMode === "hls" && !mediaSource.endsWith(".m3u8")) {
+      if (selectedPlaybackMode === "hls" && !mediaSourceUrl.pathname.endsWith(".m3u8")) {
         const url = new URL(location.href);
         url.searchParams.set("mode", "hls");
         url.searchParams.set("play", "1");
@@ -2913,6 +3026,7 @@ DIRECT_PLAYER_PAGE = """<!doctype html>
         hero.style.display = "none";
         playerShell.classList.add("open");
         playerShell.classList.add("fullscreen-mode");
+        preloadGuide();
         const saved = fromBeginning ? null : savedItem();
         if (!fromBeginning && hasRealResume(saved)) {
           seekTo(Math.max(0, saved.position - 8));
@@ -3752,51 +3866,183 @@ def actor_media_results(name: str) -> list[dict]:
     finally: conn.close()
 
 
-def unified_search_results(query: str, limit: int = 100, watched_keys: set[str] | None = None) -> list[dict]:
-    terms = [term.lower() for term in re.findall(r"\w+", query or "")]
-    if not terms:
-        return []
-    results: list[dict] = actor_search_results(query)
+_search_index_lock = threading.Lock()
+_search_index_cache: dict = {"key": None, "movies": [], "shows": []}
+
+
+def _search_index_key() -> tuple:
+    # Throttled/staleness-checked reloads already exist on each module; calling
+    # them once per request (instead of once per catalog item) keeps metadata
+    # freshness identical while cutting the filesystem stat() calls way down.
+    movie_app.ensure_maps_current()
+    tv_app.refresh_metadata_map_if_changed()
+    return (
+        id(movie_app.movie_index.items),
+        id(tv_app.tv_index.shows),
+        id(movie_app.metadata_map),
+        id(tv_app.metadata_map),
+    )
+
+
+def _build_search_index() -> tuple[list[dict], list[dict]]:
+    movies = []
     for item in movie_app.movie_index.items:
         metadata = movie_app.metadata_for(item)
         title = metadata.get("title") or item.title
-        year = metadata.get("year") or ""
-        blob = text_blob(title, item.title, item.rel_path, metadata_search_blob(metadata))
-        if all(term in blob for term in terms):
-            results.append({
-                "kind": "Movie",
-                "key": movie_media_key(item),
-                "title": title,
-                "subtitle": str(year) if year else movie_app.human_size(item.size),
-                "poster": movie_app.poster_url_for(item),
-                "href": f"/movie/{item.id}",
-            })
+        movies.append({
+            "item": item,
+            "title": title,
+            "year": metadata.get("year") or "",
+            "blob": text_blob(title, item.title, item.rel_path, metadata_search_blob(metadata)),
+        })
+    shows = []
     for show in tv_app.tv_index.shows:
         metadata = tv_app.metadata_for(show)
         title = metadata.get("title") or show.title
-        latest = latest_episode_for_show(show)
-        subtitle = latest_episode_label(latest) if latest else f"{show.count} episodes"
-        blob = text_blob(title, show.title, getattr(show, "rel_path", ""), getattr(show, "root", ""), metadata_search_blob(metadata))
-        episode_hit = False
+        episode_blobs = []
         for season in show.seasons.values():
             for episode in season.episodes:
                 episode_meta = tv_episode_display_metadata(metadata, episode)
-                episode_blob = text_blob(episode.title, episode.rel_path, episode_meta.get("title"), episode_meta.get("summary"), episode_meta.get("air_date"))
-                if all(term in episode_blob for term in terms):
-                    episode_hit = True
-                    break
-            if episode_hit:
-                break
-        if all(term in blob for term in terms) or episode_hit:
-            results.append({
-                "kind": "TV Show",
-                "key": f"show:{show.id}",
-                "title": title,
-                "subtitle": subtitle,
-                "poster": tv_app.poster_url_for(show),
-                "href": f"/tv/show/{show.id}",
-                "watched": show_watched(show, watched_keys),
-            })
+                episode_blobs.append(text_blob(
+                    episode.title, episode.rel_path,
+                    episode_meta.get("title"), episode_meta.get("summary"), episode_meta.get("air_date"),
+                ))
+        shows.append({
+            "show": show,
+            "title": title,
+            "blob": text_blob(title, show.title, getattr(show, "rel_path", ""), getattr(show, "root", ""), metadata_search_blob(metadata)),
+            "episode_blobs": episode_blobs,
+        })
+    return movies, shows
+
+
+def get_search_index() -> tuple[list[dict], list[dict]]:
+    key = _search_index_key()
+    if _search_index_cache["key"] == key:
+        return _search_index_cache["movies"], _search_index_cache["shows"]
+    with _search_index_lock:
+        if _search_index_cache["key"] != key:
+            movies, shows = _build_search_index()
+            _search_index_cache["movies"] = movies
+            _search_index_cache["shows"] = shows
+            _search_index_cache["key"] = key
+        return _search_index_cache["movies"], _search_index_cache["shows"]
+
+
+_search_guide_cache_lock = threading.Lock()
+_search_guide_cache: dict = {}
+_SEARCH_GUIDE_CACHE_TTL = 4.0
+
+
+def _search_scoped_guide(cache_key: str, builder):
+    # Short-TTL cache for the read-only guide snapshots unified_search_results
+    # uses for text matching only (Live TV / Virtual Channel buckets). Search
+    # is typed character-by-character (250ms debounce), so without this every
+    # keystroke re-ran the same 24h guide query/programme scan from scratch.
+    # A few seconds of staleness is invisible in search result text and this
+    # cache is only ever read here - the live-tv and vchannels pages call
+    # guide_payload()/virtual_channels.guide_payload() directly and are
+    # completely unaffected.
+    now = time.monotonic()
+    cached = _search_guide_cache.get(cache_key)
+    if cached is not None and now - cached[0] < _SEARCH_GUIDE_CACHE_TTL:
+        return cached[1]
+    with _search_guide_cache_lock:
+        cached = _search_guide_cache.get(cache_key)
+        if cached is not None and now - cached[0] < _SEARCH_GUIDE_CACHE_TTL:
+            return cached[1]
+        data = builder()
+        _search_guide_cache[cache_key] = (now, data)
+        return data
+
+
+def unified_search_results(query: str, limit: int = 100, watched_keys: set[str] | None = None,
+                           category: str = "all") -> list[dict]:
+    terms = [term.lower() for term in re.findall(r"\w+", query or "")]
+    if not terms:
+        return []
+    category = category if category in {"all", "movies", "tv", "live", "virtual", "people"} else "all"
+    results: list[dict] = actor_search_results(query) if category in {"all", "people"} else []
+    ranked: list[tuple[int, dict]] = []
+    query_norm = " ".join(terms)
+    def relevance(title, blob):
+        name = re.sub(r"[^a-z0-9]+", " ", str(title or "").casefold()).strip()
+        if name == query_norm: return 0
+        if name.startswith(query_norm): return 1
+        if query_norm in name: return 2
+        return 4
+    cached_movies, cached_shows = get_search_index() if category in {"all", "movies", "tv"} else ([], [])
+    if category in {"all", "movies"}:
+        for entry in cached_movies:
+            item = entry["item"]; title = entry["title"]; blob = entry["blob"]
+            if all(term in blob for term in terms):
+                ranked.append((relevance(title, blob), {
+                    "kind": "Movie",
+                    "key": movie_media_key(item),
+                    "title": title,
+                    "subtitle": str(entry["year"]) if entry["year"] else movie_app.human_size(item.size),
+                    "poster": movie_app.poster_url_for(item),
+                    "href": f"/movie/{item.id}",
+                }))
+    if category in {"all", "tv"}:
+        for entry in cached_shows:
+            show = entry["show"]; title = entry["title"]; blob = entry["blob"]
+            episode_hit = any(all(term in episode_blob for term in terms) for episode_blob in entry["episode_blobs"])
+            if all(term in blob for term in terms) or episode_hit:
+                latest = latest_episode_for_show(show)
+                subtitle = latest_episode_label(latest) if latest else f"{show.count} episodes"
+                ranked.append((relevance(title, blob), {
+                    "kind": "TV Show",
+                    "key": f"show:{show.id}",
+                    "title": title,
+                    "subtitle": subtitle,
+                    "poster": tv_app.poster_url_for(show),
+                    "href": f"/tv/show/{show.id}",
+                    "watched": show_watched(show, watched_keys),
+                }))
+    if category in {"all", "live"}:
+        try:
+            payload = _search_scoped_guide("live", lambda: dvr_module.guide_payload({"hours": [24]}))
+            for channel in payload.get("channels") or []:
+                for programme in channel.get("programmes") or []:
+                    title = programme.get("title") or channel.get("guide_name") or "Live TV"
+                    blob = text_blob(channel.get("guide_number"), channel.get("guide_name"), title,
+                                     programme.get("subtitle"), programme.get("description"), programme.get("category"))
+                    if all(term in blob for term in terms):
+                        ranked.append((relevance(title, blob), {"kind":"Live TV", "title":title,
+                            "subtitle":f"{channel.get('guide_number','')} {channel.get('guide_name','')}",
+                            "poster":channel.get("logo") or "", "href":"/live-tv"}))
+        except Exception:
+            pass
+    if category in {"all", "virtual"}:
+        try:
+            now = int(time.time())
+            for guide_kind in ("movie", "tv"):
+                payload = _search_scoped_guide(
+                    f"virtual:{guide_kind}",
+                    lambda guide_kind=guide_kind: virtual_channels.guide_payload(
+                        guide_kind, {"from": [now], "hours": [24]}, movie_app, tv_app, resolve_details=False
+                    ),
+                )
+                for channel in payload.get("channels") or []:
+                    for programme in channel.get("programmes") or []:
+                        if programme.get("holding"): continue
+                        title = programme.get("title") or "Virtual Channel"
+                        blob = text_blob(channel.get("number"), channel.get("name"), title,
+                                         programme.get("subtitle"), programme.get("overview"))
+                        if all(term in blob for term in terms):
+                            ranked.append((relevance(title, blob), {"kind":"Virtual Channel", "title":title,
+                                "subtitle":f"{channel.get('number','')} {channel.get('name','')}",
+                                "poster":programme.get("poster") or channel.get("art") or "",
+                                "href":programme.get("detail_href") or f"/vchannels/{'movies' if guide_kind == 'movie' else 'tv'}"}))
+        except Exception:
+            pass
+    ranked.sort(key=lambda row: (row[0], str(row[1].get("title") or "").casefold(), str(row[1].get("subtitle") or "")))
+    seen = set()
+    for _score, item in ranked:
+        key = (item.get("kind"), item.get("title"), item.get("subtitle"))
+        if key in seen: continue
+        seen.add(key); results.append(item)
     return results[:limit]
 
 
@@ -3804,10 +4050,11 @@ def search_result_card(item: dict, watched_keys: set[str] | None = None) -> str:
     poster = str(item.get("poster") or "")
     poster_class = "" if poster else " missing"
     watched = bool(item.get("watched") or (watched_keys and item.get("key") in watched_keys))
+    title = html.escape(str(item.get("title") or "Untitled"))
     return (
         f"<a class='card{' watched' if watched else ''}' href='{html.escape(str(item.get('href') or '#'))}'>"
         f"<div class='poster{poster_class}'>{watched_badge_html(watched)}{home_poster_html(poster)}</div>"
-        f"<div class='card-title'>{html.escape(str(item.get('title') or 'Untitled'))}</div>"
+        f"<div class='card-title' title='{title}'>{title}</div>"
         f"<div class='card-meta'>{html.escape(str(item.get('kind') or ''))} &bull; {html.escape(str(item.get('subtitle') or ''))}</div>"
         f"</a>"
     )
@@ -3955,15 +4202,24 @@ input { flex:1; min-width:0; min-height:48px; border-radius:15px; border:1px sol
 button { min-height:48px; border:0; border-radius:999px; padding:0 22px; font-weight:900; cursor:pointer; background:var(--gold); color:#111; }
 .muted { color:var(--muted); } .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(145px, 1fr)); gap:24px 18px; }
 .card { min-width:0; } .poster { position:relative; aspect-ratio:2/3; border-radius:8px; overflow:hidden; background:#101722; border:1px solid rgba(255,255,255,.1); display:flex; align-items:center; justify-content:center; color:#9aa4b2; font-weight:800; }
-.poster img { width:100%; height:100%; object-fit:cover; } .card-title { margin-top:10px; font-weight:900; line-height:1.15; } .card-meta { margin-top:4px; color:var(--muted); font-size:14px; }
+.poster img { width:100%; height:100%; object-fit:cover; }
+.card-title { margin-top:10px; font-weight:900; font-size:15px; line-height:1.2; min-height:2.4em; overflow-wrap:anywhere; overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
+.card-meta { margin-top:4px; color:var(--muted); font-size:14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .watched-badge { position:absolute; left:8px; top:8px; z-index:2; border-radius:999px; padding:3px 7px; background:rgba(48,209,88,.92); color:#031007; font-size:10px; font-weight:950; text-transform:uppercase; letter-spacing:.02em; }
 .card.watched .poster { outline:3px solid #30d158; outline-offset:2px; }
+.filters { display:flex; gap:9px; flex-wrap:wrap; margin:-8px 0 24px; }
+.filter { min-height:42px; display:inline-flex; align-items:center; padding:8px 17px; border:1px solid var(--line); border-radius:999px; background:#1a1f29; font-weight:850; }
+.filter.active { background:var(--gold); color:#111; border-color:var(--gold); }
+.search-section { margin:26px 0 38px; }
+.search-section h2 { margin:0 0 6px; font-size:clamp(22px,3vw,32px); }
+.search-section .section-count { color:var(--muted); margin:0 0 16px; }
 @media (min-width:900px) { .grid { grid-template-columns:repeat(auto-fill, minmax(126px, 126px)); } }
 @media (max-width:700px) { .cmv-mark { width:.80em; height:.80em; } .cmv-media { letter-spacing:-.055em; } .pill { padding:8px 13px; font-size:13px; min-height:40px; } }
 </style></head><body>
 <header><a class="brand cmv-logo" href="/"><span class="cmv-left"><span class="cmv-cine">Cine</span><span class="cmv-media">Media</span></span><span class="cmv-divider"></span><span class="cmv-vault">Vault</span><svg class="cmv-mark" viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="32" r="26" fill="none" stroke="currentColor" stroke-width="4"/><circle cx="32" cy="32" r="9" fill="none" stroke="currentColor" stroke-width="4"/><path d="M32 6v17M32 41v17M6 32h17M41 32h17M13.6 13.6l12 12M38.4 38.4l12 12M50.4 13.6l-12 12M25.6 38.4l-12 12" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"/><circle cx="32" cy="32" r="3" fill="currentColor"/><path d="M32 32l5 4M32 32l-5 4M32 32v-6" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg></a><a class="pill" href="/">Home</a><a class="pill" href="/movies">Movies</a><a class="pill" href="/tv">TV Shows</a><a class="pill" href="/music">Music</a></header>
 <main>
-<form class="search-row" action="/search" method="get"><input name="q" value="{{QUERY}}" placeholder="Search movies, shows, actors, genres, or episodes" autofocus><button type="submit">Search</button></form>
+<form class="search-row" action="/search" method="get"><input type="hidden" name="type" value="{{ACTIVE_TYPE}}"><input name="q" value="{{QUERY}}" placeholder="Search movies, shows, actors, genres, or episodes" autofocus><button type="submit">Search</button></form>
+<nav class="filters" aria-label="Search filters">{{FILTERS}}</nav>
 <h1>{{TITLE}}</h1><p class="muted">{{SUBTITLE}}</p>
 <div class="grid">{{RESULTS}}</div>
 </main></body></html>"""
@@ -4456,8 +4712,13 @@ def player_nav_link(label: str, href: str) -> str:
     return f"<a href='{html.escape(href)}'>{html.escape(label)}</a>"
 
 
-def actor_items_for(metadata: dict) -> str:
+def actor_items_for(metadata: dict, media_type: str | None = None, media_id: int | str | None = None) -> str:
     actors = actor_names_for(metadata)
+    if media_type and media_id is not None:
+        try:
+            return tmdb_people.cards_html(media_type, int(media_id), actors, limit=12)
+        except (TypeError, ValueError):
+            pass
     return "".join(f"<li><a href='/actor?name={urllib.parse.quote(actor)}'>{html.escape(actor)}</a></li>" for actor in actors) or "<li>No actor data available yet.</li>"
 
 
@@ -4665,18 +4926,19 @@ def direct_player_context(kind: str, item_id: str, is_admin: bool = False, playb
         poster = movie_app.poster_url_for(item)
         poster_html = f"<img class='poster-logo' src='{html.escape(poster)}' alt=''>" if poster else "<div class='poster-logo missing'>No Poster</div>"
         summary = metadata.get("overview") or "No summary details available yet."
-        actor_items = actor_items_for(metadata)
+        actor_items = actor_items_for(metadata, "movie", item.id)
         source = f"/play/{item.id}"
         video_label = "Local file stream"
         if playback_mode == "hls":
             stream = ensure_hls_stream(kind, item_id, item.path, audio_index=non_default_audio)
             source = stream["playlist_url"]
             video_label = "Adaptive HLS stream"
+        content_rating = movie_app.content_rating_label(metadata) if hasattr(movie_app, "content_rating_label") else (str(metadata.get("content_rating") or "NR") if metadata.get("content_rating_checked_at") else "Rating pending")
         meta = "".join(
             f"<span>{html.escape(value)}</span>"
             for value in [subtitle, movie_app.human_size(item.size), "Movie"]
             if value
-        ) + "<span class='rating'>Local</span>"
+        ) + f"<span class='rating'>{html.escape(content_rating)}</span>"
         return {
             "title": title,
             "subtitle": subtitle,
@@ -4742,7 +5004,7 @@ def direct_player_context(kind: str, item_id: str, is_admin: bool = False, playb
             episode_rating = 0.0
         poster_html = f"<img class='poster-logo' src='{html.escape(poster)}' alt=''>" if poster else "<div class='poster-logo missing'>No Poster</div>"
         summary = episode_meta["summary"] or metadata.get("overview") or "No summary details available yet."
-        actor_items = actor_items_for(metadata)
+        actor_items = actor_items_for(metadata, "tv_show", show.id if show else None)
         show_href = f"/tv/show/{show.id}" if show else "/tv"
         season_href = f"{show_href}#season-{tv_app.slugify(episode.season)}"
         source = f"/play/episode/{episode.id}"
@@ -4759,7 +5021,10 @@ def direct_player_context(kind: str, item_id: str, is_admin: bool = False, playb
         )
         if episode_rating > 0:
             meta += f"<span class='rating'>TMDb {episode_rating:.1f}</span>"
-        meta += "<span class='rating'>Local</span>"
+        content_rating = str(metadata.get("content_rating") or "").strip()
+        if not content_rating:
+            content_rating = "NR" if metadata.get("content_rating_checked_at") else "Rating pending"
+        meta += f"<span class='rating'>{html.escape(content_rating)}</span>"
         actions = [
             action_link("&#10003;", "Mark Watched", show_href, " data-mark-watched='1'"),
             action_link("&#8595;", "Download", f"/download/episode/{episode.id}", " data-mobile-download='1' data-mobile-scope='episode' data-mobile-id='" + html.escape(str(episode.id)) + "'"),
@@ -5316,6 +5581,11 @@ class CombinedHandler(VideoListsMixin, BaseHTTPRequestHandler):
             if not user:
                 return self.require_auth(path)
             return self.api_watch_progress(user)
+        if path in {"/api/playback/heartbeat", "/api/playback/stop"}:
+            user = self.current_user()
+            if not user:
+                return self.require_auth(path)
+            return self.api_playback_lifecycle(user, stop=path.endswith("/stop"))
         if path == "/api/watch/watched":
             user = self.current_user()
             if not user:
@@ -6305,7 +6575,21 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
     def media_state_payload(self, payload: dict, watched: int | None = None) -> dict:
         item = payload.get("item") if isinstance(payload.get("item"), dict) else payload
         key = str(item.get("key") or payload.get("key") or "")
-        kind = str(item.get("kind") or payload.get("kind") or "").replace("tv", "tv")
+        kind_raw = str(item.get("kind") or payload.get("kind") or "").strip().lower()
+        # Episode IDs and movie IDs live in separate indexes and may have the
+        # same numeric value.  Treat every episode spelling as TV, and let the
+        # stable media-key prefix settle ambiguous/legacy client payloads.
+        # Falling through to "movie" for kind="episode" can otherwise attach
+        # an episode's progress to an unrelated movie with the same ID.
+        key_kind = key.partition(":")[0].strip().lower()
+        if key_kind in {"tv", "episode"}:
+            kind = "tv"
+        elif key_kind == "movie":
+            kind = "movie"
+        elif kind_raw in {"tv", "episode", "tv_episode"}:
+            kind = "tv"
+        else:
+            kind = "movie"
         media_id = 0
         try:
             media_id = int(item.get("mediaId") or key.rsplit(":", 1)[-1])
@@ -6318,9 +6602,18 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
             progress = max(progress, min(1.0, position / duration))
         if watched is None:
             watched = 1 if bool(payload.get("watched", item.get("watched", False))) else 0
+        # session_type is an explicit, client-declared marker - never inferred
+        # from media kind/id/URL shape - distinguishing normal on-demand
+        # playback (Continue Watching eligible) from a virtual-channel
+        # Watch Live session (never eligible, see api_watch_progress()).
+        # Absent/unrecognized values default to "on_demand" so every
+        # pre-existing caller (web, mobile, older Tizen builds) that has
+        # never heard of this field keeps its exact current behavior.
+        session_type_raw = str(payload.get("sessionType") or item.get("sessionType") or "on_demand").strip().lower()
+        session_type = session_type_raw if session_type_raw in ("on_demand", "virtual_live") else "on_demand"
         return {
             "key": key,
-            "kind": "tv" if kind == "tv" else "movie",
+            "kind": kind,
             "media_id": media_id,
             "title": str(item.get("title") or ""),
             "subtitle": str(item.get("subtitle") or ""),
@@ -6331,11 +6624,22 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
             "duration": duration,
             "progress": progress,
             "watched": int(watched),
+            "session_type": session_type,
         }
 
     def api_watch_progress(self, user):
         payload = self.read_json()
         state = self.media_state_payload(payload)
+        if state["session_type"] == "virtual_live":
+            # Contract: Watch Live on a virtual channel must never create,
+            # update, or extend a Continue Watching / play-history row for
+            # the currently-airing title, no matter what client sends this.
+            # Enforced here (not just client-side) so a client regression
+            # can't silently pollute Continue Watching again - see "Play from
+            # Beginning" (api_watch_progress callers that send "on_demand",
+            # the default) for the one virtual-channel action that *is*
+            # allowed to write progress, unchanged below.
+            return self.json_response({"ok": True, "ignored": True, "reason": "virtual_live"})
         if not state["key"]:
             return self.json_response({"ok": False, "error": "missing media key"})
         queued = bool(payload.get("queued"))
@@ -6369,10 +6673,32 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
             conn.close()
         return self.json_response({"ok": True, "state": state})
 
+    def api_playback_lifecycle(self, user, stop=False):
+        payload = self.read_json()
+        player_id = str(payload.get("player_id") or "").strip()[:80]
+        if not re.fullmatch(r"[A-Za-z0-9._:-]{12,80}", player_id):
+            return self.json_response({"ok": False, "error": "invalid player_id"})
+        identity = hashlib.sha256(f"{int(user['id'])}:{player_id}".encode("utf-8")).hexdigest()[:20]
+        key = f"player:{int(user['id'])}:{identity}"
+        if stop:
+            cinevault_usage.session_end(key)
+            return self.json_response({"ok": True})
+        media_type = str(payload.get("media_type") or "video")[:24]
+        delivery = str(payload.get("delivery") or "direct")[:24]
+        cinevault_usage.session_touch(
+            key, user=user, service=media_type, delivery=delivery, media_type=media_type,
+            media_id=str(payload.get("media_id") or "")[:80], title=str(payload.get("title") or "")[:200],
+            subtitle=str(payload.get("subtitle") or "")[:200], transcoding=(delivery == "hls"),
+            client=self.headers.get("User-Agent", ""),
+        )
+        return self.json_response({"ok": True})
+
     def api_watch_watched(self, user):
         payload = self.read_json()
         watched = 1 if payload.get("watched", True) else 0
         state = self.media_state_payload(payload, watched=watched)
+        if state["session_type"] == "virtual_live":
+            return self.json_response({"ok": True, "ignored": True, "reason": "virtual_live"})
         if not state["key"]:
             return self.json_response({"ok": False, "error": "missing media key"})
         if watched:
@@ -6801,6 +7127,15 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
         self._cinevault_theme = theme_for_row(user)
         if not user:
             return self.require_auth(path)
+        if path == "/api/search":
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get("q", [""])[0].strip()
+            if len(query) < 2:
+                return self.json_response({"query": query, "movies": [], "tv": [], "live": [], "virtual": [], "people": []})
+            watched = watched_keys_for_user(user)
+            payload = {"query": query}
+            for category in ("movies", "tv", "live", "virtual", "people"):
+                payload[category] = unified_search_results(query, limit=8, watched_keys=watched, category=category)
+            return self.json_response(payload)
         movie_id_routes = (
             "/movie/fix-match/",
             "/movie/apply-match/",
@@ -6827,6 +7162,10 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
             return self.admin_users_page(user)
         if path == "/downloads":
             return self.downloads_page(user)
+        if path == "/downloads/tv-app":
+            return self.downloads_tv_app_page(user)
+        if path.startswith("/downloads/tv-app/") and path.endswith(".wgt"):
+            return self.downloads_tv_app_file(user, path.rsplit("/", 1)[-1])
         if path == "/account":
             return self.account_page(user)
         if path == "/admin/activity":
@@ -6866,6 +7205,14 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
             return self.send_error(404)
         if path == "/":
             return self.landing()
+        if path in ("/weekly-guide", "/weekly-guide.pdf"):
+            handled = weekly_guide.handle_get(self, path)
+            if handled is not False:
+                return handled
+        if path.startswith("/tmdb-person-image/"):
+            handled = tmdb_people.handle_get(self, path)
+            if handled is not False:
+                return handled
         if path == "/search":
             return self.search_page()
         if path == "/music" or path.startswith("/music/") or path.startswith("/api/music/"):
@@ -7030,15 +7377,16 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
     def landing(self):
         user = self.current_user()
         initial = (user["username"][:1].upper() if user and user["username"] else "U")
-        account_links = ['<a href="/downloads">Downloads</a>', '<a href="/account">Settings</a>', '<a href="/logout">Logout</a>']
+        account_links = ['<a href="/downloads">Downloads</a>', '<a href="/account">Themes</a>', '<a href="/logout">Logout</a>']
         if user and user["is_admin"]:
             pending_count = pending_user_count()
             badge = f"<span class='badge'>{pending_count}</span>" if pending_count else ""
             account_links = [
                 '<a href="/downloads">Downloads</a>',
-                '<a href="/account">Settings</a>',
+                '<a href="/account">Themes</a>',
                 '<a href="/admin/users">Users</a>',
                 '<a href="/admin/modules">Modules</a>',
+                '<a href="/admin/vchannels">Virtual Channels</a>',
                 '<a href="/admin/hls">Live Streams</a>',
                 '<a href="/admin/usage">Usage</a>',
                 '<a href="/logout">Logout</a>',
@@ -7096,22 +7444,43 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
     def search_page(self):
         parsed = urllib.parse.urlparse(self.path)
         query = urllib.parse.parse_qs(parsed.query).get("q", [""])[0].strip()
+        category = urllib.parse.parse_qs(parsed.query).get("type", ["all"])[0].strip().lower()
+        if category not in {"all", "movies", "tv", "live", "virtual", "people"}: category = "all"
         watched_keys = watched_keys_for_user(self.current_user())
-        results = unified_search_results(query, watched_keys=watched_keys)
-        cards = "".join(search_result_card(item, watched_keys) for item in results)
+        labels = {"movies":"Movies", "tv":"TV Shows", "live":"Live TV",
+                  "virtual":"Virtual Channels", "people":"People"}
+        if query and category == "all":
+            grouped = []
+            total = 0
+            for group in ("movies", "tv", "live", "virtual", "people"):
+                group_results = unified_search_results(query, limit=24, watched_keys=watched_keys, category=group)
+                total += len(group_results)
+                if group_results:
+                    group_cards = "".join(search_result_card(item, watched_keys) for item in group_results)
+                    grouped.append(f'<section class="search-section"><h2>{labels[group]}</h2><p class="section-count">{len(group_results)} result(s)</p><div class="grid">{group_cards}</div></section>')
+            results = []
+            cards = "".join(grouped)
+        else:
+            results = unified_search_results(query, limit=60, watched_keys=watched_keys, category=category)
+            total = len(results)
+            cards = "".join(search_result_card(item, watched_keys) for item in results)
         if not query:
             title = "Search CineMediaVault"
             subtitle = "Search across movies, TV shows, actors, genres, and episode titles."
         else:
             title = f"Search: {query}"
-            subtitle = f"{len(results)} result(s) across Movies and TV Shows."
+            subtitle = f"{total} categorized result(s)." if category == "all" else f"{total} result(s) in {labels[category]}."
+        filter_labels = (("all","All"),("movies","Movies"),("tv","TV Shows"),("live","Live TV"),("virtual","Virtual Channels"),("people","People"))
+        filters = "".join(f'<a class="filter{" active" if key == category else ""}" href="/search?q={urllib.parse.quote(query)}&type={key}">{label}</a>' for key,label in filter_labels)
         if query and not cards:
             cards = "<p class='muted'>No matching movies or shows found.</p>"
         body = (
             SEARCH_PAGE
             .replace("{{QUERY}}", html.escape(query))
+            .replace("{{ACTIVE_TYPE}}", html.escape(category))
             .replace("{{TITLE}}", html.escape(title))
             .replace("{{SUBTITLE}}", html.escape(subtitle))
+            .replace("{{FILTERS}}", filters)
             .replace("{{RESULTS}}", cards)
         )
         body = inject_theme(body, getattr(self, "_cinevault_theme", DEFAULT_THEME))
@@ -7131,6 +7500,7 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
         cards = "".join(search_result_card(item, watched_keys) for item in results) or "<p class='muted'>No matching library titles found.</p>"
         body = (SEARCH_PAGE.replace("{{QUERY}}", html.escape(name)).replace("{{TITLE}}", html.escape(name or "Actor"))
                 .replace("{{SUBTITLE}}", html.escape(f"{len(results)} movie and TV title(s) in your library."))
+                .replace("{{ACTIVE_TYPE}}", "people").replace("{{FILTERS}}", "")
                 .replace("{{RESULTS}}", cards))
         body = inject_theme(body, getattr(self, "_cinevault_theme", DEFAULT_THEME))
         data = body.encode("utf-8")
@@ -7445,6 +7815,63 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
             TRANSCODES.clear()
         return removed
 
+    def downloads_tv_app_page(self, user):
+        releases = tizen_releases()
+        latest = releases[0] if releases else None
+
+        def release_row(r: dict) -> str:
+            return f"""
+            <article class="download-card">
+              <div class="download-head">
+                <h2>CineMediaVault TV v{html.escape(r['version'])}</h2>
+                <span class="state ready">Signed .wgt</span>
+              </div>
+              <div class="meta">{html.escape(movie_app.human_size(r['size']))} &middot; sha256 {html.escape(r['sha256'][:16])}&hellip;</div>
+              <a class="download-link" href="/downloads/tv-app/{html.escape(r['filename'])}">Download {html.escape(r['filename'])}</a>
+            </article>"""
+
+        rows = "".join(release_row(r) for r in releases) or "<p class='empty'>No Tizen release has been published yet.</p>"
+        latest_note = f"<div class='summary'><span class='pill'>Latest: v{html.escape(latest['version'])}</span></div>" if latest else ""
+        return self.render_html(f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CineMediaVault Samsung TV App</title><style>
+:root {{ color-scheme:dark; --bg:#080a0f; --panel:#11151d; --line:#263041; --gold:#f5b73f; --muted:#aab4c3; }}
+* {{ box-sizing:border-box; }} body {{ margin:0; background:var(--bg); color:#fff; font-family:Inter,system-ui,Segoe UI,sans-serif; }}
+header {{ position:sticky; top:0; z-index:3; display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:12px; padding:18px 22px; background:rgba(8,10,15,.94); border-bottom:1px solid var(--line); }}
+a {{ color:#fff; }} main {{ padding:22px; max-width:820px; margin:0 auto; }} h1,h2,p {{ margin-top:0; }}
+nav {{ display:flex; flex-wrap:wrap; gap:4px 6px; align-items:center; }} nav a {{ min-height:44px; display:inline-flex; align-items:center; padding:0 6px; }}
+.summary {{ display:flex; flex-wrap:wrap; gap:10px; margin-bottom:18px; }}
+.pill {{ min-height:34px; display:inline-flex; align-items:center; padding:0 12px; border-radius:999px; background:#151b25; border:1px solid var(--line); color:#dbe3ef; font-weight:850; }}
+.grid {{ display:grid; gap:14px; }}
+.download-card {{ border:1px solid var(--line); border-radius:18px; background:var(--panel); padding:15px; }}
+.download-head {{ display:flex; flex-wrap:wrap; justify-content:space-between; align-items:flex-start; gap:12px; }}
+.download-head h2 {{ margin:0 0 6px; font-size:20px; }}
+.meta {{ color:var(--muted); font-size:13px; margin:7px 0; overflow-wrap:anywhere; }}
+.state {{ flex:0 0 auto; border-radius:999px; padding:5px 9px; background:#202836; color:#dbe3ef; font-size:12px; font-weight:900; }}
+.state.ready {{ background:#15351f; color:#baffc4; }}
+.download-link {{ display:inline-flex; min-height:44px; align-items:center; margin-top:10px; padding:0 13px; border-radius:999px; background:#1d7f3a; color:#fff; text-decoration:none; font-weight:900; }}
+.empty {{ color:var(--muted); padding:14px; border:1px dashed var(--line); border-radius:14px; }}
+.steps {{ color:var(--muted); line-height:1.7; }}
+</style></head><body><header><strong>CineMediaVault Samsung TV App</strong><nav><a href="/downloads">Downloads</a> &middot; <a href="/">Home</a> &middot; <a href="/logout">Logout</a></nav></header>
+<main><h1>Samsung TV App</h1>{latest_note}<div class="grid">{rows}</div>
+<section class="panel" style="margin-top:22px">
+<h2>Install with Tizen Studio Device Manager</h2>
+<ol class="steps">
+<li>Enable Developer Mode in the TV's Apps screen and enter this server's IP as the host PC.</li>
+<li>Restart the TV, then connect to it from Tizen Studio's Device Manager on your development PC.</li>
+<li>Download the .wgt above to that PC, then install it to the TV through Device Manager.</li>
+<li>The app connects to CineVault's Samsung LAN listener at <code>http://192.168.1.20:5001</code> automatically - no HTTPS certificate trust step needed on the TV.</li>
+</ol>
+</section>
+</main></body></html>""")
+
+    def downloads_tv_app_file(self, user, filename: str):
+        if not TIZEN_RELEASE_NAME_RE.match(filename or ""):
+            return self.send_error(404, "Release not found")
+        path = TIZEN_RELEASES_DIR / filename
+        if not path.is_file():
+            return self.send_error(404, "Release not found")
+        return self.serve_download_package(path, service="tv")
+
     def downloads_page(self, user):
         mobile_items = self.mobile_download_cache_items()
         mobile_cache_size = sum(item["size"] for item in mobile_items)
@@ -7490,7 +7917,7 @@ nav {{ display:flex; flex-wrap:wrap; gap:4px 6px; align-items:center; }} nav a {
 .download-link {{ display:inline-flex; min-height:44px; align-items:center; margin-top:10px; padding:0 13px; border-radius:999px; background:#1d7f3a; color:#fff; text-decoration:none; font-weight:900; }}
 .empty {{ color:var(--muted); padding:14px; border:1px dashed var(--line); border-radius:14px; }}
 @media (max-width:650px) {{ main {{ padding:16px; }} header {{ padding:14px 16px; align-items:flex-start; flex-direction:column; }} .download-head h2 {{ font-size:17px; }} }}
-</style></head><body><header><strong>CineMediaVault Downloads</strong><nav><a href="/">Home</a> &middot; <a href="/movies">Movies</a> &middot; <a href="/tv">TV Shows</a> &middot; <a href="/logout">Logout</a></nav></header>
+</style></head><body><header><strong>CineMediaVault Downloads</strong><nav><a href="/">Home</a> &middot; <a href="/movies">Movies</a> &middot; <a href="/tv">TV Shows</a> &middot; <a href="/downloads/tv-app">Samsung TV App</a> &middot; <a href="/logout">Logout</a></nav></header>
 <main><h1>Downloads</h1><div class="summary"><span class="pill">{len(mobile_items)} mobile download job(s)</span><span class="pill">{movie_app.human_size(mobile_cache_size)} prepared cache</span></div><div class="grid">{rows}</div></main></body></html>""")
 
     def clear_mobile_download_cache(self) -> int:
@@ -7577,7 +8004,18 @@ nav {{ display:flex; flex-wrap:wrap; gap:4px 6px; align-items:center; }} nav a {
         }
 
     def direct_stream(self, kind: str, item_id: str, head_only: bool = False):
-        if kind == "movie":
+        if kind == "movie" and item_id == virtual_channels.NEWS_STABLE_KEY:
+            # Self-generated newscast (virtual channel t16): not in the
+            # scanned movie library, so movie_app.safe_item()/hls_media_summary()
+            # (and their int(item.id) assumption) would fail - resolve straight
+            # from the known fixed path instead. See virtual_channels.py's
+            # resolve_current_item() special-case for the schedule-side half.
+            path = virtual_channels.NEWS_VIDEO_PATH
+            if not path.is_file():
+                return self.send_error(404, "News channel content not available")
+            info = {"title": virtual_channels.NEWS_TITLE}
+            media_id = 0
+        elif kind == "movie":
             item = movie_app.safe_item(item_id)
             path = item.path
             info = self.hls_media_summary("movie", str(item.id))
@@ -7701,7 +8139,13 @@ nav {{ display:flex; flex-wrap:wrap; gap:4px 6px; align-items:center; }} nav a {
 
         def card(item: dict, active_view: bool) -> str:
             poster = f"<img src='{html.escape(item['poster'])}' alt=''>" if item["poster"] else "<div class='poster missing'>No Poster</div>"
-            users = item["users"] or [{"user": "Unknown user", "position": 0, "duration": item["duration"], "progress": 0, "updated": ""}]
+            users = item["users"] or [{
+                "user": "No active viewers — cached media only",
+                "position": 0,
+                "duration": item["duration"],
+                "progress": 0,
+                "updated": "",
+            }]
             user_rows = []
             for row in users:
                 duration = row["duration"] or item["duration"]
@@ -8242,6 +8686,15 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
         base_href = f"/player/{kind}/{item_id}"
         direct_href = f"{base_href}?mode=direct"
         hls_href = f"{base_href}?mode=hls"
+        guide_info = {
+            "title": context["title"],
+            "subtitle": context["subtitle"],
+            "summary": context["summary"],
+            "poster": context["item"].get("poster", ""),
+            "airtime": 0,
+            "channel": "On Demand",
+            "channel_number": "",
+        }
         body = (
             DIRECT_PLAYER_PAGE
             .replace("{{TITLE}}", html.escape(context["title"]))
@@ -8279,6 +8732,7 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
             .replace("{{PLAYER_FULLSCREEN_CLASS}}", " fullscreen-mode" if direct_play else "")
             .replace("{{VIDEO_AUTOPLAY}}", " autoplay" if direct_play else "")
             .replace("{{ITEM_JSON}}", json.dumps(context["item"]))
+            .replace("{{GUIDE_INFO_JSON}}", json.dumps(guide_info))
             .replace("{{PREV_JSON}}", json.dumps(context["prev"]))
             .replace("{{NEXT_JSON}}", json.dumps(context["next"]))
         )
@@ -8374,7 +8828,12 @@ button.delete {{ background:var(--danger); color:#fff; }} button:disabled {{ opa
             # to the authenticated session and an optional per-player hint so
             # separate video elements are counted without exposing either value.
             session_token = self.cookie_value(CINEVAULT_SESSION_COOKIE) or ""
-            player_hint = (self.headers.get("X-CineVault-Player-ID", "") or "").strip()[:80]
+            request_query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            player_hint = (
+                self.headers.get("X-CineVault-Player-ID", "")
+                or request_query.get("player_id", [""])[0]
+                or ""
+            ).strip()[:80]
             if player_hint and not re.fullmatch(r"[A-Za-z0-9._:-]+", player_hint):
                 player_hint = ""
             identity_source = f"{session_token}:{player_hint}" if session_token else f"{remote}:{player_hint}"

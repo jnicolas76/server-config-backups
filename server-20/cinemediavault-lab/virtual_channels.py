@@ -14,6 +14,7 @@ catalog objects (movie_app, tv_app) are passed in by the caller rather than
 imported independently.
 """
 import html
+import datetime
 import hashlib
 import json
 import os
@@ -23,6 +24,7 @@ import sqlite3
 import subprocess
 import threading
 import time
+from types import SimpleNamespace
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -37,9 +39,12 @@ PRIME_END_HOUR = 24
 LANGUAGE_PROBE_BATCH = 40
 HOLDING_GAP_SECONDS = 180
 ENGLISH_LANGUAGE_TAGS = {"eng", "en", "und", ""}
+CATALOG_RECONCILE_SECONDS = max(3600, int(os.environ.get("CINEVAULT_CATALOG_RECONCILE_SECONDS", str(7 * 24 * 3600))))
+CATALOG_RECONCILE_SCRIPT = Path(os.environ.get("CINEVAULT_CATALOG_RECONCILE_SCRIPT", "/home/jnicolas/media-library-refresh.sh"))
 
 LOCK = threading.RLock()
 STARTED = False
+POOL_CACHE = {"db_path": None, "revision": None, "movie_defs": None, "tv_defs": None, "movie_pools": None, "tv_pools": None, "built_at": 0.0}
 CONTROL_FILE = DB_PATH.parent / "virtual-channel-rebuild-request.json"
 BARKER_TTS_DIR = Path(os.environ.get("CINEVAULT_BARKER_TTS_DIR", str(DB_PATH.parent / "barker-tts")))
 BARKER_TTS_PYTHON = Path(os.environ.get("CINEVAULT_BARKER_TTS_PYTHON", "/home/jnicolas/cinemediavault-lab/tts-venv/bin/python"))
@@ -47,8 +52,55 @@ BARKER_TTS_SCRIPT = Path(os.environ.get("CINEVAULT_BARKER_TTS_SCRIPT", "/home/jn
 BARKER_TTS_MODEL = Path(os.environ.get("CINEVAULT_BARKER_TTS_MODEL", "/home/jnicolas/cinemediavault-lab/tts-models/kokoro-v1.0.onnx"))
 BARKER_TTS_VOICES = Path(os.environ.get("CINEVAULT_BARKER_TTS_VOICES", "/home/jnicolas/cinemediavault-lab/tts-models/voices-v1.0.bin"))
 BARKER_TTS_LOCK = threading.Lock()
+ADMIN_OPERATION_LOCK = threading.Lock()
+ADMIN_OPERATION = {"name": "", "state": "idle", "message": "", "started_at": 0, "finished_at": 0}
 COMBINED_BARKER_DIR = Path(os.environ.get("CINEVAULT_COMBINED_BARKER_DIR", str(DB_PATH.parent / "combined-barker")))
 COMBINED_BARKER_MANIFEST = COMBINED_BARKER_DIR / "manifest.json"
+BARKER_SETTINGS_FILE = DB_PATH.parent / "barker-settings.json"
+BARKER_RESTART_FILE = DB_PATH.parent / "barker-restart.token"
+BARKER_SETTINGS_DEFAULTS = {"mode": "combined", "duration_minutes": 60,
+                            "segment_seconds": 37, "rotation_hours": 6,
+                            "schedule_days": HORIZON_DAYS}
+
+def barker_settings():
+    values = dict(BARKER_SETTINGS_DEFAULTS)
+    try:
+        saved = json.loads(BARKER_SETTINGS_FILE.read_text(encoding="utf-8"))
+        if isinstance(saved, dict):
+            values.update(saved)
+    except Exception:
+        pass
+    values["mode"] = values["mode"] if values["mode"] in ("combined", "separate") else "combined"
+    values["duration_minutes"] = max(10, min(60, int(values["duration_minutes"])))
+    values["segment_seconds"] = max(10, min(90, int(values["segment_seconds"])))
+    values["rotation_hours"] = max(2, min(24, int(values["rotation_hours"])))
+    values["schedule_days"] = max(3, min(14, int(values["schedule_days"])))
+    return values
+
+def save_barker_settings(form):
+    values = {
+        "mode": form.get("barker_mode") or "combined",
+        "duration_minutes": int(form.get("duration_minutes") or 60),
+        "segment_seconds": int(form.get("segment_seconds") or 37),
+        "rotation_hours": int(form.get("rotation_hours") or 6),
+        "schedule_days": int(form.get("schedule_days") or HORIZON_DAYS),
+        "saved_at": int(time.time()),
+    }
+    if values["mode"] not in ("combined", "separate"):
+        raise ValueError("Invalid barker mode")
+    if not 10 <= values["duration_minutes"] <= 60:
+        raise ValueError("Preview length must be 10–60 minutes")
+    if not 10 <= values["segment_seconds"] <= 90:
+        raise ValueError("Segment length must be 10–90 seconds")
+    if not 2 <= values["rotation_hours"] <= 24:
+        raise ValueError("Rotation must be 2–24 hours")
+    if not 3 <= values["schedule_days"] <= 14:
+        raise ValueError("Schedule days must be 3–14 days")
+    BARKER_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    temporary = BARKER_SETTINGS_FILE.with_suffix(".json.part")
+    temporary.write_text(json.dumps(values, indent=2), encoding="utf-8")
+    temporary.replace(BARKER_SETTINGS_FILE)
+    return values
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS vchannel_defs (
@@ -76,6 +128,14 @@ CREATE TABLE IF NOT EXISTS vchannel_build_state (
 CREATE TABLE IF NOT EXISTS vchannel_media_probe (
  path_key TEXT PRIMARY KEY, seconds REAL NOT NULL DEFAULT 0, audio_language TEXT NOT NULL DEFAULT '',
  probed_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS vchannel_catalog_state (
+ id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL DEFAULT 1,
+ revision_reason TEXT NOT NULL DEFAULT 'initial', revision_at TEXT NOT NULL,
+ last_full_reconcile_at TEXT, last_full_reconcile_status TEXT, last_full_reconcile_error TEXT);
+CREATE TABLE IF NOT EXISTS vchannel_missing_media (
+ path_key TEXT PRIMARY KEY, media_kind TEXT NOT NULL, stable_key TEXT,
+ first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, seen_count INTEGER NOT NULL DEFAULT 1,
+ reconciled_at TEXT);
 """
 
 # Ten virtual movie channels, in the required order. "FilmNoir" and
@@ -124,7 +184,23 @@ TV_CHANNELS = [
     ("t13", "T13", "The Zone", "TheZone"),
     ("t14", "T14", "Nostalgia", "Nostalgia"),
     ("t15", "T15", "Sitcom", "Sitcom"),
+    # Sixteenth channel, added 2026-09-19: a self-generated newscast (weather/
+    # sports/news/markets), produced entirely outside this library by
+    # cinevault-genchannel/run_broadcast_v3.sh (cron-refreshed). It is not a
+    # scanned show. The dedicated mixed-lineup builder alternates its fixed
+    # generated-news path with a tightly curated local factual-series pool;
+    # the ordinary TV scheduler never receives this channel.
+    ("t16", "T16", "Cine News", "News"),
 ]
+
+NEWS_CHANNEL_SLUG = "t16"
+NEWS_STABLE_KEY = "cinemedia-vault-news"
+NEWS_VIDEO_PATH = Path("/home/jnicolas/cinevault-genchannel/output/broadcast-morning-v3.mp4")
+NEWS_TITLE = "Cine News"
+NEWS_POSTER_URL = "/static/cine-news-sports-poster.png"
+NEWS_EDITION_HOURS = (6, 12, 18)
+NEWS_INTERSTITIAL_TITLES = {"Mega Disasters", "Modern Marvels", "How It's Made"}
+NEWS_SCHEDULE_SIGNATURE_PATH = Path("/home/jnicolas/cinevault-genchannel/output/.cine-news-schedule-signature")
 
 
 def now_text():
@@ -148,9 +224,58 @@ def init_schema():
         if "schedule_seed" not in columns:
             c.execute("ALTER TABLE vchannel_build_state ADD COLUMN schedule_seed INTEGER NOT NULL DEFAULT 1")
         c.execute("INSERT OR IGNORE INTO vchannel_build_state(id,last_build_status,updated_at) VALUES(1,'pending',?)", (now_text(),))
+        stamp = now_text()
+        c.execute("INSERT OR IGNORE INTO vchannel_catalog_state(id,revision,revision_reason,revision_at,last_full_reconcile_at,last_full_reconcile_status) VALUES(1,1,'initial',?,?,'scheduled')", (stamp, stamp))
         c.commit()
     finally:
         c.close()
+
+
+def catalog_revision():
+    init_schema()
+    c = connect()
+    try:
+        row = c.execute("SELECT revision FROM vchannel_catalog_state WHERE id=1").fetchone()
+        return int(row[0]) if row else 1
+    finally:
+        c.close()
+
+
+def invalidate_catalog_revision(reason="catalog changed"):
+    """Durably invalidate schedule candidate pools after a successful import."""
+    global POOL_CACHE
+    init_schema()
+    c = connect()
+    try:
+        c.execute("UPDATE vchannel_catalog_state SET revision=revision+1,revision_reason=?,revision_at=? WHERE id=1", (str(reason)[:240], now_text()))
+        c.commit()
+        revision = int(c.execute("SELECT revision FROM vchannel_catalog_state WHERE id=1").fetchone()[0])
+    finally:
+        c.close()
+    POOL_CACHE = {"db_path": None, "revision": None, "movie_defs": None, "tv_defs": None, "movie_pools": None, "tv_pools": None, "built_at": 0.0}
+    return revision
+
+
+def record_missing_media(path, media_kind, stable_key):
+    c = connect()
+    try:
+        stamp = now_text()
+        c.execute(
+            "INSERT INTO vchannel_missing_media(path_key,media_kind,stable_key,first_seen_at,last_seen_at,seen_count,reconciled_at) VALUES(?,?,?,?,?,1,NULL) "
+            "ON CONFLICT(path_key) DO UPDATE SET media_kind=excluded.media_kind,stable_key=excluded.stable_key,last_seen_at=excluded.last_seen_at,seen_count=vchannel_missing_media.seen_count+1,reconciled_at=NULL",
+            (str(path), media_kind, stable_key, stamp, stamp),
+        )
+        c.commit()
+    finally:
+        c.close()
+
+
+def selected_media_exists(path, media_kind, stable_key):
+    """The only normal scheduler path that stats media: after selection."""
+    if Path(path).is_file():
+        return True
+    record_missing_media(path, media_kind, stable_key)
+    return False
 
 
 def ensure_channel_defs():
@@ -383,8 +508,9 @@ PRIORITY_TITLES_BY_GENRE_KEY = {
     "TheZone": ZONE_PRIORITY_TITLES,
     "Nostalgia": NOSTALGIA_PRIORITY_TITLES,
     "Sitcom": SITCOM_PRIORITY_TITLES,
+    "News": NEWS_INTERSTITIAL_TITLES,
 }
-SPECIAL_TV_GENRE_KEYS = {"Knowledge", "TheSimpsons", "TheZone", "Nostalgia", "Sitcom"}
+SPECIAL_TV_GENRE_KEYS = {"Knowledge", "TheSimpsons", "TheZone", "Nostalgia", "Sitcom", "News"}
 
 
 def knowledge_eligible(canon, title):
@@ -426,7 +552,7 @@ def sitcom_eligible(canon, title):
 
 
 def tv_special_eligible(genre_key, canon, title, metadata):
-    """Single dispatch point for all five new sentinel genre_keys, shared by
+    """Single dispatch point for sentinel genre_keys, shared by
     eligible_tv_pool() (single-channel helper) and _build_all_pools() (the
     real per-tick batch build) so the two can never drift apart."""
     if genre_key == "Knowledge":
@@ -439,6 +565,12 @@ def tv_special_eligible(genre_key, canon, title, metadata):
         return nostalgia_eligible(canon, title, metadata)
     if genre_key == "Sitcom":
         return sitcom_eligible(canon, title)
+    if genre_key == "News":
+        # T16 intentionally mixes the current generated newscast with a small,
+        # curated factual pool. Exact requested titles are always eligible;
+        # genuinely News-tagged local series may join without allowing the
+        # broad Documentary pool to swallow the channel.
+        return _title_matches_any(title, NEWS_INTERSTITIAL_TITLES) or "News" in canon
     return False
 
 
@@ -473,14 +605,14 @@ def eligible_movie_pool(genre_key, movie_app):
     return pool
 
 
-def show_episode_order(tv_app, show):
+def show_episode_order(tv_app, show, verify_files=True):
     order = []
     for season in show.seasons.values():
         for ep in season.episodes:
             sn, en = tv_app.season_episode_numbers(ep)
             if sn is None or en is None:
                 continue
-            if not ep.path.is_file():
+            if verify_files and not ep.path.is_file():
                 continue
             order.append((sn, en, ep))
     order.sort(key=lambda t: (t[0], t[1]))
@@ -627,6 +759,20 @@ def _used_today(local_date_iso, media_kind="movie"):
         c.close()
 
 
+def _movie_last_airdates(before_local_date):
+    """Return each movie's most recent earlier airdate across every channel."""
+    c = connect()
+    try:
+        rows = c.execute(
+            "SELECT stable_key,MAX(local_date) AS last_date FROM vchannel_schedule "
+            "WHERE media_kind='movie' AND local_date<? GROUP BY stable_key",
+            (before_local_date,),
+        ).fetchall()
+        return {row["stable_key"]: row["last_date"] for row in rows}
+    finally:
+        c.close()
+
+
 def _insert_program(channel_id, start_ts, stop_ts, media_kind, stable_key, show_key, episode_index, title, subtitle, rating, local_date_iso):
     c = connect()
     try:
@@ -646,6 +792,7 @@ def generate_movie_day(date_obj, movie_channels, pools):
     midnight = _local_midnight(date_obj).timestamp()
     next_midnight = _local_midnight(date_obj + datetime.timedelta(days=1)).timestamp()
     used_today = _used_today(local_date_iso, "movie")
+    last_aired = _movie_last_airdates(local_date_iso)
     seed = schedule_seed()
     for channel in movie_channels:
         pool = pools.get(channel["id"], [])
@@ -666,10 +813,18 @@ def generate_movie_day(date_obj, movie_channels, pools):
                 break
             if _is_prime(start) and len(candidates) > 3:
                 ranked = sorted(candidates, key=lambda p: -p["rating"])
-                top = ranked[: max(3, len(ranked) // 3)]
-                pick = rng.choice(top)
-            else:
-                pick = rng.choice(candidates)
+                candidates = ranked[: max(3, len(ranked) // 3)]
+            # Rotate through never/least-recently aired titles before allowing
+            # recent repeats, even when a title belongs to several channels.
+            oldest = min(last_aired.get(p["stable_key"], "") for p in candidates)
+            least_recent = [p for p in candidates if last_aired.get(p["stable_key"], "") == oldest]
+            pick = rng.choice(least_recent)
+            if pick.get("verify_path", True) and not selected_media_exists(pick["path"], "movie", pick["stable_key"]):
+                pool = [p for p in pool if p["stable_key"] != pick["stable_key"]]
+                pools[channel["id"]] = pool
+                if not pool:
+                    break
+                continue
             seconds, _lang = ensure_probed(pick["path"])
             if seconds <= 0:
                 pool = [p for p in pool if p["stable_key"] != pick["stable_key"]]
@@ -680,6 +835,7 @@ def generate_movie_day(date_obj, movie_channels, pools):
             stop = start + round(seconds)
             pending.append((channel["id"], int(start), int(stop), "movie", pick["stable_key"], None, None, pick["title"], "", pick["rating"], local_date_iso, now_text()))
             used_today.add(pick["stable_key"])
+            last_aired[pick["stable_key"]] = local_date_iso
             start = stop
         if pending:
             c = connect()
@@ -691,6 +847,167 @@ def generate_movie_day(date_obj, movie_channels, pools):
                 c.commit()
             finally:
                 c.close()
+
+
+def _news_edition_start(moment):
+    """Return the local 6 AM/noon/6 PM edition boundary containing moment."""
+    import datetime
+    local = datetime.datetime.fromtimestamp(moment, TZ)
+    hour = max((h for h in NEWS_EDITION_HOURS if h <= local.hour), default=18)
+    day = local.date() if local.hour >= NEWS_EDITION_HOURS[0] else local.date() - datetime.timedelta(days=1)
+    return _local_midnight(day).replace(hour=hour).timestamp()
+
+
+def _news_file_signature(duration):
+    stat = NEWS_VIDEO_PATH.stat()
+    return f"{stat.st_mtime_ns}:{stat.st_size}:{int(duration)}"
+
+
+def generate_news_lineup(news_channel, news_pool, horizon_days):
+    """Build T16 as alternating current Cine News + curated factual series.
+
+    Every six-hour edition begins exactly at 06:00, 12:00, or 18:00 local
+    time. The generated newscast repeats between factual episodes, but the
+    next edition boundary always wins. When promotion atomically replaces the
+    fixed live file, its signature changes; the active/future T16 window is
+    rebuilt on the next scheduler tick so the old duration cannot linger.
+    """
+    import datetime
+    if not NEWS_VIDEO_PATH.is_file():
+        return
+    seconds, _lang = _ffprobe_raw(NEWS_VIDEO_PATH)
+    if seconds <= 0:
+        return
+    news_duration = max(60, round(seconds))
+    signature = _news_file_signature(news_duration)
+    previous_signature = ""
+    if NEWS_SCHEDULE_SIGNATURE_PATH.exists():
+        previous_signature = NEWS_SCHEDULE_SIGNATURE_PATH.read_text(encoding="utf-8").strip()
+
+    now = time.time()
+    first_boundary = _news_edition_start(now)
+    horizon_end = _local_midnight(datetime.datetime.fromtimestamp(now, TZ).date() + datetime.timedelta(days=horizon_days)).timestamp()
+    c = connect()
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        if previous_signature != signature:
+            # Remove the current edition and everything ahead. Historical rows
+            # remain for audit, while no row can retain an obsolete duration.
+            c.execute("DELETE FROM vchannel_schedule WHERE channel_id=? AND stop_ts>?", (news_channel["id"], int(first_boundary)))
+        existing = {int(r[0]) for r in c.execute(
+            "SELECT start_ts FROM vchannel_schedule WHERE channel_id=? AND start_ts>=? AND start_ts<?",
+            (news_channel["id"], int(first_boundary), int(horizon_end)),
+        )}
+        progress = {row["show_key"]: int(row["next_index"]) for row in c.execute(
+            "SELECT show_key,next_index FROM vchannel_show_progress WHERE channel_id=?", (news_channel["id"],)
+        ).fetchall()}
+        pending = []
+        edition = first_boundary
+        while edition < horizon_end:
+            edition_end = edition + 6 * 3600
+            start = edition
+            want_news = True
+            previous_show = ""
+            guard = 0
+            while start < edition_end and guard < 40:
+                guard += 1
+                if int(start) in existing:
+                    row = c.execute(
+                        "SELECT stop_ts,media_kind,show_key FROM vchannel_schedule WHERE channel_id=? AND start_ts=?",
+                        (news_channel["id"], int(start)),
+                    ).fetchone()
+                    if not row or int(row["stop_ts"]) <= start:
+                        break
+                    start = int(row["stop_ts"])
+                    want_news = row["media_kind"] != "movie"
+                    previous_show = row["show_key"] or previous_show
+                    continue
+                remaining = edition_end - start
+                if want_news or not news_pool:
+                    stop = min(edition_end, start + news_duration)
+                    local_date_iso = datetime.datetime.fromtimestamp(start, TZ).date().isoformat()
+                    pending.append((news_channel["id"], int(start), int(stop), "movie", NEWS_STABLE_KEY,
+                                    None, None, NEWS_TITLE, "", 0.0, local_date_iso, now_text()))
+                    start = stop
+                    want_news = False
+                    continue
+                candidates = [entry for entry in news_pool.values() if entry["show_key"] != previous_show]
+                if not candidates:
+                    candidates = list(news_pool.values())
+                rng = random.Random(f"{schedule_seed()}:cine-news:{int(edition)}:{int(start)}")
+                rng.shuffle(candidates)
+                chosen = None
+                for entry in candidates:
+                    order = entry["order"]
+                    absolute_index = progress.get(entry["show_key"], 0)
+                    sn, en, ep = order[absolute_index % len(order)]
+                    cached = get_cached_probe(str(ep.path))
+                    ep_seconds = float((cached or {}).get("seconds") or (getattr(ep, "runtime_minutes", 0) or 0) * 60 or 0)
+                    if ep_seconds <= 0 and not entry.get("verify_path", True):
+                        try:
+                            ep_seconds = float(entry["tv_app"].episode_metadata(entry["meta"], ep).get("runtime") or 0) * 60
+                        except Exception:
+                            ep_seconds = 0
+                    if 0 < ep_seconds <= remaining:
+                        chosen = (entry, absolute_index, sn, en, ep, round(ep_seconds))
+                        break
+                if not chosen:
+                    # A full episode cannot fit before the edition cutover;
+                    # finish with current news so the next edition begins on time.
+                    want_news = True
+                    continue
+                entry, absolute_index, sn, en, ep, ep_seconds = chosen
+                stable_key = f"{entry['show_key']}|S{sn:02d}E{en:02d}"
+                if entry.get("verify_path", True) and not selected_media_exists(ep.path, "episode", stable_key):
+                    progress[entry["show_key"]] = absolute_index + 1
+                    previous_show = entry["show_key"]
+                    continue
+                actual_seconds = float((get_cached_probe(str(ep.path)) or {}).get("seconds") or 0)
+                if actual_seconds <= 0 and entry.get("verify_path", True):
+                    actual_seconds, _lang = _ffprobe_raw(ep.path)
+                if actual_seconds > 0:
+                    ep_seconds = round(actual_seconds)
+                if ep_seconds <= 0 or ep_seconds > remaining:
+                    want_news = True
+                    continue
+                stop = start + ep_seconds
+                if entry.get("catalog_backed"):
+                    row_meta = {"vote_average": ep.vote_average or 0, "runtime": ep.runtime_minutes or 0,
+                                "title": ep.episode_title, "overview": ep.overview}
+                else:
+                    row_meta = entry["tv_app"].episode_metadata(entry["meta"], ep)
+                try:
+                    rating = float(row_meta.get("vote_average") or entry["rating"] or 0)
+                except (TypeError, ValueError):
+                    rating = entry["rating"]
+                local_date_iso = datetime.datetime.fromtimestamp(start, TZ).date().isoformat()
+                pending.append((news_channel["id"], int(start), int(stop), "episode", stable_key,
+                                entry["show_key"], absolute_index, entry["show_key"], f"S{sn:02d}E{en:02d}",
+                                rating, local_date_iso, now_text()))
+                progress[entry["show_key"]] = absolute_index + 1
+                previous_show = entry["show_key"]
+                start = stop
+                want_news = True
+            edition = edition_end
+        if pending:
+            c.executemany(
+                "INSERT OR IGNORE INTO vchannel_schedule(channel_id,start_ts,stop_ts,media_kind,stable_key,show_key,episode_index,title,subtitle,rating,local_date,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                pending,
+            )
+        c.executemany(
+            "INSERT INTO vchannel_show_progress(channel_id,show_key,next_index,updated_at) VALUES(?,?,?,?) ON CONFLICT(channel_id,show_key) DO UPDATE SET next_index=excluded.next_index,updated_at=excluded.updated_at",
+            [(news_channel["id"], key, value, now_text()) for key, value in progress.items()],
+        )
+        c.commit()
+        NEWS_SCHEDULE_SIGNATURE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        temporary = NEWS_SCHEDULE_SIGNATURE_PATH.with_suffix(".part")
+        temporary.write_text(signature, encoding="utf-8")
+        temporary.replace(NEWS_SCHEDULE_SIGNATURE_PATH)
+    except Exception:
+        c.rollback()
+        raise
+    finally:
+        c.close()
 
 
 def generate_tv_day(date_obj, tv_channels, pools):
@@ -725,13 +1042,28 @@ def generate_tv_day(date_obj, tv_channels, pools):
             if _is_prime(start) and len(candidates) > 3:
                 ranked = sorted(candidates, key=lambda entry: -entry["rating"])
                 candidates = ranked[:max(3, len(ranked) // 3)]
-            show_entry = rng.choice(candidates)
-            order = show_entry["order"]
-            absolute_index = progress.get(show_entry["show_key"], 0)
-            idx = absolute_index % len(order)
-            sn, en, ep = order[idx]
+            rng.shuffle(candidates)
+            selected = None
+            for show_entry in candidates:
+                order = show_entry["order"]
+                absolute_index = progress.get(show_entry["show_key"], 0)
+                sn, en, ep = order[absolute_index % len(order)]
+                stable_key = f"{show_entry['show_key']}|S{sn:02d}E{en:02d}"
+                if not show_entry.get("verify_path", True) or selected_media_exists(ep.path, "episode", stable_key):
+                    selected = (show_entry, order, absolute_index, sn, en, ep, stable_key)
+                    break
+                # Missing selected episodes are skipped and recorded; the
+                # next candidate show is tried in the same schedule slot.
+                progress[show_entry["show_key"]] = absolute_index + 1
+            if selected is None:
+                break
+            show_entry, order, absolute_index, sn, en, ep, stable_key = selected
             metadata = show_entry["meta"]
-            row = show_entry["tv_app"].episode_metadata(metadata, ep)
+            if show_entry.get("catalog_backed"):
+                row = {"runtime": ep.runtime_minutes or 0, "vote_average": ep.vote_average or 0,
+                       "title": ep.episode_title, "overview": ep.overview}
+            else:
+                row = show_entry["tv_app"].episode_metadata(metadata, ep)
             try:
                 runtime_minutes = float(row.get("runtime") or 0)
             except (TypeError, ValueError):
@@ -752,7 +1084,6 @@ def generate_tv_day(date_obj, tv_channels, pools):
                 rating = float(row.get("vote_average") or show_entry["rating"] or 0)
             except (TypeError, ValueError):
                 rating = show_entry["rating"]
-            stable_key = f"{show_entry['show_key']}|S{sn:02d}E{en:02d}"
             pending.append((channel["id"], int(start), int(stop), "episode", stable_key, show_entry["show_key"], absolute_index, title_label, subtitle, rating, local_date_iso, now_text()))
             progress[show_entry["show_key"]] = absolute_index + 1
             previous_show = show_entry["show_key"]
@@ -776,71 +1107,122 @@ def generate_tv_day(date_obj, tv_channels, pools):
             c.close()
 
 
+def _stable_movie_key(external_id, title):
+    parent = Path(str(external_id or "")).parent.name
+    identity = parent if parent and parent != "." else str(title or "")
+    return "asset:" + re.sub(r"[^a-z0-9]+", "", identity.lower())
+
+
+def _build_all_pools_from_apps(movie_app, tv_app, movie_defs, tv_defs):
+    """Compatibility/test fallback when the normalized catalog is empty."""
+    movie_pools = {ch["id"]: [] for ch in movie_defs}
+    for item in getattr(getattr(movie_app, "movie_index", None), "items", []):
+        metadata = movie_app.metadata_for(item); raw_genres = metadata.get("genres") or []
+        if not raw_genres: continue
+        canon = _canon_genre_set(raw_genres); rating = float(metadata.get("vote_average") or 0)
+        entry = {"stable_key": movie_app.stable_asset_key(item), "title": metadata.get("title") or item.title, "path": item.path, "rating": rating, "verify_path": False}
+        for ch in movie_defs:
+            key=ch["genre_key"]; eligible=film_noir_eligible(canon) if key=="FilmNoir" else (international_eligible(item.path) if key=="International" else key in canon)
+            if eligible: movie_pools[ch["id"]].append(entry)
+    tv_pools = {ch["id"]: {} for ch in tv_defs}
+    for show in getattr(getattr(tv_app, "tv_index", None), "shows", []):
+        metadata=tv_app.metadata_for(show); raw_genres=metadata.get("genres") or []; canon=_canon_genre_set(raw_genres); title=show.title
+        order=show_episode_order(tv_app,show,verify_files=False)
+        if not order: continue
+        for ch in tv_defs:
+            key=ch["genre_key"]; eligible=tv_special_eligible(key,canon,title,metadata) if key in SPECIAL_TV_GENRE_KEYS else bool(raw_genres) and key in canon
+            if not eligible: continue
+            rating=float(metadata.get("vote_average") or 0); priority=PRIORITY_TITLES_BY_GENRE_KEY.get(key)
+            if priority and _title_matches_any(title,priority): rating=max(rating,PRIORITY_RATING_FLOOR)
+            tv_pools[ch["id"]][title]={"order":order,"rating":rating,"meta":metadata,"tv_app":tv_app,"show_key":title,"verify_path":False}
+    return movie_pools,tv_pools
+
+
 def _build_all_pools(movie_app, tv_app, movie_defs, tv_defs):
-    """Single pass over the catalogs, bucketed into each channel's pool.
-    eligible_movie_pool()/eligible_tv_pool() do the equivalent work for one
-    channel at a time (handy for tests/tools), but calling them once per
-    channel here would re-run show_episode_order()'s per-episode is_file()
-    stat calls for every TV channel independently - a 10x redundant
-    filesystem pass across the whole library on every generation tick.
+    """Build candidates from the durable SQLite catalog without NFS stats.
+
+    File existence is deliberately not checked here. Only a row actually
+    selected for the upcoming schedule is verified by selected_media_exists().
     """
     movie_pools = {ch["id"]: [] for ch in movie_defs}
-    for item in movie_app.movie_index.items:
-        if not item.path.is_file():
-            continue
-        metadata = movie_app.metadata_for(item)
-        raw_genres = metadata.get("genres") or []
-        if not raw_genres:
-            continue
-        canon = _canon_genre_set(raw_genres)
-        try:
-            rating = float(metadata.get("vote_average") or 0)
-        except (TypeError, ValueError):
-            rating = 0.0
-        entry = None
-        for ch in movie_defs:
-            genre_key = ch["genre_key"]
-            if genre_key == "FilmNoir":
-                eligible = film_noir_eligible(canon)
-            elif genre_key == "International":
-                eligible = international_eligible(item.path)
-            else:
-                eligible = genre_key in canon
-            if not eligible:
-                continue
-            if entry is None:
-                entry = {"stable_key": movie_app.stable_asset_key(item), "title": metadata.get("title") or item.title, "path": item.path, "rating": rating}
-            movie_pools[ch["id"]].append(entry)
-
     tv_pools = {ch["id"]: {} for ch in tv_defs}
-    for show in tv_app.tv_index.shows:
-        metadata = tv_app.metadata_for(show)
-        raw_genres = metadata.get("genres") or []
-        canon = _canon_genre_set(raw_genres)
-        title = show.title
+    c = connect()
+    try:
         try:
-            rating = float(metadata.get("vote_average") or 0)
-        except (TypeError, ValueError):
-            rating = 0.0
-        order = None  # computed at most once per show, only if something matches
-        for ch in tv_defs:
-            genre_key = ch["genre_key"]
-            if genre_key in SPECIAL_TV_GENRE_KEYS:
-                eligible = tv_special_eligible(genre_key, canon, title, metadata)
-            else:
-                eligible = bool(raw_genres) and genre_key in canon
-            if not eligible:
+            movie_rows = c.execute(
+                "SELECT mi.external_id,mi.title,mi.file_path,COALESCE(m.vote_average,0) rating,"
+                "GROUP_CONCAT(g.name, char(31)) genres FROM media_items mi "
+                "JOIN movies m ON m.media_item_id=mi.id "
+                "LEFT JOIN media_genres mg ON mg.media_type='movie' AND mg.media_id=mi.id "
+                "LEFT JOIN genres g ON g.id=mg.genre_id GROUP BY mi.id"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return _build_all_pools_from_apps(movie_app, tv_app, movie_defs, tv_defs)
+        if not movie_rows and (getattr(getattr(movie_app, "movie_index", None), "items", None) or getattr(getattr(tv_app, "tv_index", None), "shows", None)):
+            return _build_all_pools_from_apps(movie_app, tv_app, movie_defs, tv_defs)
+        for row in movie_rows:
+            raw_genres = [x for x in str(row["genres"] or "").split(chr(31)) if x]
+            if not raw_genres:
                 continue
-            if order is None:
-                order = show_episode_order(tv_app, show)
-                if not order:
-                    break  # no locally-resolvable episodes at all - can't air on any channel
-            entry_rating = rating
-            priority_titles = PRIORITY_TITLES_BY_GENRE_KEY.get(genre_key)
-            if priority_titles and _title_matches_any(title, priority_titles):
-                entry_rating = max(entry_rating, PRIORITY_RATING_FLOOR)
-            tv_pools[ch["id"]][title] = {"order": order, "rating": entry_rating, "meta": metadata, "tv_app": tv_app, "show_key": title}
+            canon = _canon_genre_set(raw_genres)
+            path = Path(row["file_path"])
+            entry = {"stable_key": _stable_movie_key(row["external_id"], row["title"]), "title": row["title"], "path": path, "rating": float(row["rating"] or 0)}
+            for ch in movie_defs:
+                key = ch["genre_key"]
+                eligible = film_noir_eligible(canon) if key == "FilmNoir" else (international_eligible(path) if key == "International" else key in canon)
+                if eligible:
+                    movie_pools[ch["id"]].append(entry)
+
+        shows = c.execute(
+            "SELECT s.id,s.title,s.year,s.vote_average,s.first_air_date,GROUP_CONCAT(g.name, char(31)) genres "
+            "FROM tv_shows s LEFT JOIN media_genres mg ON mg.media_type='tv_show' AND mg.media_id=s.id "
+            "LEFT JOIN genres g ON g.id=mg.genre_id GROUP BY s.id"
+        ).fetchall()
+        episode_rows = c.execute(
+            "SELECT show_id,season_number,episode_number,file_path,runtime_minutes,vote_average,episode_title,overview "
+            "FROM tv_episodes WHERE season_number IS NOT NULL AND episode_number IS NOT NULL "
+            "ORDER BY show_id,season_number,episode_number,id"
+        ).fetchall()
+        episodes_by_show = {}
+        for ep in episode_rows:
+            obj = SimpleNamespace(path=Path(ep["file_path"]), runtime_minutes=ep["runtime_minutes"], vote_average=ep["vote_average"],
+                                  episode_title=ep["episode_title"] or "", overview=ep["overview"] or "")
+            episodes_by_show.setdefault(int(ep["show_id"]), []).append((int(ep["season_number"]), int(ep["episode_number"]), obj))
+        for show in shows:
+            order = episodes_by_show.get(int(show["id"]), [])
+            if not order:
+                continue
+            title = show["title"]
+            raw_genres = [x for x in str(show["genres"] or "").split(chr(31)) if x]
+            canon = _canon_genre_set(raw_genres)
+            metadata = {"genres": raw_genres, "vote_average": float(show["vote_average"] or 0), "first_air_date": show["first_air_date"] or "", "year": show["year"] or ""}
+            for ch in tv_defs:
+                key = ch["genre_key"]
+                eligible = tv_special_eligible(key, canon, title, metadata) if key in SPECIAL_TV_GENRE_KEYS else bool(raw_genres) and key in canon
+                if not eligible:
+                    continue
+                rating = float(show["vote_average"] or 0)
+                priority_titles = PRIORITY_TITLES_BY_GENRE_KEY.get(key)
+                if priority_titles and _title_matches_any(title, priority_titles):
+                    rating = max(rating, PRIORITY_RATING_FLOOR)
+                tv_pools[ch["id"]][title] = {"order": order, "rating": rating, "meta": metadata, "tv_app": tv_app, "show_key": title, "catalog_backed": True}
+    finally:
+        c.close()
     return movie_pools, tv_pools
+
+
+def cached_all_pools(movie_app, tv_app, movie_defs, tv_defs):
+    global POOL_CACHE
+    revision = catalog_revision()
+    db_path = str(DB_PATH.resolve())
+    movie_signature = tuple((x["id"], x["genre_key"]) for x in movie_defs)
+    tv_signature = tuple((x["id"], x["genre_key"]) for x in tv_defs)
+    if POOL_CACHE.get("db_path") == db_path and POOL_CACHE["revision"] == revision and POOL_CACHE["movie_defs"] == movie_signature and POOL_CACHE["tv_defs"] == tv_signature:
+        return POOL_CACHE["movie_pools"], POOL_CACHE["tv_pools"], True
+    movie_pools, tv_pools = _build_all_pools(movie_app, tv_app, movie_defs, tv_defs)
+    POOL_CACHE = {"db_path": db_path, "revision": revision, "movie_defs": movie_signature, "tv_defs": tv_signature,
+                  "movie_pools": movie_pools, "tv_pools": tv_pools, "built_at": time.time()}
+    return movie_pools, tv_pools, False
 
 
 def backup_schedule_database(label="virtual-schedule"):
@@ -938,17 +1320,31 @@ def schedule_stats():
         c.close()
 
 
-def generate_horizon(movie_app, tv_app, horizon_days=HORIZON_DAYS):
+def generate_horizon(movie_app, tv_app, horizon_days=None):
     import datetime
+    build_started = time.monotonic()
+    if horizon_days is None:
+        # Read the admin-saved schedule length at call time so a change made in
+        # the barker settings UI takes effect on the next scheduler run without
+        # a restart. Explicit callers (e.g. tests) still override directly.
+        horizon_days = barker_settings()["schedule_days"]
+    horizon_days = max(3, min(14, int(horizon_days)))
     ensure_channel_defs()
     today = datetime.datetime.now(TZ).date()
     movie_defs = channels("movie")
     tv_defs = channels("tv")
-    movie_pools, tv_pools = _build_all_pools(movie_app, tv_app, movie_defs, tv_defs)
+    movie_pools, tv_pools, cache_hit = cached_all_pools(movie_app, tv_app, movie_defs, tv_defs)
+    news_channel = next((ch for ch in tv_defs if ch["slug"] == NEWS_CHANNEL_SLUG), None)
+    if news_channel is not None:
+        generate_news_lineup(news_channel, tv_pools.get(news_channel["id"], {}), horizon_days)
+    # T16 is generated only by generate_news_lineup(). Passing it to the
+    # ordinary TV scheduler was the bug that filled Cine News with hundreds
+    # of Mega Disasters rows.
+    regular_tv_defs = [ch for ch in tv_defs if ch["slug"] != NEWS_CHANNEL_SLUG]
     for offset in range(horizon_days):
         date_obj = today + datetime.timedelta(days=offset)
         generate_movie_day(date_obj, movie_defs, movie_pools)
-        generate_tv_day(date_obj, tv_defs, tv_pools)
+        generate_tv_day(date_obj, regular_tv_defs, tv_pools)
     horizon_until = (today + datetime.timedelta(days=horizon_days - 1)).isoformat()
     c = connect()
     try:
@@ -959,6 +1355,7 @@ def generate_horizon(movie_app, tv_app, horizon_days=HORIZON_DAYS):
         c.commit()
     finally:
         c.close()
+    print(f"Virtual schedule horizon generated through {horizon_until} in {time.monotonic() - build_started:.1f} seconds (pool_cache={'hit' if cache_hit else 'rebuilt'}, revision={catalog_revision()})", flush=True)
 
 
 def build_state():
@@ -970,9 +1367,74 @@ def build_state():
         c.close()
 
 
+def weekly_reconciliation_due(now_epoch=None):
+    now_epoch = time.time() if now_epoch is None else float(now_epoch)
+    c = connect()
+    try:
+        row = c.execute("SELECT last_full_reconcile_at FROM vchannel_catalog_state WHERE id=1").fetchone()
+    finally:
+        c.close()
+    if not row or not row[0]:
+        return True
+    try:
+        return now_epoch - time.mktime(time.strptime(row[0], "%Y-%m-%dT%H:%M:%SZ")) >= CATALOG_RECONCILE_SECONDS
+    except Exception:
+        return True
+
+
+def run_weekly_filesystem_reconciliation(movie_app, tv_app, force=False, runner=None):
+    """Run the canonical full scanner weekly, then invalidate candidates.
+
+    The scanner owns catalog inserts/removals/renames. RESTART_SERVICES=0
+    prevents it from disrupting the running server; this thread reloads the
+    refreshed in-memory indexes after successful completion.
+    """
+    if not force and not weekly_reconciliation_due():
+        return {"ran": False, "reason": "not_due"}
+    runner = runner or subprocess.run
+    c = connect()
+    try:
+        c.execute("UPDATE vchannel_catalog_state SET last_full_reconcile_status='running',last_full_reconcile_error=NULL WHERE id=1")
+        c.commit()
+    finally:
+        c.close()
+    try:
+        if not CATALOG_RECONCILE_SCRIPT.is_file():
+            raise FileNotFoundError(CATALOG_RECONCILE_SCRIPT)
+        env = os.environ.copy()
+        env["RESTART_SERVICES"] = "0"
+        result = runner(["bash", str(CATALOG_RECONCILE_SCRIPT)], cwd=str(CATALOG_RECONCILE_SCRIPT.parent), env=env,
+                        capture_output=True, text=True, timeout=6 * 3600)
+        if getattr(result, "returncode", 0) != 0:
+            raise RuntimeError((getattr(result, "stderr", "") or getattr(result, "stdout", "") or "reconciliation failed")[-2000:])
+        movie_app.movie_index.load_csv_bootstrap()
+        tv_app.tv_index.load_cache()
+        movie_app.load_metadata_map()
+        tv_app.load_metadata_map()
+        revision = invalidate_catalog_revision("weekly full filesystem reconciliation")
+        c = connect()
+        try:
+            stamp = now_text()
+            c.execute("UPDATE vchannel_catalog_state SET last_full_reconcile_at=?,last_full_reconcile_status='ok',last_full_reconcile_error=NULL WHERE id=1", (stamp,))
+            c.execute("UPDATE vchannel_missing_media SET reconciled_at=? WHERE reconciled_at IS NULL", (stamp,))
+            c.commit()
+        finally:
+            c.close()
+        return {"ran": True, "revision": revision}
+    except Exception as exc:
+        c = connect()
+        try:
+            c.execute("UPDATE vchannel_catalog_state SET last_full_reconcile_status='error',last_full_reconcile_error=? WHERE id=1", (str(exc)[:2000],))
+            c.commit()
+        finally:
+            c.close()
+        raise
+
+
 def scheduler_loop(movie_app, tv_app):
     while True:
         try:
+            run_weekly_filesystem_reconciliation(movie_app, tv_app)
             with LOCK:
                 write_combined_barker_manifest(movie_app, tv_app)
             advance_language_probe_batch(movie_app)
@@ -1008,17 +1470,42 @@ def _movie_key_index(movie_app):
     return {movie_app.stable_asset_key(item): item for item in movie_app.movie_index.items}
 
 
-_EMPTY_PROGRAM_DETAILS = {"detail_href": None, "play_href": None, "overview": "", "poster": ""}
+_EMPTY_PROGRAM_DETAILS = {"detail_href": None, "play_href": None, "overview": "", "poster": "", "content_rating": "", "year": ""}
 
 
-def _resolve_program_details(prog, movie_app, tv_app, movie_index=None):
+def _release_year(metadata):
+    """Return a display-only four-digit release/premiere year."""
+    for key in ("release_date", "first_air_date", "year"):
+        match = re.search(r"\b(?:18|19|20)\d{2}\b", str((metadata or {}).get(key) or ""))
+        if match:
+            return match.group(0)
+    return ""
+
+
+def _content_rating(metadata):
+    value = str((metadata or {}).get("content_rating") or "").strip()
+    if value:
+        return value
+    return "NR" if (metadata or {}).get("content_rating_checked_at") else ""
+
+
+def _resolve_program_details(prog, movie_app, tv_app, movie_index=None, tv_show_index=None, tv_order_cache=None):
     """Resolve a schedule row to hrefs plus the rich detail info (overview,
-    artwork) the guide's persistent details panel needs. Reuses the same
-    is_file()/lookup work the old href-only resolver did; no extra I/O."""
+    artwork) the guide's persistent details panel needs. Guide callers use
+    the already-built library index and never stat remote media files."""
+    if prog["media_kind"] == "movie" and prog.get("stable_key") == NEWS_STABLE_KEY:
+        return {
+            "detail_href": None,
+            "play_href": None,
+            "overview": "CineMedia Vault's latest news, entertainment, weather, sports, traffic, and market coverage.",
+            "poster": NEWS_POSTER_URL,
+            "content_rating": "TV-G",
+            "year": str(datetime.datetime.now(TZ).year),
+        }
     if prog["media_kind"] == "movie":
         index = movie_index if movie_index is not None else _movie_key_index(movie_app)
         item = index.get(prog["stable_key"])
-        if not item or not item.path.is_file():
+        if not item:
             return dict(_EMPTY_PROGRAM_DETAILS)
         metadata = movie_app.metadata_for(item)
         return {
@@ -1026,18 +1513,22 @@ def _resolve_program_details(prog, movie_app, tv_app, movie_index=None):
             "play_href": f"/player/movie/{item.id}",
             "overview": metadata.get("overview") or "",
             "poster": movie_app.poster_url_for(item) or "",
+            "content_rating": _content_rating(metadata),
+            "year": _release_year(metadata),
         }
     show_key = prog["show_key"]
-    show = next((s for s in tv_app.tv_index.shows if s.title == show_key), None)
+    show = ((tv_show_index or {}).get(show_key) if tv_show_index is not None
+            else next((s for s in tv_app.tv_index.shows if s.title == show_key), None))
     if not show:
         return dict(_EMPTY_PROGRAM_DETAILS)
-    order = show_episode_order(tv_app, show)
+    if tv_order_cache is not None:
+        order = tv_order_cache.setdefault(show_key, show_episode_order(tv_app, show, verify_files=False))
+    else:
+        order = show_episode_order(tv_app, show)
     idx = prog["episode_index"]
     if idx is None or idx < 0:
         return dict(_EMPTY_PROGRAM_DETAILS)
     _sn, _en, ep = order[idx % len(order)]
-    if not ep.path.is_file():
-        return dict(_EMPTY_PROGRAM_DETAILS)
     show_metadata = tv_app.metadata_for(show)
     overview = ""
     poster = ""
@@ -1054,10 +1545,12 @@ def _resolve_program_details(prog, movie_app, tv_app, movie_index=None):
         "play_href": f"/player/tv/{ep.id}",
         "overview": overview,
         "poster": poster,
+        "content_rating": _content_rating(show_metadata),
+        "year": _release_year(show_metadata),
     }
 
 
-def guide_payload(kind, query, movie_app, tv_app):
+def guide_payload(kind, query, movie_app, tv_app, resolve_details=True):
     now = int(time.time())
     start = int((query.get("from") or [now - now % 1800])[0])
     hours = max(2, min(24, int((query.get("hours") or [6])[0])))
@@ -1076,17 +1569,33 @@ def guide_payload(kind, query, movie_app, tv_app):
     by_channel = {}
     for row in rows:
         by_channel.setdefault(row["channel_id"], []).append(dict(row))
-    movie_index = _movie_key_index(movie_app) if kind == "movie" else None
+    # Only built when resolve() will actually use it (resolve_details=True).
+    # Building this dict means calling stable_asset_key()/Path.parent for
+    # every movie in the catalog - for callers that only need programme
+    # titles/times for text matching (search, resolve_details=False) that
+    # work was previously done and thrown away unused on every call.
+    movie_index = _movie_key_index(movie_app) if (kind == "movie" and resolve_details) else None
+    tv_show_index = ({show.title: show for show in tv_app.tv_index.shows}
+                     if kind == "tv" and resolve_details else None)
+    tv_order_cache = {} if kind == "tv" and resolve_details else None
+    def resolve(prog):
+        # Callers that only need programme titles/times for text matching
+        # (search) can skip this metadata work per row.
+        if not resolve_details:
+            return dict(_EMPTY_PROGRAM_DETAILS)
+        return _resolve_program_details(prog, movie_app, tv_app, movie_index, tv_show_index, tv_order_cache)
     def holding_payload(next_prog, hold_start, hold_stop):
         if not next_prog:
             return {"holding": True, "start": hold_start, "stop": hold_stop,
                     "next_title": "Schedule building", "next_start": None,
-                    "next_subtitle": "", "next_rating": 0, "overview": "", "poster": "",
+                    "next_subtitle": "", "next_rating": 0, "next_content_rating": "", "next_year": "", "overview": "", "poster": "",
                     "next_play_href": "", "next_detail_href": ""}
-        details = _resolve_program_details(next_prog, movie_app, tv_app, movie_index)
+        details = resolve(next_prog)
         return {"holding": True, "start": hold_start, "stop": hold_stop,
                 "next_title": next_prog.get("title") or "Coming up", "next_start": next_prog.get("start_ts"),
                 "next_subtitle": next_prog.get("subtitle") or "", "next_rating": next_prog.get("rating") or 0,
+                "next_content_rating": details.get("content_rating") or "",
+                "next_year": details.get("year") or "",
                 "overview": details.get("overview") or "", "poster": details.get("poster") or "",
                 "next_play_href": details.get("play_href") or "", "next_detail_href": details.get("detail_href") or ""}
     out_channels = []
@@ -1097,7 +1606,7 @@ def guide_payload(kind, query, movie_app, tv_app):
         for prog in progs:
             if prog["start_ts"] > cursor + HOLDING_GAP_SECONDS:
                 out.append(holding_payload(prog, cursor, prog["start_ts"]))
-            details = _resolve_program_details(prog, movie_app, tv_app, movie_index)
+            details = resolve(prog)
             out.append({
                 "holding": False, "start": prog["start_ts"], "stop": prog["stop_ts"], "title": prog["title"],
                 "subtitle": prog.get("subtitle") or "", "rating": prog.get("rating") or 0, "kind": prog["media_kind"],
@@ -1168,6 +1677,12 @@ def resolve_current_item(prog, movie_app, tv_app):
     """Resolve a persisted schedule row's durable stable_key back to a
     currently-playable local item. Returns (kind, item_id, path, title) or
     None if the file has since been removed/renamed."""
+    if prog["media_kind"] == "movie" and prog["stable_key"] == NEWS_STABLE_KEY:
+        # Self-generated newscast (t16): resolves directly to its fixed path,
+        # bypassing the scanned-catalog lookup entirely - see generate_news_day().
+        if not NEWS_VIDEO_PATH.is_file():
+            return None
+        return "movie", NEWS_STABLE_KEY, NEWS_VIDEO_PATH, NEWS_TITLE
     if prog["media_kind"] == "movie":
         item = _movie_key_index(movie_app).get(prog["stable_key"])
         if not item or not item.path.is_file():
@@ -1194,7 +1709,44 @@ def _spoken_episode(text):
     return value
 
 
-def write_combined_barker_manifest(movie_app, tv_app, limit=120):
+def _spoken_narration_text(text):
+    """Rewrite display copy into Kokoro-friendly announcer pronunciation."""
+    value = str(text or "")
+    value = re.sub(r"\bCine\s*Media\s+Vault\b", "Senna Media Vault", value, flags=re.I)
+    value = re.sub(r"\bWorld\s+War\s+II\b", "World War 2", value, flags=re.I)
+    value = re.sub(r"\bWorld\s+War\s+I\b", "World War 1", value, flags=re.I)
+
+    def speak_year(match):
+        year = int(match.group(0))
+        if 1000 <= year <= 1999:
+            century, tail = divmod(year, 100)
+            return f"{century} hundred" if tail == 0 else f"{century} {tail:02d}"
+        if 2000 <= year <= 2099:
+            tail = year - 2000
+            return "two thousand" if tail == 0 else f"two thousand {tail}"
+        return match.group(0)
+
+    value = re.sub(r"\b(?:1\d{3}|20\d{2})\b", speak_year, value)
+    def speak_clock(match):
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        meridiem = f"{match.group(3).upper()} M"
+        if minute == 0:
+            return f"{hour} {meridiem}"
+        if minute < 10:
+            return f"{hour} oh {minute} {meridiem}"
+        return f"{hour} {minute} {meridiem}"
+
+    value = re.sub(
+        r"\b(1[0-2]|0?[1-9]):([0-5]\d)\s*([AP])\.?M\.?\b",
+        speak_clock,
+        value,
+        flags=re.I,
+    )
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def write_combined_barker_manifest(movie_app, tv_app, limit=1000):
     """Publish a bounded, atomic input manifest for the offline FFmpeg worker.
 
     The worker never needs application credentials or direct catalog access.
@@ -1264,8 +1816,9 @@ def write_combined_barker_manifest(movie_app, tv_app, limit=120):
             "poster": str(details.get("poster") or ""),
             "airtime": int(prog["start_ts"]), "channel": prog["channel_name"],
             "channel_number": prog["channel_number"], "rating": float(prog.get("rating") or 0),
-            "year": str(metadata.get("release_date") or metadata.get("year") or "")[:4],
+            "year": _release_year(metadata),
             "genres": [g for g in genres if g], "cast": cast,
+            "content_rating": _content_rating(metadata),
         })
         seen.add(unique)
         if len(items) >= limit:
@@ -1304,14 +1857,15 @@ nav button,nav a{border-radius:999px}
 nav button.active,nav a.active{background:linear-gradient(180deg,var(--accent2),var(--accent));color:#04101f;border-color:var(--accent)}
 main{padding:16px;max-width:1700px;margin:0 auto}
 .toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
-.barker{position:sticky;top:105px;z-index:30;isolation:isolate;display:grid;grid-template-columns:minmax(220px,40%) 1fr;gap:22px;align-items:center;margin-bottom:16px;padding:14px;border:1px solid rgba(150,195,255,.55);border-radius:16px;background:rgba(8,24,55,.99);box-shadow:0 12px 35px rgba(0,5,18,.65)}.barker-video-wrap{position:relative;aspect-ratio:16/9;background:#000;border-radius:12px;overflow:hidden;border:1px solid rgba(124,195,255,.35)}.barker video{width:100%;height:100%;object-fit:contain;background:#000;display:block;cursor:pointer}.barker-mute{position:absolute;right:8px;bottom:8px;z-index:2;min-height:38px;padding:7px 11px;background:rgba(5,10,18,.9)}.barker.external-active .barker-video-wrap{visibility:hidden}.barker-copy{min-width:0}.barker-kicker{color:#7cc3ff;font-weight:900;letter-spacing:.14em}.barker h2{font-size:clamp(22px,3vw,38px);margin:8px 0}.barker-meta{font-weight:800;color:#fff}.barker-summary{color:#dce9fb;line-height:1.45}.barker-poster{float:left;width:78px;aspect-ratio:2/3;object-fit:cover;margin:0 14px 8px 0;border-radius:7px}
+.barker{position:sticky;top:105px;z-index:30;isolation:isolate;display:grid;grid-template-columns:minmax(220px,40%) 1fr;gap:22px;align-items:center;margin-bottom:16px;padding:14px;border:1px solid rgba(150,195,255,.55);border-radius:16px;background:rgba(8,24,55,.99);box-shadow:0 12px 35px rgba(0,5,18,.65)}.barker-video-wrap{position:relative;aspect-ratio:16/9;background:#000;border-radius:12px;overflow:hidden;border:1px solid rgba(124,195,255,.35)}.barker video{width:100%;height:100%;object-fit:contain;background:#000;display:block;cursor:pointer}.barker-mute{position:absolute;right:8px;bottom:8px;z-index:2;min-height:38px;padding:7px 11px;background:rgba(5,10,18,.9)}.barker.external-active .barker-video-wrap{visibility:hidden}.barker-copy{position:relative;min-width:0}.barker.external-active .barker-copy{padding-right:170px}.embedded-return{display:none;position:absolute;right:0;top:0;min-height:44px;padding:9px 14px;border:2px solid var(--accent);border-radius:10px;background:#111a27;color:#fff;font-weight:900;cursor:pointer}.barker.external-active .embedded-return{display:inline-flex;align-items:center}.barker-kicker{color:#7cc3ff;font-weight:900;letter-spacing:.14em}.barker h2{font-size:clamp(22px,3vw,38px);margin:8px 0}.barker-meta{font-weight:800;color:#fff}.barker-summary{color:#dce9fb;line-height:1.45}.barker-content-rating{display:inline-flex;margin-top:2px;padding:3px 9px;border:1px solid var(--line-strong);border-radius:999px;background:var(--panel2);font-size:13px;font-weight:900}.barker-content-rating:empty{display:none}.barker-poster{float:left;width:78px;aspect-ratio:2/3;object-fit:cover;margin:0 14px 8px 0;border-radius:7px}
 video::-webkit-media-controls-wireless-playback-picker-button{display:none!important}
 .muted{color:var(--muted)}
 .guide-wrap{overflow:auto;max-height:60vh;border:1px solid var(--line-strong);border-radius:14px;position:relative;background:var(--panel);box-shadow:0 10px 40px rgba(0,8,24,.45),inset 0 1px 0 rgba(255,255,255,.04);-webkit-overflow-scrolling:touch;touch-action:pan-x pan-y;overscroll-behavior:contain}
 .guide{min-width:2200px}
 .time-row,.channel-row{display:grid;grid-template-columns:258px 1fr}
 .time-row{position:sticky;top:0;z-index:5;background:var(--panel-strong);border-bottom:1px solid var(--line-strong)}
-.channel-name{position:sticky;left:0;z-index:7;background:#0a142a;border-right:1px solid var(--line-strong);border-bottom:1px solid var(--line);padding:6px 10px;display:flex;align-items:center;gap:9px;box-shadow:8px 0 14px rgba(2,7,18,.72)}
+.time-row .channel-name{cursor:default}.time-row .channel-name:hover{background:#0a142a}
+.channel-name{position:sticky;left:0;z-index:7;background:#0a142a;border:0;border-right:1px solid var(--line-strong);border-bottom:1px solid var(--line);border-radius:0;min-height:50px;padding:5px 10px;display:flex;align-items:center;justify-content:flex-start;gap:8px;box-shadow:8px 0 14px rgba(2,7,18,.72);color:#eaf2ff;text-decoration:none;text-align:left;cursor:pointer}.channel-name:hover{background:#13274b;border-color:var(--accent)}.channel-name:focus-visible{outline:3px solid var(--gold);outline-offset:-3px}.chan-logo{flex:0 0 auto;width:34px;height:34px;border-radius:8px;background-image:url('/assets/channel-logos-sprite-20260910.png');background-repeat:no-repeat;background-size:500% 500%;background-position:var(--logo-x) var(--logo-y);opacity:.8;filter:saturate(.72) contrast(.92) brightness(.94);box-shadow:0 1px 5px rgba(0,0,0,.35)}.channel-name:hover .chan-logo{opacity:.96;filter:saturate(.88) contrast(.96)}.chan-logo.simpsons-logo{background-image:url('/assets/channel-logo-simpsons-clean.png');background-size:contain;background-position:center;background-color:transparent;filter:saturate(.78) brightness(.94)}
 .chan-badge{flex:0 0 auto;min-width:34px;text-align:center;padding:4px 7px;border-radius:7px;font-weight:900;font-size:12px;color:#04101f;background:linear-gradient(180deg,var(--accent2),var(--accent));box-shadow:0 0 10px -2px var(--accent)}
 .chan-badge.simpsons{background:linear-gradient(180deg,#ffd23f,#f5b400);box-shadow:0 0 10px -2px #f5b400}
 .chan-meta{display:flex;flex-direction:column;overflow:hidden}
@@ -1344,14 +1898,14 @@ video::-webkit-media-controls-wireless-playback-picker-button{display:none!impor
 .dp-desc{margin:0 0 12px;color:#dce7fa;max-width:80ch}
 .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}
 input[type=date]{min-height:44px;padding:9px;background:var(--panel-strong);color:#eaf2ff;border:1px solid var(--line-strong);border-radius:7px}
-@media(max-width:720px){.barker{position:relative;top:auto;display:grid;grid-template-columns:1fr;gap:12px;padding:12px}.barker-video-wrap{width:100%;max-height:none}.barker-copy{padding:0 4px 3px}.barker h2{font-size:27px;line-height:1.08}.barker-meta{font-size:15px}.barker-summary{font-size:15px;line-height:1.5;max-height:none;overflow:visible}.barker-poster{width:72px;margin-right:13px}.guide{min-width:1450px}.time-row,.channel-row{grid-template-columns:138px 1fr}.channel-name{padding:6px;gap:6px}.chan-meta b{font-size:12px;white-space:normal;line-height:1.15}.guide-wrap{max-height:62vh}.details-panel{grid-template-columns:1fr}.dp-art{width:100%;height:160px}}
+@media(max-width:720px){.barker{position:relative;top:auto;display:grid;grid-template-columns:1fr;gap:12px;padding:12px}.barker-video-wrap{width:100%;max-height:none}.barker-copy{padding:0 4px 3px}.barker.external-active .barker-copy{padding:0 4px 3px}.embedded-return{position:relative;right:auto;top:auto;float:right;margin:0 0 8px 10px}.barker h2{font-size:27px;line-height:1.08}.barker-meta{font-size:15px}.barker-summary{font-size:15px;line-height:1.5;max-height:none;overflow:visible}.barker-poster{width:72px;margin-right:13px}.guide{min-width:1450px}.time-row,.channel-row{grid-template-columns:180px 1fr}.channel-name{padding:5px 7px;gap:7px}.chan-logo{width:32px;height:32px}.chan-badge{display:none}.chan-meta b{font-size:12px;white-space:normal;line-height:1.15}.guide-wrap{max-height:62vh}.details-panel{grid-template-columns:1fr}.dp-art{width:100%;height:160px}}
 @media(max-height:600px) and (pointer:coarse){header{position:relative;padding:8px 12px}.top{gap:6px}.brand{font-size:18px}nav{margin-top:7px}nav button,header a.btn{min-height:38px;padding:7px 10px}.barker{position:relative;top:auto;grid-template-columns:minmax(210px,40%) 1fr;gap:12px;padding:9px;margin-bottom:9px}.barker h2{font-size:20px;margin:3px 0}.barker-kicker{font-size:10px}.barker-meta,.barker-summary{font-size:12px;line-height:1.25}.barker-summary{max-height:3.75em;overflow:auto}.barker-poster{width:48px;margin:2px 8px 3px 0}.toolbar{margin-bottom:7px}.guide{min-width:1450px}.time-row,.channel-row{grid-template-columns:138px 1fr}.guide-wrap{max-height:66vh}}
 """
 
 GUIDE_PAGE = r'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>CineMediaVault Virtual Channels</title><style>__STYLE__</style></head><body>
 <header><div class="top"><div class="brand">CineMedia<b>Vault</b> Virtual Channels</div><div><a class="btn" href="/live-tv">Physical Live TV</a><a class="btn" href="/">Home</a></div></div>
 <nav><button data-kind="movie" class="__MOVIE_ACTIVE__">Virtual Movies</button><button data-kind="tv" class="__TV_ACTIVE__">Virtual TV</button><button id="miniPreviewToggle" type="button" aria-pressed="true">Channel Previews: On</button></nav></header>
-<main><section class="barker" id="barker"><div class="barker-video-wrap"><video id="barkerVideo" autoplay playsinline preload="metadata" disableRemotePlayback x-webkit-airplay="deny" aria-label="Upcoming programme preview; tap if audio is blocked"></video><button id="barkerMute" class="barker-mute" type="button" aria-pressed="false">Mute</button></div><div class="barker-copy"><div id="barkerKicker" class="barker-kicker">COMING UP ON CINEMEDIAVAULT</div><img id="barkerPoster" class="barker-poster" alt=""><h2 id="barkerTitle">Building your preview reel…</h2><div id="barkerMeta" class="barker-meta"></div><p id="barkerSummary" class="barker-summary"></p></div></section>
+<main><section class="barker" id="barker"><div class="barker-video-wrap"><video id="barkerVideo" autoplay playsinline preload="metadata" disableRemotePlayback x-webkit-airplay="deny" aria-label="Upcoming programme preview; tap if audio is blocked"></video><button id="barkerMute" class="barker-mute" type="button" aria-pressed="false">Mute</button></div><div class="barker-copy"><button id="embeddedReturn" class="embedded-return" type="button">Return to Player</button><div id="barkerKicker" class="barker-kicker">COMING UP ON CINEMEDIAVAULT</div><img id="barkerPoster" class="barker-poster" alt=""><h2 id="barkerTitle">Building your preview reel…</h2><div id="barkerMeta" class="barker-meta"></div><p id="barkerSummary" class="barker-summary"></p><div id="barkerContentRating" class="barker-content-rating"></div></div></section>
 <div class="toolbar"><button id="prev">&larr; Earlier</button><button id="today" class="primary">Now</button><button id="next">Later &rarr;</button>
 <input type="date" id="day" min="__MIN_DATE__" max="__MAX_DATE__" value="__TODAY__"><span id="guideInfo" class="muted"></span></div>
 <div class="guide-wrap"><div id="grid" class="guide">Loading&hellip;</div></div>
@@ -1359,27 +1913,50 @@ GUIDE_PAGE = r'''<!doctype html><html><head><meta name="viewport" content="width
 </main>
 <script src="/assets/hls.min.js"></script>
 <script>
-let kind='__INITIAL_KIND__',start=Math.floor(Date.now()/1800000)*1800,tz='America/Denver',hours=8,selectedKey=null,lastData=null,guideBoundaryTimer=null;
+let kind='__INITIAL_KIND__',start=Math.floor(Date.now()/1800000)*1800,tz='America/Denver',hours=8,selectedKey=null,lastData=null,guideBoundaryTimer=null,guideRequest=null,guideSerial=0;
+const guideCache=new Map(),GUIDE_CACHE_MS=30000;
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const titleWithYear=item=>{const title=item?.title||item?.next_title||'Coming up',year=item?.year||item?.next_year||'';return year&&!title.includes(`(${year})`)?`${title} (${year})`:title};
 function dt(t){return new Date(t*1000).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})}
 function promoDt(t){const d=new Date(t*1000);return `${d.toLocaleDateString([],{weekday:'short',month:'short',day:'numeric'})} · ${d.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})}`}
 function fmtRemaining(sec){if(sec<=0)return'';const h=Math.floor(sec/3600),m=Math.round((sec%3600)/60);return h>0?`${h}h ${m}m`:`${m}m`}
 const barker=(()=>{
-  const video=document.getElementById('barkerVideo'),mute=document.getElementById('barkerMute');let state=null,infoTimer=null,soundEnabled=false,loadedSlot=null,userMuted=localStorage.getItem('cinevault.barkerMuted')==='true';
+  const video=document.getElementById('barkerVideo'),mute=document.getElementById('barkerMute');let state=null,infoTimer=null,soundEnabled=false,loadedSlot=null,userMuted=localStorage.getItem('cinevault.barkerMuted')==='true',externalActive=false,playbackEpoch=0;
   function clearMedia(){clearInterval(infoTimer);infoTimer=null;loadedSlot=null;try{video.pause();video.removeAttribute('src');video.load()}catch(_e){}}
-  function show(item){document.getElementById('barkerTitle').textContent=item?.title||'Coming up';document.getElementById('barkerMeta').textContent=item?`${promoDt(item.airtime)} · ${item.channel_number||''} ${item.channel||''}${item.subtitle?' · '+item.subtitle:''}`:'';document.getElementById('barkerSummary').textContent=item?.summary||'';const p=document.getElementById('barkerPoster');p.src=item?.poster||'';p.style.display=item?.poster?'block':'none'}
-  function sync(){const list=state?.programmes||[];if(!list.length)return;const duration=Math.max(1,Number(state.duration)||3600),position=((Date.now()/1000-Number(state.slot_start))%duration+duration)%duration,index=Math.floor(position/60)%list.length;show(list[index]);if(Math.abs((Number(video.currentTime)||0)-position)>4&&Number.isFinite(video.duration))video.currentTime=Math.min(position,Math.max(0,video.duration-.25))}
+  let showToken=0,shownKey='';
+  function commit(item,posterUrl){
+    document.getElementById('barkerTitle').textContent=titleWithYear(item);
+    document.getElementById('barkerMeta').textContent=item?`${promoDt(item.airtime)} · ${item.channel_number||''} ${item.channel||''}${item.subtitle?' · '+item.subtitle:''}`:'';
+    document.getElementById('barkerSummary').textContent=item?.summary||'';
+    document.getElementById('barkerContentRating').textContent=item?.content_rating||'';
+    const p=document.getElementById('barkerPoster');p.src=posterUrl||'';p.style.display=posterUrl?'block':'none';
+  }
+  function show(item){
+    const raw=item?.poster||'',key=[item?.metadata_signature,item?.title,item?.airtime,raw].join('|');
+    if(key===shownKey)return;
+    const token=++showToken,version=item?.metadata_signature||`${state?.generated_at||state?.slot_start||''}-${item?.title||''}-${item?.airtime||''}`;
+    if(!raw){shownKey=key;commit(item,'');return}
+    const url=raw+(raw.includes('?')?'&':'?')+'cvb='+encodeURIComponent(version),probe=new Image();
+    probe.onload=()=>{if(token!==showToken)return;shownKey=key;commit(item,url)};
+    probe.onerror=()=>{if(token!==showToken)return;shownKey=key;commit(item,'')};
+    probe.src=url;
+  }
+  function sync(){const list=state?.programmes||[];if(!list.length)return;const duration=Math.max(1,Number(state.duration)||3600),segmentSeconds=Math.max(1,Number(state.segment_seconds)||37),position=((Date.now()/1000-Number(state.slot_start))%duration+duration)%duration,index=Math.floor(position/segmentSeconds)%list.length;show(list[index]);if(Math.abs((Number(video.currentTime)||0)-position)>4&&Number.isFinite(video.duration))video.currentTime=Math.min(position,Math.max(0,video.duration-.25))}
   function renderMute(){mute.textContent=userMuted?'Unmute':'Mute';mute.setAttribute('aria-pressed',String(userMuted))}
-  function startAudible(){video.muted=userMuted;if(userMuted)return video.play().catch(()=>{});return video.play().then(()=>{soundEnabled=true;localStorage.setItem('cinevault.barkerSound','on')}).catch(()=>{video.muted=true;return video.play().catch(()=>{})})}
-  async function load(){if(document.getElementById('barker').classList.contains('external-active'))return;try{const response=await fetch('/api/vchannels/barker/status',{cache:'no-store'}),next=await response.json();if(!next.available){show({title:'The new preview reel is being prepared',summary:'The guide remains available while CineMediaVault finishes the next video.'});return}state=next;const duration=Math.max(1,Number(state.duration)||3600),position=((Date.now()/1000-Number(state.slot_start))%duration+duration)%duration;if(loadedSlot!==state.slot_start){loadedSlot=state.slot_start;video.src='/api/vchannels/barker/video?v='+state.slot_start;video.addEventListener('loadedmetadata',()=>{video.currentTime=Math.min(position,Math.max(0,video.duration-.25));video.muted=false;startAudible()},{once:true})}else if(video.paused){startAudible()}sync();clearInterval(infoTimer);infoTimer=setInterval(sync,1000)}catch(_e){show({title:'Preview temporarily unavailable',summary:'CineMediaVault will retry automatically.'})}}
-  function suspend(){clearInterval(infoTimer);infoTimer=null;video.pause()}
-  function resume(){document.getElementById('barker').classList.remove('external-active');document.getElementById('barkerKicker').textContent='COMING UP ON CINEMEDIAVAULT';load()}
-  function external(info){suspend();document.getElementById('barker').classList.add('external-active');document.getElementById('barkerKicker').textContent='NOW PLAYING';show(info||{})}
-  mute.addEventListener('click',event=>{event.stopPropagation();userMuted=!userMuted;localStorage.setItem('cinevault.barkerMuted',String(userMuted));video.muted=userMuted;renderMute();if(!userMuted)video.play().catch(()=>{})});renderMute();
-  video.addEventListener('click',()=>{soundEnabled=true;userMuted=false;video.muted=false;localStorage.setItem('cinevault.barkerMuted','false');localStorage.setItem('cinevault.barkerSound','on');renderMute();video.play().catch(()=>{})});video.addEventListener('ended',load);return{load,refresh:load,stop:clearMedia,suspend,resume,external};
+  function ownsBarker(epoch){return new URLSearchParams(location.search).get('embedded')!=='1'&&!externalActive&&epoch===playbackEpoch&&!document.getElementById('barker').classList.contains('external-active')}
+  function startAudible(epoch=playbackEpoch){if(!ownsBarker(epoch)){video.muted=true;video.pause();return Promise.resolve()}video.muted=userMuted;if(userMuted)return video.play().catch(()=>{});return video.play().then(()=>{if(!ownsBarker(epoch)){video.muted=true;video.pause();return}soundEnabled=true;localStorage.setItem('cinevault.barkerSound','on')}).catch(()=>{video.muted=true;return ownsBarker(epoch)?video.play().catch(()=>{}):Promise.resolve()})}
+  async function load(){const epoch=playbackEpoch;if(!ownsBarker(epoch))return;try{const response=await fetch('/api/vchannels/barker/status?kind='+encodeURIComponent(kind),{cache:'no-store'}),next=await response.json();if(!ownsBarker(epoch))return;if(!next.available){show({title:'The new preview reel is being prepared',summary:'The guide remains available while CineMediaVault finishes the next video.'});return}state=next;const duration=Math.max(1,Number(state.duration)||3600),position=((Date.now()/1000-Number(state.slot_start))%duration+duration)%duration,reelKey=[state.slot_start,state.generated_at,state.restart_token,state.filename].join('-');if(loadedSlot!==reelKey){loadedSlot=reelKey;video.src='/api/vchannels/barker/video?kind='+encodeURIComponent(kind)+'&v='+encodeURIComponent(reelKey);video.addEventListener('loadedmetadata',()=>{if(!ownsBarker(epoch)){video.muted=true;video.pause();return}video.currentTime=Math.min(position,Math.max(0,video.duration-.25));startAudible(epoch);sync()},{once:true})}else if(video.paused){startAudible(epoch)}if(!ownsBarker(epoch))return;sync();clearInterval(infoTimer);infoTimer=setInterval(()=>{if(ownsBarker(epoch))sync();else{clearInterval(infoTimer);infoTimer=null}},1000)}catch(_e){if(ownsBarker(epoch))show({title:'Preview temporarily unavailable',summary:'CineMediaVault will retry automatically.'})}}
+  function suspend(){externalActive=true;playbackEpoch++;clearInterval(infoTimer);infoTimer=null;video.muted=true;video.pause()}
+  function resume(){externalActive=false;playbackEpoch++;document.getElementById('barker').classList.remove('external-active');document.getElementById('barkerKicker').textContent='COMING UP ON CINEMEDIAVAULT';load()}
+  function external(info){document.getElementById('barker').classList.add('external-active');suspend();document.getElementById('barkerKicker').textContent='NOW PLAYING';show(info||{})}
+  mute.addEventListener('click',event=>{event.stopPropagation();if(externalActive)return;userMuted=!userMuted;localStorage.setItem('cinevault.barkerMuted',String(userMuted));video.muted=userMuted;renderMute();if(!userMuted)startAudible()});renderMute();
+  video.addEventListener('click',()=>{if(externalActive)return;soundEnabled=true;userMuted=false;video.muted=false;localStorage.setItem('cinevault.barkerMuted','false');localStorage.setItem('cinevault.barkerSound','on');renderMute();startAudible()});video.addEventListener('ended',()=>{if(!externalActive)load()});return{load,refresh:load,stop:clearMedia,suspend,resume,external};
 })();
-window.cinevaultSetActiveProgram=info=>barker.external(info);
-window.cinevaultClearActiveProgram=()=>barker.resume();
+let embeddedReturnAction=null;
+document.getElementById('embeddedReturn').addEventListener('click',()=>embeddedReturnAction?.());
+window.cinevaultSetActiveProgram=(info,returnAction)=>{embeddedReturnAction=typeof returnAction==='function'?returnAction:embeddedReturnAction;barker.external(info)};
+window.cinevaultSetReturnAction=returnAction=>{embeddedReturnAction=typeof returnAction==='function'?returnAction:null};
+window.cinevaultClearActiveProgram=()=>{embeddedReturnAction=null;barker.resume()};
 window.cinevaultBarkerRect=()=>{const el=document.querySelector('.barker-video-wrap');if(!el)return null;const r=el.getBoundingClientRect();return{left:r.left,top:r.top,width:r.width,height:r.height}};
 function scheduleBarkerRefresh(){const now=new Date(),next=new Date(now);next.setHours(24,0,5,0);setTimeout(()=>{barker.refresh().finally(scheduleBarkerRefresh)},Math.max(1000,next-now))}
 const embeddedGuide=new URLSearchParams(location.search).get('embedded')==='1';
@@ -1448,23 +2025,23 @@ const previews=(()=>{
   renderToggle();
   return {watch:watch,detachAll:detachAll,teardownAll:()=>detachAll(true),isEnabled:()=>enabled,setEnabled:setEnabled};
 })();
-async function loadGuide(){
-  const r=await fetch(`/api/vchannels/guide?kind=${kind}&from=${start}&hours=${hours}`,{cache:'no-store'}),d=await r.json();
+function renderGuide(d,renderKind){
   lastData=d;
   const span=d.end-d.start;
   guideInfo.textContent=`${d.channels.length} channels · ${dt(d.start)}–${dt(d.end)}`;
   let times='<div class="time-row"><div class="channel-name"><b>Channels</b></div><div class="time-labels">';
   for(let t=d.start;t<=d.end;t+=1800) times+=`<span style="left:${(t-d.start)/span*100}%">${dt(t)}</span>`;
   times+='</div></div>';
-  let rows=d.channels.map(ch=>{
+  let rows=d.channels.map((ch,channelIndex)=>{
     let ps=ch.programmes.map(p=>{
       const left=Math.max(0,(p.start-d.start)/span*100),right=Math.min(100,(p.stop-d.start)/span*100),w=Math.max(.7,right-left);
       if(p.holding){const key=`${ch.id}:holding:${p.start}`,sel=key===selectedKey?' selected':'';return `<button type="button" class="program holding${sel}" style="left:${left}%;width:${w}%" data-channel="${ch.id}" data-key="${key}" data-json='${JSON.stringify(p).replace(/'/g,'&#39;')}'><b>Off Air</b><span class="muted">Next: ${esc(p.next_title||'')}${p.next_start?' at '+dt(p.next_start):''}</span></button>`}
       const key=`${ch.id}:${p.start}`,sel=key===selectedKey?' selected':'';
-      return `<button type="button" class="program ${p.is_now?'now':''}${sel}" style="left:${left}%;width:${w}%" data-channel="${ch.id}" data-key="${key}" data-json='${JSON.stringify(p).replace(/'/g,'&#39;')}'><b>${esc(p.title)}</b><span class="muted">${esc(p.subtitle||'')}${p.rating?' &#9733;'+Number(p.rating).toFixed(1):''}</span></button>`;
+      return `<button type="button" class="program ${p.is_now?'now':''}${sel}" style="left:${left}%;width:${w}%" data-channel="${ch.id}" data-key="${key}" data-json='${JSON.stringify(p).replace(/'/g,'&#39;')}'><b>${esc(p.title)}</b><span class="muted">${esc(p.subtitle||'')}${p.rating?' &#9733;'+Number(p.rating).toFixed(1):''}${p.content_rating?' · '+esc(p.content_rating):''}</span></button>`;
     }).join('');
     const now=(Date.now()/1000-d.start)/span*100;
-    return `<div class="channel-row"><div class="channel-name"><span class="chan-badge${ch.slug==='t12'?' simpsons':''}">${esc(ch.number)}</span><div class="chan-preview" data-channel="${ch.id}"><div class="preview-slot" aria-hidden="true"></div></div><div class="chan-meta"><b>${esc(ch.name)}</b></div></div><div class="timeline">${now>=0&&now<=100?`<i class="now-line" style="left:${now}%"></i>`:''}${ps}</div></div>`;
+    const logoIndex=(renderKind==='movie'?0:10)+channelIndex,logoCol=logoIndex%5,logoRow=Math.floor(logoIndex/5),logoX=logoCol*25,logoY=logoRow*25;
+    return `<div class="channel-row"><a class="channel-name" href="/watch/vchannel/${ch.id}" aria-label="Watch ${esc(ch.name)} live" title="Watch ${esc(ch.name)} live"><span class="chan-badge${ch.slug==='t12'?' simpsons':''}">${esc(ch.number)}</span><span class="chan-logo${ch.slug==='t12'?' simpsons-logo':''}" style="--logo-x:${logoX}%;--logo-y:${logoY}%" aria-hidden="true"></span><div class="chan-preview" data-channel="${ch.id}"><div class="preview-slot" aria-hidden="true"></div></div><div class="chan-meta"><b>${esc(ch.name)}</b><small>Watch live</small></div></a><div class="timeline">${now>=0&&now<=100?`<i class="now-line" style="left:${now}%"></i>`:''}${ps}</div></div>`;
   }).join('');
   previews.detachAll(false);
   grid.innerHTML=times+rows;
@@ -1473,6 +2050,26 @@ async function loadGuide(){
   const nowSec=Date.now()/1000,bounds=[];
   d.channels.forEach(ch=>(ch.programmes||[]).forEach(p=>{if(p.start>nowSec)bounds.push(p.start);if(p.stop>nowSec)bounds.push(p.stop)}));
   if(bounds.length){const next=Math.min(...bounds);guideBoundaryTimer=setTimeout(loadGuide,Math.max(500,(next-nowSec)*1000+250))}
+}
+function guideCacheKey(requestKind,requestStart){return `${requestKind}:${requestStart}:${hours}`}
+function prefetchOtherGuide(requestKind,requestStart){
+  const other=requestKind==='movie'?'tv':'movie',key=guideCacheKey(other,requestStart),cached=guideCache.get(key);
+  if(cached&&Date.now()-cached.saved<GUIDE_CACHE_MS)return;
+  fetch(`/api/vchannels/guide?kind=${other}&from=${requestStart}&hours=${hours}`,{cache:'no-store'}).then(r=>r.ok?r.json():null).then(data=>{if(data)guideCache.set(key,{saved:Date.now(),data})}).catch(()=>{});
+}
+async function loadGuide(){
+  const requestKind=kind,requestStart=start,key=guideCacheKey(requestKind,requestStart),serial=++guideSerial,cached=guideCache.get(key);
+  if(cached&&Date.now()-cached.saved<GUIDE_CACHE_MS){renderGuide(cached.data,requestKind);prefetchOtherGuide(requestKind,requestStart);return}
+  if(guideRequest)guideRequest.abort();
+  const controller=new AbortController();guideRequest=controller;
+  try{
+    const r=await fetch(`/api/vchannels/guide?kind=${requestKind}&from=${requestStart}&hours=${hours}`,{cache:'no-store',signal:controller.signal});
+    if(!r.ok)throw new Error(`Guide request failed: ${r.status}`);
+    const d=await r.json();
+    if(serial!==guideSerial||requestKind!==kind||requestStart!==start)return;
+    guideCache.set(key,{saved:Date.now(),data:d});renderGuide(d,requestKind);prefetchOtherGuide(requestKind,requestStart);
+  }catch(error){if(error.name!=='AbortError')grid.innerHTML='<div class="details-panel empty"><div>Guide temporarily unavailable. Please try again.</div></div>'}
+  finally{if(guideRequest===controller)guideRequest=null}
 }
 function renderDetails(p,channelId){
   selectedKey=`${channelId}:${p.start}`;
@@ -1484,8 +2081,8 @@ function renderDetails(p,channelId){
   const status=p.holding?(p.next_start?`Off air · next at ${dt(p.next_start)}`:'Off air'):(isLive?`Live now · ${remaining} remaining`:(p.start>now?`Starts ${dt(p.start)}`:'Recently aired'));
   const art=p.poster?`<img class="dp-art" src="${esc(p.poster)}" alt="">`:`<div class="dp-art placeholder">No artwork</div>`;
   panel.innerHTML=`${art}<div class="dp-body">
-    <h2>${esc(p.holding?(p.next_title||'Coming up'):p.title)}</h2>
-    <div class="dp-meta"><span class="badge">${esc(status)}</span>${!p.holding?`<span class="badge">${dt(p.start)}–${dt(p.stop)}</span>`:''}${(p.holding?p.next_subtitle:p.subtitle)?`<span class="badge">${esc(p.holding?p.next_subtitle:p.subtitle)}</span>`:''}${(p.holding?p.next_rating:p.rating)?`<span class="badge">&#9733; ${Number(p.holding?p.next_rating:p.rating).toFixed(1)}</span>`:''}</div>
+    <h2>${esc(titleWithYear(p.holding?{title:p.next_title,year:p.next_year}:p))}</h2>
+    <div class="dp-meta"><span class="badge">${esc(status)}</span>${!p.holding?`<span class="badge">${dt(p.start)}–${dt(p.stop)}</span>`:''}${(p.holding?p.next_subtitle:p.subtitle)?`<span class="badge">${esc(p.holding?p.next_subtitle:p.subtitle)}</span>`:''}${(p.holding?p.next_rating:p.rating)?`<span class="badge">&#9733; ${Number(p.holding?p.next_rating:p.rating).toFixed(1)}</span>`:''}${(p.holding?p.next_content_rating:p.content_rating)?`<span class="badge">${esc(p.holding?p.next_content_rating:p.content_rating)}</span>`:''}</div>
     <p class="dp-desc">${esc(p.overview||'No description available.')}</p>
     <div class="actions">
       ${!p.holding?`<a class="btn primary" href="/watch/vchannel/${channelId}">Watch Live</a>`:''}
@@ -1495,14 +2092,15 @@ function renderDetails(p,channelId){
   const btn=grid.querySelector(`.program[data-key="${selectedKey}"]`);
   if(btn)btn.classList.add('selected');
 }
+function navigateFromGuide(href){let moved=false;const go=()=>{if(moved)return;moved=true;if(window.self!==window.top){window.parent.postMessage({type:'cinevault-guide-navigate',href:href},location.origin)}else{location.href=href}};previews.teardownAll();queueMicrotask(go)}
 grid.addEventListener('click',e=>{const b=e.target.closest('button.program');if(!b||!b.dataset.json)return;
-  renderDetails(JSON.parse(b.dataset.json),b.dataset.channel)});
-document.addEventListener('click',e=>{const a=e.target.closest('a[href]');if(!a||a.target==='_blank')return;e.preventDefault();const href=a.href;let moved=false;const go=()=>{if(moved)return;moved=true;if(window.self!==window.top){window.parent.postMessage({type:'cinevault-guide-navigate',href:href},location.origin)}else{location.href=href}};previews.teardownAll().finally(go);setTimeout(go,350)},true);
+  const p=JSON.parse(b.dataset.json);renderDetails(p,b.dataset.channel)});
+document.addEventListener('click',e=>{const a=e.target.closest('a[href]');if(!a||a.target==='_blank')return;e.preventDefault();navigateFromGuide(a.href)},true);
 function clearSelection(){selectedKey=null;detailsPanel.classList.add('empty');detailsPanel.innerHTML='<div>Select a program in the grid to see details here.</div>';
   document.querySelectorAll('.program.selected').forEach(x=>x.classList.remove('selected'))}
-document.querySelector('nav').onclick=e=>{const b=e.target.closest('button[data-kind]');if(!b)return;kind=b.dataset.kind;
+document.querySelector('nav').onclick=e=>{const b=e.target.closest('button[data-kind]');if(!b||b.dataset.kind===kind)return;kind=b.dataset.kind;
   document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('active',x===b));
-  history.replaceState(null,'','/vchannels/'+(kind==='movie'?'movies':'tv'));clearSelection();barker.load();previews.teardownAll().finally(loadGuide)};
+  history.replaceState(null,'','/vchannels/'+(kind==='movie'?'movies':'tv'));clearSelection();previews.teardownAll();loadGuide()};
 prev.onclick=()=>{start-=hours*1800;loadGuide()};next.onclick=()=>{start+=hours*1800;loadGuide()};
 today.onclick=()=>{start=Math.floor(Date.now()/1800000)*1800;day.value=new Date().toLocaleDateString('en-CA',{timeZone:tz});loadGuide()};
 day.onchange=()=>{const [y,m,dd]=day.value.split('-').map(Number);start=Math.floor(new Date(y,m-1,dd,0,0,0).getTime()/1000);loadGuide()};
@@ -1533,7 +2131,7 @@ document.addEventListener('visibilitychange',()=>{if(document.visibilityState===
 window.cinevaultActivateEmbedded=()=>{embeddedActive=true;if(previews.isEnabled())document.querySelectorAll('.chan-preview').forEach(el=>previews.watch(el))};
 window.cinevaultDeactivateEmbedded=()=>{embeddedActive=false;previews.teardownAll()};
 window.addEventListener('pagehide',()=>{barker.stop();previews.teardownAll()});
-if(!embeddedGuide)barker.load();loadGuide();setInterval(loadGuide,60000);
+if(!embeddedGuide){barker.load();setInterval(()=>barker.refresh(),15000)}loadGuide();setInterval(loadGuide,60000);
 </script></body></html>'''
 
 COMBINED_BARKER_PAGE = r'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>CineMediaVault Promo Channel</title><style>
@@ -1542,8 +2140,8 @@ COMBINED_BARKER_PAGE = r'''<!doctype html><html><head><meta name="viewport" cont
 <script>
 const video=document.getElementById('channel'),notice=document.getElementById('notice'),message=document.getElementById('message'),topbar=document.getElementById('top');let status=null,hideTimer=null,infoTimer=null;
 function reveal(){topbar.classList.add('show');clearTimeout(hideTimer);hideTimer=setTimeout(()=>topbar.classList.remove('show'),3000)}
-function renderInfo(){const list=status?.programmes||[];if(!list.length)return;const index=Math.floor((Number(video.currentTime)||0)/60)%list.length,item=list[index]||list[0];title.textContent=item.title||'Coming up';subtitle.textContent=item.subtitle||'';meta.textContent=`${item.channel_number||''} ${item.channel||''} · ${new Date(Number(item.airtime)*1000).toLocaleString([],{weekday:'long',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})}`;summary.textContent=item.summary||'';poster.src=item.poster||'';poster.style.display=item.poster?'block':'none'}
-async function tune(){try{const r=await fetch('/api/vchannels/barker/status',{cache:'no-store'});status=await r.json();if(!status.available)throw new Error(status.reason||'Promo channel is being prepared');const now=Math.floor(Date.now()/1000),duration=Math.max(1,Number(status.duration)||3600),offset=((now-Number(status.slot_start))%duration+duration)%duration;video.src='/api/vchannels/barker/video?v='+status.slot_start;video.addEventListener('loadedmetadata',()=>{video.currentTime=Math.min(offset,Math.max(0,video.duration-.25));renderInfo();clearInterval(infoTimer);infoTimer=setInterval(renderInfo,1000);video.muted=false;video.play().then(()=>notice.classList.remove('show')).catch(()=>{message.textContent='Press OK to start the promo channel';notice.classList.add('show')})},{once:true});video.addEventListener('ended',tune,{once:true})}catch(e){message.textContent=e.message;message.classList.add('error');notice.classList.add('show');setTimeout(tune,15000)}}
+function renderInfo(){const list=status?.programmes||[];if(!list.length)return;const segmentSeconds=Number(status?.segment_seconds||37),index=Math.floor((Number(video.currentTime)||0)/segmentSeconds)%list.length,item=list[index]||list[0],name=item.title||'Coming up';title.textContent=item.year&&!name.includes(`(${item.year})`)?`${name} (${item.year})`:name;subtitle.textContent=item.subtitle||'';meta.textContent=`${item.channel_number||''} ${item.channel||''} · ${new Date(Number(item.airtime)*1000).toLocaleString([],{weekday:'long',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})}`;summary.textContent=item.summary||'';poster.src=item.poster||'';poster.style.display=item.poster?'block':'none'}
+async function tune(){try{const r=await fetch('/api/vchannels/barker/status',{cache:'no-store'});status=await r.json();if(!status.available)throw new Error(status.reason||'Promo channel is being prepared');const now=Math.floor(Date.now()/1000),duration=Math.max(1,Number(status.duration)||3600),offset=((now-Number(status.slot_start))%duration+duration)%duration,reelKey=[status.slot_start,status.generated_at,status.restart_token,status.filename].join('-');video.src='/api/vchannels/barker/video?v='+encodeURIComponent(reelKey);video.addEventListener('loadedmetadata',()=>{video.currentTime=Math.min(offset,Math.max(0,video.duration-.25));renderInfo();clearInterval(infoTimer);infoTimer=setInterval(renderInfo,1000);video.muted=false;video.play().then(()=>notice.classList.remove('show')).catch(()=>{message.textContent='Press OK to start the promo channel';notice.classList.add('show')})},{once:true});video.addEventListener('ended',tune,{once:true})}catch(e){message.textContent=e.message;message.classList.add('error');notice.classList.add('show');setTimeout(tune,15000)}}
 function activate(){if(video.paused)video.play().then(()=>notice.classList.remove('show')).catch(()=>{});reveal()}
 document.addEventListener('click',activate);document.addEventListener('keydown',e=>{if(['Enter',' ','MediaPlay','MediaPlayPause'].includes(e.key)){activate();e.preventDefault()}else reveal()});document.addEventListener('mousemove',reveal);tune();
 </script></body></html>'''
@@ -1560,7 +2158,7 @@ video{width:100%;max-height:calc(100vh - 66px);background:#000;display:block}
 body.channel-fullscreen{overflow:hidden}body.channel-fullscreen header,body.channel-fullscreen .bar{display:none}
 body.channel-fullscreen .now-info,.guide-open .now-info{display:none}
 body.channel-fullscreen video#v{position:fixed;inset:0;width:100vw;height:100vh;height:100dvh;max-height:none;object-fit:contain;background:#000}
-.guide-drawer{display:none;position:fixed;inset:0;z-index:30;background:#05070b}.guide-drawer.open{display:block}.guide-drawer iframe{width:100%;height:100%;border:0}.guide-close{position:fixed;right:16px;top:16px;z-index:33}.guide-open video#v{position:fixed;left:16px;top:16px;width:min(38vw,540px);height:auto;aspect-ratio:16/9;max-height:none;z-index:32;border:1px solid rgba(124,195,255,.35);border-radius:12px;object-fit:contain;cursor:pointer}.guide-open header,.guide-open .bar{display:none}
+.guide-drawer{display:none;position:fixed;inset:0;z-index:30;background:#05070b}.guide-drawer.open{display:block}.guide-drawer iframe{width:100%;height:100%;border:0}.guide-open video#v{position:fixed;left:16px;top:16px;width:min(38vw,540px);height:auto;aspect-ratio:16/9;max-height:none;z-index:32;border:1px solid rgba(124,195,255,.35);border-radius:12px;object-fit:contain;cursor:pointer}.guide-open header,.guide-open .bar{display:none}
 video::-webkit-media-controls-wireless-playback-picker-button{display:none!important}
 .up-next{position:fixed;left:0;right:0;bottom:0;z-index:20;background:linear-gradient(0deg,rgba(4,7,14,.97),rgba(4,7,14,.82) 65%,transparent);display:flex;align-items:center;gap:18px;padding:20px 26px;pointer-events:none}
 .up-next.hidden{display:none}
@@ -1578,7 +2176,7 @@ video::-webkit-media-controls-wireless-playback-picker-button{display:none!impor
 <video id="v" autoplay playsinline disableRemotePlayback x-webkit-airplay="deny" __SOURCE_ATTR__>__CAPTION_TRACK__</video>
 <div class="bar">__PLAY_BEGINNING__<button id="fullScreen" type="button">Full Screen</button><button id="openGuide" type="button">Guide</button><span id="audioControlHost">__AUDIO_CONTROL__</span><label>CC <select id="captionSelect"><option value="off">Off</option></select></label></div>
 <section id="nowInfo" class="now-info"><img id="nowPoster" alt=""><div><div class="now-kicker">NOW PLAYING</div><h1 id="nowTitle"></h1><div id="nowMeta" class="now-meta"></div><p id="nowDescription" class="now-description"></p></div></section>
-<div class="guide-drawer" id="guideDrawer"><button class="guide-close" id="closeGuide" type="button">Return to Player</button><iframe id="guideFrame" title="CineVault Guide" src="/vchannels/__KIND_PATH__?embedded=1"></iframe></div>
+<div class="guide-drawer" id="guideDrawer"><iframe id="guideFrame" title="CineVault Guide" src="/vchannels/__KIND_PATH__?embedded=1"></iframe></div>
 <section id="upNext" class="up-next hidden" aria-live="polite"><img id="nextPoster" class="next-poster" alt=""><div><div class="next-label">Up Next</div><h1 id="nextTitle" class="next-title"></h1><div id="nextSubtitle" class="next-subtitle"></div><div class="next-countdown">Starting in <span id="nextCount" class="count-number">10</span> seconds</div></div></section>
 <script src="/assets/hls.min.js"></script>
 <script>
@@ -1587,14 +2185,13 @@ const guideDrawer=document.getElementById('guideDrawer'),guideFrame=document.get
 let offset=__OFFSET__,isHls=__IS_HLS__,src="__SOURCE__",next=__NEXT_JSON__,currentInfo=__CURRENT_JSON__,progStart=__ADVANCE_AFTER__,pinFor=__PIN_ADVANCE_AFTER__;
 let hls=null,directFallbackStarted=false;
 let guidePlacementTimer=null;
-function guideInfo(){return{title:currentInfo?.title||'Now Playing',subtitle:currentInfo?.subtitle||'',summary:currentInfo?.overview||'',poster:currentInfo?.poster||'',airtime:currentInfo?.start||0,channel:currentInfo?.channel||'',channel_number:currentInfo?.channel_number||''}}
-function syncGuidePlayer(){if(!document.body.classList.contains('guide-open'))return;try{const win=guideFrame.contentWindow,rect=win?.cinevaultBarkerRect?.();if(!rect)return;Object.assign(v.style,{left:rect.left+'px',top:rect.top+'px',width:rect.width+'px',height:rect.height+'px'});win.cinevaultSetActiveProgram?.(guideInfo())}catch(_e){}}
-function bindGuideFrame(){try{const doc=guideFrame.contentDocument;if(!doc)return;doc.addEventListener('scroll',syncGuidePlayer,true);doc.defaultView.addEventListener('resize',syncGuidePlayer);doc.defaultView.cinevaultActivateEmbedded?.();doc.defaultView.cinevaultSetActiveProgram?.(guideInfo());doc.defaultView.scrollTo(0,0)}catch(_e){}syncGuidePlayer()}
+function guideInfo(){return{title:currentInfo?.title||'Now Playing',year:currentInfo?.year||'',subtitle:currentInfo?.subtitle||'',summary:currentInfo?.overview||'',poster:currentInfo?.poster||'',airtime:currentInfo?.start||0,channel:currentInfo?.channel||'',channel_number:currentInfo?.channel_number||''}}
+function syncGuidePlayer(){if(!document.body.classList.contains('guide-open'))return;try{const win=guideFrame.contentWindow,rect=win?.cinevaultBarkerRect?.();if(!rect)return;Object.assign(v.style,{left:rect.left+'px',top:rect.top+'px',width:rect.width+'px',height:rect.height+'px'});win.cinevaultSetActiveProgram?.(guideInfo(),closeGuide)}catch(_e){}}
+function bindGuideFrame(){try{const doc=guideFrame.contentDocument;if(!doc)return;doc.addEventListener('scroll',syncGuidePlayer,true);doc.defaultView.addEventListener('resize',syncGuidePlayer);doc.defaultView.cinevaultActivateEmbedded?.();doc.defaultView.cinevaultSetReturnAction?.(closeGuide);doc.defaultView.cinevaultSetActiveProgram?.(guideInfo(),closeGuide);doc.defaultView.scrollTo(0,0)}catch(_e){}syncGuidePlayer()}
 function openGuide(){guideDrawer.classList.add('open');document.body.classList.add('guide-open');bindGuideFrame();clearInterval(guidePlacementTimer);guidePlacementTimer=setInterval(syncGuidePlayer,250)}
 function closeGuide(){clearInterval(guidePlacementTimer);guidePlacementTimer=null;try{guideFrame.contentWindow?.cinevaultDeactivateEmbedded?.()}catch(_e){}guideDrawer.classList.remove('open');document.body.classList.remove('guide-open');['left','top','width','height'].forEach(k=>v.style[k]='')}
 guideFrame.addEventListener('load',()=>{if(document.body.classList.contains('guide-open'))bindGuideFrame()});
 document.getElementById('openGuide').onclick=openGuide;
-document.getElementById('closeGuide').onclick=closeGuide;
 v.onclick=()=>{if(document.body.classList.contains('guide-open'))closeGuide()};
 document.getElementById('fullScreen').onclick=()=>{
   const enter=v.requestFullscreen||v.webkitRequestFullscreen||v.webkitEnterFullscreen||v.msRequestFullscreen;
@@ -1646,7 +2243,7 @@ function wireCaptionSelect(){
   sel.onchange=()=>tracks.forEach((track,index)=>track.mode=sel.value===String(index)?'showing':'disabled');
 }
 function renderNowPlaying(info){
-  info=info||{};document.getElementById('nowTitle').textContent=info.title||'Now Playing';
+  info=info||{};const name=info.title||'Now Playing';document.getElementById('nowTitle').textContent=info.year&&!name.includes(`(${info.year})`)?`${name} (${info.year})`:name;
   const date=t=>t?new Date(t*1000).toLocaleString([],{weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}):'';
   const bits=[`${info.channel_number||''} ${info.channel||''}`.trim(),info.subtitle||'',info.start?`${date(info.start)}–${new Date(info.stop*1000).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})}`:'',info.rating?`★ ${Number(info.rating).toFixed(1)}`:''].filter(Boolean);
   document.getElementById('nowMeta').textContent=bits.join(' · ');document.getElementById('nowDescription').textContent=info.overview||'No description is available for this program.';
@@ -1812,6 +2409,7 @@ def _resolve_tune(channel_id, movie_app, tv_app, resolve_source_fn, caption_fn, 
             "subtitle": nxt.get("subtitle") or "",
             "overview": next_details.get("overview") or "",
             "poster": next_details.get("poster") or "",
+            "year": next_details.get("year") or "",
             "start": nxt.get("start_ts"),
         }
     current_details = _resolve_program_details(prog, movie_app, tv_app)
@@ -1820,6 +2418,7 @@ def _resolve_tune(channel_id, movie_app, tv_app, resolve_source_fn, caption_fn, 
         "subtitle": prog.get("subtitle") or "",
         "overview": current_details.get("overview") or "",
         "poster": current_details.get("poster") or "",
+        "year": current_details.get("year") or "",
         "rating": float(prog.get("rating") or 0),
         "start": int(prog["start_ts"]),
         "stop": int(prog["stop_ts"]),
@@ -1975,7 +2574,7 @@ def promo_payload(channel_id, start_ts, movie_app, tv_app, preview_source_fn, fo
     if not source:
         return {"available": False, "reason": "busy"}
     details = _resolve_program_details(prog, movie_app, tv_app)
-    return {"available": True, "title": title, "subtitle": prog.get("subtitle") or "", "overview": details.get("overview") or "", "poster": details.get("poster") or "", "channel": channel["name"], "channel_number": channel["channel_number"], "airtime": int(prog["start_ts"]), "offset": int(source.get("client_offset", clip_offset)), "is_hls": bool(source.get("is_hls")), "source": source.get("source", ""), "narration": f"/api/vchannels/narration/{int(channel_id)}/{int(start_ts)}"}
+    return {"available": True, "title": title, "subtitle": prog.get("subtitle") or "", "overview": details.get("overview") or "", "poster": details.get("poster") or "", "content_rating": details.get("content_rating") or "", "year": details.get("year") or "", "channel": channel["name"], "channel_number": channel["channel_number"], "airtime": int(prog["start_ts"]), "offset": int(source.get("client_offset", clip_offset)), "is_hls": bool(source.get("is_hls")), "source": source.get("source", ""), "narration": f"/api/vchannels/narration/{int(channel_id)}/{int(start_ts)}"}
 
 
 def _announcement(channel, prog, details=None):
@@ -1992,7 +2591,7 @@ def _announcement(channel, prog, details=None):
     # Keep the brand line occasional so a long reel sounds like programming,
     # not a repeated station ident.
     ident = " Only on Cine Media Vault." if (int(prog["start_ts"]) // 60) % 4 == 0 else ""
-    text = f"{day} at {clock}, on {channel['name']}. {title}{episode}.{summary_copy}{ident}"
+    text = _spoken_narration_text(f"{day} at {clock}, on {channel['name']}. {title}{episode}.{summary_copy}{ident}")
     family = any(word in channel["name"].casefold() for word in ("kids", "family", "animation", "simpsons"))
     voice = "af_bella" if family else ("am_michael" if channel["kind"] == "movie" else "af_heart")
     return text, voice
@@ -2040,42 +2639,195 @@ def serve_narration(handler, channel_id, start_ts, movie_app, tv_app):
 def admin_page(handler, message=""):
     stats = schedule_stats()
     state = build_state()
+    with ADMIN_OPERATION_LOCK:
+        operation = dict(ADMIN_OPERATION)
+    operation_busy = operation.get("state") == "running"
+    disabled = " disabled" if operation_busy else ""
+    operation_text = html.escape(operation.get("message") or "No manual operation is running.")
+    settings = barker_settings()
+    barker_state = combined_barker_status("combined")
+    manifest_items = 0
+    try:
+        manifest_items = len(json.loads(COMBINED_BARKER_MANIFEST.read_text(encoding="utf-8")).get("items") or [])
+    except Exception:
+        pass
+    combined_selected = " selected" if settings["mode"] == "combined" else ""
+    separate_selected = " selected" if settings["mode"] == "separate" else ""
     note = f"<div class='note'>{html.escape(message)}</div>" if message else ""
     body = f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Virtual Channel Administration</title><style>
-:root{{color-scheme:dark;--gold:#f5b73f}}*{{box-sizing:border-box}}body{{margin:0;background:#08090c;color:#fff;font:16px system-ui,sans-serif}}header,main{{padding:20px;max-width:1050px;margin:auto}}header{{display:flex;justify-content:space-between;border-bottom:1px solid #30343d}}a{{color:#fff}}.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}}.card{{background:#121720;border:1px solid #303a49;border-radius:16px;padding:18px}}button{{min-height:46px;padding:0 18px;border:0;border-radius:999px;background:var(--gold);color:#111;font-weight:900;cursor:pointer}}button.danger{{background:#732b37;color:#fff}}form{{margin-top:14px}}.note{{padding:12px;background:#15351f;border-radius:10px;margin-bottom:16px}}.muted{{color:#abb4c3}}code{{overflow-wrap:anywhere}}
+:root{{color-scheme:dark;--gold:#f5b73f}}*{{box-sizing:border-box}}body{{margin:0;background:#08090c;color:#fff;font:16px system-ui,sans-serif}}header,main{{padding:20px;max-width:1050px;margin:auto}}header{{display:flex;justify-content:space-between;border-bottom:1px solid #30343d}}a{{color:#fff}}.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}}.card{{background:#121720;border:1px solid #303a49;border-radius:16px;padding:18px}}button{{min-height:46px;padding:0 18px;border:0;border-radius:999px;background:var(--gold);color:#111;font-weight:900;cursor:pointer}}button:disabled{{opacity:.45;cursor:not-allowed}}button.danger{{background:#732b37;color:#fff}}form{{margin-top:14px}}.note{{padding:12px;background:#15351f;border-radius:10px;margin-bottom:16px}}.muted{{color:#abb4c3}}code{{overflow-wrap:anywhere}}label{{display:block;margin:13px 0 5px;font-weight:800}}select,input[type=range]{{width:100%}}select{{min-height:44px;border-radius:9px;background:#080d15;color:#fff;padding:8px}}output{{color:var(--gold);font-weight:900}}
 </style></head><body><header><strong>Virtual Channel Administration</strong><nav><a href="/admin/modules">Modules</a> &middot; <a href="/vchannels">Guide</a> &middot; <a href="/">Home</a></nav></header><main>{note}<h1>24×7 Virtual Schedules</h1><p class="muted">The rolling {HORIZON_DAYS}-day horizon is extended automatically, providing continuous service year-round.</p><div class="cards">
 <section class="card"><h2>Movie Channels</h2><p>{stats['movie']['rows']:,} scheduled programs</p><p>{stats['movie']['on_air']} of {stats['movie']['total']} channels currently on air</p></section>
 <section class="card"><h2>TV Channels</h2><p>{stats['tv']['rows']:,} scheduled episodes</p><p>{stats['tv']['on_air']} of {stats['tv']['total']} channels currently on air</p></section>
 <section class="card"><h2>Build Status</h2><p>{html.escape(str(state.get('last_build_status') or 'unknown'))}</p><p class="muted">Through {html.escape(str(state.get('horizon_until_date') or 'not built'))}</p><p class="muted">Randomization seed: {int(state.get('schedule_seed') or 1)}</p></section>
-</div><section class="card"><h2>Schedule Operations</h2><p>Flush removes both Movie and TV schedules. Rebuild creates a new randomized rolling lineup and resets TV episode progression to Season 1/Episode 1 for its newly assigned sequence.</p>
-<form method="post" action="/admin/vchannels" onsubmit="return confirm('Flush BOTH Movie and TV virtual schedules? The guide will remain empty until rebuilt.')"><button class="danger" name="action" value="flush">Flush Both Schedules</button></form>
-<form method="post" action="/admin/vchannels" onsubmit="return confirm('Back up, flush, re-randomize, and rebuild BOTH virtual schedules now?')"><button name="action" value="rebuild">Rebuild &amp; Re-randomize</button></form>
-<form method="post" action="/admin/vchannels" onsubmit="return confirm('Back up, then rebuild and re-randomize only the TV lineup? Movie schedule and all watch state are untouched.')"><button name="action" value="rebuild_tv">Rebuild &amp; Re-randomize TV Only</button></form></section></main></body></html>'''
+<section class="card"><h2>Guide &amp; Barker Health</h2><p>Guide: <strong>{'Ready' if stats['movie']['on_air'] and stats['tv']['on_air'] else 'Needs repair'}</strong></p><p>Barker: <strong>{'On air' if barker_state.get('available') else 'Needs repair'}</strong></p><p class="muted">Manifest entries: {manifest_items:,}</p><form method="post" action="/admin/vchannels" class="single-run"><button name="action" value="repair_guide_barker"{disabled}>Repair Guide &amp; Barker State</button></form></section>
+</div><div class="cards"><section class="card"><h2>Regenerate Schedules</h2><p>Back up, re-randomize, and rebuild the rolling Movie and TV guide in the background.</p><form method="post" action="/admin/vchannels" class="single-run" onsubmit="return confirm('Regenerate BOTH Movie and TV schedules now?')"><button name="action" value="regenerate"{disabled}>Regenerate Movie &amp; TV Schedules</button></form></section>
+<section class="card"><h2>Generate Barker Preview</h2><p>Render the next saved barker configuration in the background. The current validated reel remains live until the replacement is complete.</p><form method="post" action="/admin/vchannels" class="single-run"><button name="action" value="generate_barker"{disabled}>Generate Barker Preview</button></form><form method="post" action="/admin/vchannels" class="single-run"><button name="action" value="restart_barker"{disabled}>Restart Barker</button></form><p class="muted">Restart reloads the current reel on connected guides; it does not start another render.</p></section>
+<section class="card"><h2>Manual Job Status</h2><p>{operation_text}</p><p class="muted">State: {html.escape(str(operation.get('state') or 'idle'))}</p></section></div>
+<section class="card"><h2>Barker Settings</h2><p class="muted">Saved changes take effect at the next scheduled barker rotation; the reel playing now is not interrupted.</p><form method="post" action="/admin/vchannels">
+<input type="hidden" name="action" value="save_barker_settings">
+<label for="barker_mode">Barker feeds</label><select id="barker_mode" name="barker_mode"><option value="combined"{combined_selected}>One combined Movie + TV barker</option><option value="separate"{separate_selected}>Separate Movie and TV barkers</option></select>
+<label for="duration_minutes">Reel length: <output id="duration_value">{settings['duration_minutes']} minutes</output></label><input id="duration_minutes" name="duration_minutes" type="range" min="10" max="60" step="5" value="{settings['duration_minutes']}" oninput="duration_value.value=this.value+' minutes'">
+<label for="segment_seconds">Each preview segment: <output id="segment_value">{settings['segment_seconds']} seconds</output></label><input id="segment_seconds" name="segment_seconds" type="range" min="10" max="90" step="1" value="{settings['segment_seconds']}" oninput="segment_value.value=this.value+' seconds'">
+<label for="rotation_hours">Generate a new barker every: <output id="rotation_value">{settings['rotation_hours']} hours</output></label><input id="rotation_hours" name="rotation_hours" type="range" min="2" max="24" step="1" value="{settings['rotation_hours']}" oninput="rotation_value.value=this.value+' hours'">
+<label for="schedule_days">Days of schedule to build: <output id="schedule_days_value">{settings['schedule_days']} days</output></label><input id="schedule_days" name="schedule_days" type="range" min="3" max="14" step="1" value="{settings['schedule_days']}" oninput="schedule_days_value.value=this.value+' days'">
+<p><button type="submit">Save Barker Settings</button></p></form>
+<hr style="border:0;border-top:1px solid #303a49;margin:22px 0"><h3>Weekly Guide Magazine</h3><p class="muted">Build and publish a fresh Monday-through-Sunday PDF using the current schedules, artwork, video stills, and cached cast profiles.</p><form method="post" action="/admin/vchannels" class="single-run"><button name="action" value="generate_weekly_guide"{disabled}>Generate Weekly PDF Now</button></form></section>
+<section class="card"><h2>Schedule Operations</h2><p>Flush removes both Movie and TV schedules. Rebuild creates a new randomized rolling lineup and resets TV episode progression to Season 1/Episode 1 for its newly assigned sequence.</p>
+<form method="post" action="/admin/vchannels" class="single-run" onsubmit="return confirm('Flush BOTH Movie and TV virtual schedules? The guide will remain empty until rebuilt.')"><button class="danger" name="action" value="flush"{disabled}>Flush Both Schedules</button></form>
+<form method="post" action="/admin/vchannels" class="single-run" onsubmit="return confirm('Back up, flush, re-randomize, and rebuild BOTH virtual schedules now?')"><button name="action" value="rebuild"{disabled}>Rebuild &amp; Re-randomize</button></form>
+<form method="post" action="/admin/vchannels" class="single-run" onsubmit="return confirm('Back up, then rebuild and re-randomize only the TV lineup? Movie schedule and all watch state are untouched.')"><button name="action" value="rebuild_tv"{disabled}>Rebuild &amp; Re-randomize TV Only</button></form></section><script>document.querySelectorAll('form.single-run').forEach(form=>form.addEventListener('submit',()=>{{document.querySelectorAll('form.single-run button').forEach(button=>button.disabled=true)}}));{('setTimeout(()=>location.reload(),5000);' if operation_busy else '')}</script></main></body></html>'''
     return handler.render_html(body)
 
 
-def combined_barker_status():
+def start_admin_operation(name, function):
+    with ADMIN_OPERATION_LOCK:
+        if ADMIN_OPERATION.get("state") == "running":
+            return False, ADMIN_OPERATION.get("message") or "Another operation is already running."
+        ADMIN_OPERATION.update(name=name, state="running", message=f"{name} started; duplicate clicks are blocked.", started_at=int(time.time()), finished_at=0)
+    def runner():
+        try:
+            result = function()
+            message = f"{name} completed successfully."
+            if result:
+                message += f" {result}"
+            state = "complete"
+        except Exception as exc:
+            state, message = "failed", f"{name} failed: {exc}"
+        with ADMIN_OPERATION_LOCK:
+            ADMIN_OPERATION.update(state=state, message=message, finished_at=int(time.time()))
+    threading.Thread(target=runner, daemon=True, name=f"cinevault-admin-{name.lower().replace(' ', '-')}").start()
+    return True, ADMIN_OPERATION["message"]
+
+
+def generate_barker_admin(movie_app, tv_app):
+    payload = write_combined_barker_manifest(movie_app, tv_app, limit=1000)
+    settings = barker_settings()
+    kinds = ("combined",) if settings["mode"] == "combined" else ("movie", "tv")
+    for kind in kinds:
+        root = COMBINED_BARKER_DIR if kind == "combined" else COMBINED_BARKER_DIR / kind
+        root.mkdir(parents=True, exist_ok=True)
+        temporary = root / "manifest.json.part"
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(root / "manifest.json")
+        log_path = root / "admin-generation.log"
+        command = [str(BARKER_TTS_PYTHON), str(Path(__file__).resolve().parent / "generate_combined_barker.py"),
+                   "--root", str(root), "--kind", kind,
+                   "--minutes", str(settings["duration_minutes"]),
+                   "--segment-seconds", str(settings["segment_seconds"]),
+                   "--rotation-hours", str(settings["rotation_hours"])]
+        with log_path.open("ab") as log:
+            subprocess.run(command, check=True, stdout=log, stderr=subprocess.STDOUT, timeout=3 * 3600)
+    return f"Log: {log_path}"
+
+
+def generate_weekly_guide_admin():
+    script = Path(__file__).resolve().parent / "cine-guide-magazine" / "generate_weekly_guide.sh"
+    if not script.is_file():
+        raise FileNotFoundError(f"Weekly Guide generator is missing: {script}")
+    log_path = Path(__file__).resolve().parent / "cine-guide-magazine" / "logs" / "weekly-guide-admin.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("ab") as log:
+        subprocess.run([str(script)], check=True, stdout=log, stderr=subprocess.STDOUT, timeout=30 * 60)
+    latest = Path(__file__).resolve().parent / "cine-guide-magazine" / "weekly-guides" / "CineMedia-Vault-Guide-Latest.pdf"
+    if not latest.is_file():
+        raise RuntimeError("Generator completed but the latest PDF was not published")
+    return f"Published {latest.name} ({latest.stat().st_size / 1024 / 1024:.1f} MB)."
+
+
+def repair_guide_barker_state(movie_app, tv_app):
+    stats = schedule_stats()
+    if not stats["movie"]["on_air"] or not stats["tv"]["on_air"]:
+        generate_horizon(movie_app, tv_app)
+    payload = write_combined_barker_manifest(movie_app, tv_app, limit=1000)
+    if not payload.get("items"):
+        raise RuntimeError("Guide was rebuilt but no playable future programmes were available")
+    status = combined_barker_status("combined")
+    return f"Published {len(payload['items'])} future programmes; active reel: {'yes' if status.get('available') else 'no (use Generate Barker Preview)'}"
+
+
+def rebuild_and_refresh(movie_app, tv_app, tv_only=False):
+    result = (rebuild_tv_schedules(movie_app, tv_app, randomize=True) if tv_only
+              else rebuild_schedules(movie_app, tv_app, randomize=True))
+    payload = write_combined_barker_manifest(movie_app, tv_app, limit=1000)
+    return f"{result} Barker manifest refreshed with {len(payload.get('items') or [])} programmes."
+
+
+def combined_barker_status(kind="combined", movie_app=None, tv_app=None):
     try:
+        settings = barker_settings()
+        root_dir = COMBINED_BARKER_DIR
+        if settings["mode"] == "separate" and kind in ("movie", "tv"):
+            separate_dir = COMBINED_BARKER_DIR / kind
+            # Changing modes is staged: continue serving the combined reel
+            # until the first validated kind-specific replacement exists.
+            has_valid_separate = any(
+                descriptor.with_suffix(".mp4").is_file()
+                for descriptor in separate_dir.glob("barker-*.json")
+            )
+            if has_valid_separate:
+                root_dir = separate_dir
         now = int(time.time())
         candidates = []
-        for descriptor in COMBINED_BARKER_DIR.glob("barker-*.json"):
+        valid_candidates = []
+        for descriptor in root_dir.glob("barker-*.json"):
             try:
                 candidate = json.loads(descriptor.read_text(encoding="utf-8"))
+                media_candidate = (root_dir / str(candidate.get("filename") or "")).resolve()
+                if media_candidate.parent != root_dir.resolve() or not media_candidate.is_file():
+                    continue
+                if int(candidate.get("binding_version") or 0) >= 1:
+                    programmes = candidate.get("programmes") or []
+                    if len(programmes) != int(candidate.get("segments") or 0):
+                        continue
+                    if any(int(row.get("segment_index", -1)) != index or not row.get("metadata_signature")
+                           for index, row in enumerate(programmes)):
+                        continue
+                valid_candidates.append(candidate)
                 if int(candidate.get("slot_start") or 0) <= now:
                     candidates.append(candidate)
             except Exception:
                 continue
         if not candidates:
+            # Keep the latest validated reel on air while its scheduled
+            # replacement is still rendering (or after a missed boundary).
+            candidates = valid_candidates
+        if not candidates:
             # Compatibility with the initial/manual renderer build.
-            candidates.append(json.loads((COMBINED_BARKER_DIR / "current.json").read_text(encoding="utf-8")))
+            candidates.append(json.loads((root_dir / "current.json").read_text(encoding="utf-8")))
         data = max(candidates, key=lambda item: int(item.get("slot_start") or 0))
-        media = (COMBINED_BARKER_DIR / str(data.get("filename") or "")).resolve()
-        root = COMBINED_BARKER_DIR.resolve()
+        media = (root_dir / str(data.get("filename") or "")).resolve()
+        root = root_dir.resolve()
         if media.parent != root or not media.is_file():
             raise FileNotFoundError
+        try:
+            restart_token = BARKER_RESTART_FILE.read_text(encoding="utf-8").strip()
+        except Exception:
+            restart_token = "0"
+        programmes = data.get("programmes") or []
+        # Older, still-airing reels predate the content-rating field. Enrich
+        # their display metadata live without touching narration or the
+        # segment/video binding, so the old reel remains usable while a new
+        # one renders.
+        if movie_app is not None and tv_app is not None and any(not row.get("content_rating") for row in programmes):
+            movie_ratings = {}
+            for item in movie_app.movie_index.items:
+                metadata = movie_app.metadata_for(item) or {}
+                movie_ratings[str(metadata.get("title") or item.title).casefold()] = _content_rating(metadata)
+            tv_ratings = {}
+            for show in tv_app.tv_index.shows:
+                metadata = tv_app.metadata_for(show) or {}
+                tv_ratings[str(metadata.get("title") or show.title).casefold()] = _content_rating(metadata)
+                tv_ratings[str(show.title).casefold()] = _content_rating(metadata)
+            programmes = [dict(row, content_rating=(row.get("content_rating") or
+                          (movie_ratings if row.get("kind") == "movie" else tv_ratings).get(str(row.get("title") or "").casefold(), "")))
+                          for row in programmes]
         return {"available": True, "slot_start": int(data["slot_start"]),
                 "duration": float(data.get("duration") or 3600), "generated_at": int(data.get("generated_at") or 0),
-                "filename": media.name, "programmes": data.get("programmes") or []}
+                "segment_seconds": int(data.get("segment_seconds") or 37),
+                "binding_version": int(data.get("binding_version") or 0),
+                "restart_token": restart_token,
+                "filename": media.name, "programmes": programmes, "kind": kind}
     except Exception:
         return {"available": False, "reason": "The next promo reel is still being prepared"}
 
@@ -2086,12 +2838,19 @@ def handle_get(handler, user, path, movie_app, tv_app, resolve_source_fn=None, c
             return handler.send_error(403)
         return admin_page(handler)
     if path == "/api/vchannels/barker/status":
-        return handler.json_response(combined_barker_status())
+        import urllib.parse as _up
+        kind = (_up.parse_qs(_up.urlsplit(handler.path).query).get("kind", ["combined"])[0] or "combined").lower()
+        return handler.json_response(combined_barker_status(kind, movie_app, tv_app))
     if path == "/api/vchannels/barker/video":
-        state = combined_barker_status()
+        import urllib.parse as _up
+        kind = (_up.parse_qs(_up.urlsplit(handler.path).query).get("kind", ["combined"])[0] or "combined").lower()
+        state = combined_barker_status(kind)
         if not state.get("available"):
             return handler.send_error(503, state.get("reason", "Promo channel unavailable"))
-        return handler.serve_file(COMBINED_BARKER_DIR / state["filename"], disposition="inline", service="movie")
+        root_dir = COMBINED_BARKER_DIR / kind if barker_settings()["mode"] == "separate" and kind in ("movie", "tv") else COMBINED_BARKER_DIR
+        if not (root_dir / state["filename"]).is_file():
+            root_dir = COMBINED_BARKER_DIR
+        return handler.serve_file(root_dir / state["filename"], disposition="inline", service="movie")
     if path in ("/vchannels", "/vchannels/movies", "/vchannels/tv"):
         kind = "tv" if path.endswith("/tv") else "movie"
         return handler.render_html(_guide_page(kind))
@@ -2170,14 +2929,39 @@ def handle_post(handler, user, path, movie_app, tv_app, stop_preview_fn=None):
         form = handler.read_form()
         action = form.get("action") or ""
         try:
+            if action == "save_barker_settings":
+                values = save_barker_settings(form)
+                return admin_page(handler, f"Barker settings saved. The {values['schedule_days']}-day schedule length applies on the next scheduler run; the barker reel refreshes at the next {values['rotation_hours']}-hour rotation.")
+            if action == "regenerate":
+                started, status = start_admin_operation("Schedule regeneration", lambda: rebuild_and_refresh(movie_app, tv_app))
+                return admin_page(handler, status)
+            if action == "generate_barker":
+                started, status = start_admin_operation("Barker preview generation", lambda: generate_barker_admin(movie_app, tv_app))
+                return admin_page(handler, status)
+            if action == "generate_weekly_guide":
+                started, status = start_admin_operation("Weekly Guide generation", generate_weekly_guide_admin)
+                return admin_page(handler, status)
+            if action == "restart_barker":
+                BARKER_RESTART_FILE.parent.mkdir(parents=True, exist_ok=True)
+                temporary = BARKER_RESTART_FILE.with_suffix(".token.part")
+                token = str(time.time_ns())
+                temporary.write_text(token, encoding="utf-8")
+                temporary.replace(BARKER_RESTART_FILE)
+                return admin_page(handler, "Barker restart sent. Connected guide pages will reload the current reel within 15 seconds.")
+            if action == "repair_guide_barker":
+                started, status = start_admin_operation("Guide and barker repair", lambda: repair_guide_barker_state(movie_app, tv_app))
+                return admin_page(handler, status)
             if action == "flush":
-                backup = backup_schedule_database("pre-virtual-flush")
-                with LOCK:
-                    flush_schedules(randomize=False)
-                return admin_page(handler, f"Both schedules flushed. Backup: {backup}")
+                def flush_job():
+                    backup = backup_schedule_database("pre-virtual-flush")
+                    with LOCK:
+                        flush_schedules(randomize=False)
+                    return f"Backup: {backup}"
+                started, status = start_admin_operation("Schedule flush", flush_job)
+                return admin_page(handler, status)
             if action == "rebuild":
-                result = rebuild_schedules(movie_app, tv_app, randomize=True)
-                return admin_page(handler, f"Schedules rebuilt and re-randomized. Backup: {result['backup']}")
+                started, status = start_admin_operation("Schedule regeneration", lambda: rebuild_and_refresh(movie_app, tv_app))
+                return admin_page(handler, status)
             if action == "repair_tv":
                 result = rebuild_tv_schedules(movie_app, tv_app)
                 return admin_page(handler, f"TV schedules rebuilt using actual media durations. Backup: {result['backup']}")
@@ -2189,8 +2973,8 @@ def handle_post(handler, user, path, movie_app, tv_app, stop_preview_fn=None):
                 # channel definitions so the whole TV lineup gets a genuinely
                 # fresh shuffle without disturbing movies or any watch state
                 # (a completely separate table).
-                result = rebuild_tv_schedules(movie_app, tv_app, randomize=True)
-                return admin_page(handler, f"TV schedules rebuilt and re-randomized (movies untouched). Backup: {result['backup']}")
+                started, status = start_admin_operation("TV schedule regeneration", lambda: rebuild_and_refresh(movie_app, tv_app, tv_only=True))
+                return admin_page(handler, status)
             if action == "repair_all":
                 result = rebuild_schedules(movie_app, tv_app, randomize=False)
                 return admin_page(handler, f"Movie and TV schedules rebuilt using actual media durations. Backup: {result['backup']}")
