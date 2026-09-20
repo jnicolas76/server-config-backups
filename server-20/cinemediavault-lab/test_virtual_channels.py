@@ -52,6 +52,15 @@ class BarkerPresentationTests(unittest.TestCase):
         self.assertEqual(vc._spoken_episode("S1E09 - Pilot"), "season 1, episode 9 - Pilot")
         self.assertEqual(vc._spoken_episode("S03"), "season 3")
 
+    def test_narrator_pronunciation_rules(self):
+        spoken = vc._spoken_narration_text(
+            "CineMedia Vault presents World War I (1974) at 7:12 PM, followed by World War II (2010). The Lighthouse is set in 1890. Events from 1492 and 1800 follow."
+        )
+        self.assertEqual(
+            spoken,
+            "Senna Media Vault presents World War 1 (19 74) at 7 12 P M, followed by World War 2 (two thousand 10). The Lighthouse is set in 18 90. Events from 14 92 and 18 hundred follow.",
+        )
+
     def test_combined_barker_has_no_native_playback_controls(self):
         self.assertIn('id="channel" autoplay playsinline', vc.COMBINED_BARKER_PAGE)
         self.assertNotIn('id="channel" controls', vc.COMBINED_BARKER_PAGE)
@@ -60,6 +69,44 @@ class BarkerPresentationTests(unittest.TestCase):
         page = vc._guide_page("movie")
         self.assertNotIn('href="/vchannels/barker"', page)
         self.assertIn('/api/vchannels/barker/video', page)
+
+    def test_program_click_selects_details_including_now_playing(self):
+        page = vc._guide_page("movie")
+        self.assertIn("renderDetails(p,b.dataset.channel)", page)
+        self.assertNotIn("b.classList.contains('now')", page)
+
+    def test_channel_identity_is_the_explicit_live_tuning_target(self):
+        page = vc._guide_page("movie")
+        self.assertIn('class="channel-name" href="/watch/vchannel/${ch.id}"', page)
+        self.assertIn('aria-label="Watch ${esc(ch.name)} live"', page)
+        self.assertIn("channel-logos-sprite-20260910.png", page)
+        self.assertIn("channel-logo-simpsons-clean.png", page)
+
+    def test_guide_switch_uses_cache_prefetch_and_cancels_stale_requests(self):
+        page = vc._guide_page("movie")
+        self.assertIn("const guideCache=new Map()", page)
+        self.assertIn("new AbortController()", page)
+        self.assertIn("prefetchOtherGuide", page)
+        self.assertNotIn("previews.teardownAll().finally(loadGuide)", page)
+
+    def test_guide_navigation_does_not_wait_for_preview_stop(self):
+        page = vc._guide_page("movie")
+        self.assertIn("previews.teardownAll();queueMicrotask(go)", page)
+
+    def test_active_player_exclusively_owns_audio_and_cancels_stale_barker_loads(self):
+        page = vc._guide_page("movie")
+        self.assertIn("externalActive=false,playbackEpoch=0", page)
+        self.assertIn("function ownsBarker(epoch)", page)
+        self.assertIn("externalActive=true;playbackEpoch++", page)
+        self.assertIn("video.muted=true;video.pause()", page)
+        self.assertIn("if(!ownsBarker(epoch))return", page)
+        self.assertIn("if(externalActive)return", page)
+
+    def test_embedded_guide_never_starts_its_hidden_barker(self):
+        page = vc._guide_page("movie")
+        self.assertIn("get('embedded')!=='1'", page)
+        self.assertIn("if(!embeddedGuide){barker.load();setInterval(()=>barker.refresh(),15000)}", page)
+        self.assertNotIn("setInterval(loadGuide,60000);setInterval(()=>barker.refresh(),15000)", page)
 
 
 def make_file(tmp: Path, name: str) -> Path:
@@ -416,7 +463,10 @@ class VirtualChannelsTestCase(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertIn(item.title, handler.rendered)
         self.assertIn(payload["source"], handler.rendered)
-        self.assertEqual(payload["play_beginning_href"], f"/player/movie/{item.id}")
+        self.assertEqual(
+            payload["play_beginning_href"],
+            f"/player/movie/{item.id}?stable_key=asset%3Aactionmovie0",
+        )
         # advance_after must be exactly the live program's own start_ts, since
         # the tune page's JS passes this value straight back in as
         # advance_after to reach "the program after this one" once it ends.
@@ -685,6 +735,38 @@ class VirtualChannelsTestCase(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertIn("of 15 channels currently on air", handler.rendered)
         self.assertIn("of 10 channels currently on air", handler.rendered)
+
+    # -- guide_payload(resolve_details=...) ----------------------------------
+    def test_guide_payload_resolves_details_by_default(self):
+        movie_app = self._movie_app_with_pool("Action", 1, self.tmp)
+        movie_app._metadata["ActionMovie0"]["overview"] = "A test overview"
+        tv_app = FakeTvApp([], {})
+        channel = vc.channels("movie")[0]
+        self._insert_now_playing_movie_row(channel, movie_app.movie_index.items[0], movie_app)
+        now = int(time.time())
+        payload = vc.guide_payload("movie", {"from": [now - 60], "hours": [2]}, movie_app, tv_app)
+        programme = next(p for p in payload["channels"][0]["programmes"] if not p.get("holding"))
+        self.assertEqual(programme["overview"], "A test overview")
+        self.assertEqual(programme["detail_href"], f"/movie/{movie_app.movie_index.items[0].id}")
+
+    def test_guide_payload_skips_detail_resolution_when_disabled(self):
+        # Search only needs programme titles/times to text-match against; it
+        # should not pay for the is_file()/metadata_for() work every row of
+        # a 24h guide window would otherwise trigger.
+        movie_app = self._movie_app_with_pool("Action", 1, self.tmp)
+        movie_app._metadata["ActionMovie0"]["overview"] = "A test overview"
+        tv_app = FakeTvApp([], {})
+        channel = vc.channels("movie")[0]
+        self._insert_now_playing_movie_row(channel, movie_app.movie_index.items[0], movie_app)
+        now = int(time.time())
+        payload = vc.guide_payload("movie", {"from": [now - 60], "hours": [2]}, movie_app, tv_app, resolve_details=False)
+        programme = next(p for p in payload["channels"][0]["programmes"] if not p.get("holding"))
+        self.assertEqual(programme["overview"], "")
+        self.assertEqual(programme["poster"], "")
+        self.assertFalse(programme["detail_href"])
+        # The title/timing that search actually matches against still come
+        # straight from the schedule row, so search results are unaffected.
+        self.assertEqual(programme["title"], "ActionMovie0")
 
 
 if __name__ == "__main__":

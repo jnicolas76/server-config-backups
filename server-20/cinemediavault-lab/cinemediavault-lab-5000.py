@@ -7149,9 +7149,24 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
         for prefix in movie_id_routes:
             if path.startswith(prefix):
                 requested_id = path.rsplit("/", 1)[-1]
-                replacement = movie_for_stale_saved_id(user, requested_id)
-                if replacement:
-                    path = prefix + str(replacement.id)
+                route_query = urllib.parse.parse_qs(parsed.query)
+                stable_key = (route_query.get("stable_key") or [""])[-1]
+                if prefix == "/player/movie/" and stable_key:
+                    # Virtual-channel schedule rows carry a durable asset key.
+                    # Resolve it at click time instead of passing the link
+                    # through saved-state ID migration: scan-order numeric IDs
+                    # can change and may otherwise open an unrelated movie.
+                    stable_item = next(
+                        (candidate for candidate in movie_app.movie_index.items
+                         if movie_app.stable_asset_key(candidate) == stable_key),
+                        None,
+                    )
+                    if stable_item:
+                        path = prefix + str(stable_item.id)
+                else:
+                    replacement = movie_for_stale_saved_id(user, requested_id)
+                    if replacement:
+                        path = prefix + str(replacement.id)
                 break
         if path == "/video-lists":
             return self.video_lists_page(user)

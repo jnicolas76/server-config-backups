@@ -25,6 +25,7 @@ import sqlite3
 import subprocess
 import threading
 import time
+import urllib.parse
 from types import SimpleNamespace
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -2454,7 +2455,10 @@ def _resolve_tune(channel_id, movie_app, tv_app, resolve_source_fn, caption_fn, 
         "source": resolved_source.get("source", ""),
         "caption_track_html": caption_html,
         "audio_control_html": audio_control,
-        "play_beginning_href": f"/player/{kind}/{item_id}",
+        "play_beginning_href": (
+            f"/player/movie/{item_id}?stable_key={urllib.parse.quote(str(prog['stable_key']))}"
+            if kind == "movie" else f"/player/{kind}/{item_id}"
+        ),
         "advance_after": int(prog["start_ts"]),
         "next": next_info,
         "current": current_info,
