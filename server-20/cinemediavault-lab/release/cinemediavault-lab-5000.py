@@ -7163,10 +7163,11 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
                     )
                     if stable_item:
                         path = prefix + str(stable_item.id)
-                else:
-                    replacement = movie_for_stale_saved_id(user, requested_id)
-                    if replacement:
-                        path = prefix + str(replacement.id)
+                # Numeric route IDs always refer to the current live index.
+                # Persisted Continue Watching rows are migrated separately
+                # from their durable movie-path keys; remapping every live
+                # request here can hijack a valid ID that an old title once
+                # occupied and open the wrong movie.
                 break
         if path == "/video-lists":
             return self.video_lists_page(user)
