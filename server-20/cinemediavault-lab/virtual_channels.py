@@ -20,6 +20,7 @@ import json
 import os
 import random
 import re
+import shutil
 import sqlite3
 import subprocess
 import threading
@@ -2672,7 +2673,7 @@ def admin_page(handler, message=""):
 <label for="rotation_hours">Generate a new barker every: <output id="rotation_value">{settings['rotation_hours']} hours</output></label><input id="rotation_hours" name="rotation_hours" type="range" min="2" max="24" step="1" value="{settings['rotation_hours']}" oninput="rotation_value.value=this.value+' hours'">
 <label for="schedule_days">Days of schedule to build: <output id="schedule_days_value">{settings['schedule_days']} days</output></label><input id="schedule_days" name="schedule_days" type="range" min="3" max="14" step="1" value="{settings['schedule_days']}" oninput="schedule_days_value.value=this.value+' days'">
 <p><button type="submit">Save Barker Settings</button></p></form>
-<hr style="border:0;border-top:1px solid #303a49;margin:22px 0"><h3>Weekly Guide Magazine</h3><p class="muted">Create, number, archive, and publish a new issue from the current schedule week (Monday through Sunday), including artwork, video stills, cast profiles, entertainment, and news features.</p><form method="post" action="/admin/vchannels" class="single-run"><button name="action" value="generate_weekly_guide"{disabled}>Generate New Weekly Issue Now</button></form></section>
+<hr style="border:0;border-top:1px solid #303a49;margin:22px 0"><h3>Weekly Guide Magazine</h3><p class="muted">Create, number, archive, and publish a new issue from the current schedule week (Monday through Sunday), including artwork, video stills, cast profiles, entertainment, and news features.</p><form method="post" action="/admin/vchannels" class="single-run"><button name="action" value="generate_weekly_guide"{disabled}>Generate New Weekly Issue Now</button></form><form method="post" action="/admin/vchannels" class="single-run" onsubmit="return confirm('Reset the magazine series to Issue 001? Existing issues and manifests will be moved into a dated recovery folder before the current week is regenerated.')"><button class="danger" name="action" value="reset_weekly_guide"{disabled}>Reset Series &amp; Generate Issue 001</button></form><p class="muted">Reset is recoverable: previous issues are preserved under the archive's reset-backups folder. The current same-date PDF is overwritten by the new Issue 001.</p></section>
 <section class="card"><h2>Schedule Operations</h2><p>Flush removes both Movie and TV schedules. Rebuild creates a new randomized rolling lineup and resets TV episode progression to Season 1/Episode 1 for its newly assigned sequence.</p>
 <form method="post" action="/admin/vchannels" class="single-run" onsubmit="return confirm('Flush BOTH Movie and TV virtual schedules? The guide will remain empty until rebuilt.')"><button class="danger" name="action" value="flush"{disabled}>Flush Both Schedules</button></form>
 <form method="post" action="/admin/vchannels" class="single-run" onsubmit="return confirm('Back up, flush, re-randomize, and rebuild BOTH virtual schedules now?')"><button name="action" value="rebuild"{disabled}>Rebuild &amp; Re-randomize</button></form>
@@ -2733,6 +2734,28 @@ def generate_weekly_guide_admin():
     if not latest.is_file():
         raise RuntimeError("Generator completed but the latest PDF was not published")
     return f"Published {latest.name} ({latest.stat().st_size / 1024 / 1024:.1f} MB)."
+
+
+def reset_weekly_guide_admin():
+    archive = Path(os.environ.get("CINEGUIDE_ARCHIVE_DIR", "/media/jnicolas/Expansion/CineGuideMagazine")).expanduser().resolve()
+    expected_name = "CineGuideMagazine"
+    if archive.name != expected_name or not archive.is_dir():
+        raise RuntimeError(f"Refusing magazine reset for unexpected archive path: {archive}")
+    stamp = datetime.datetime.now(TZ).strftime("%Y%m%d-%H%M%S")
+    recovery = archive / "reset-backups" / stamp
+    recovery.mkdir(parents=True, exist_ok=False)
+    targets = list(archive.glob("CineMedia-Vault-Guide-Issue-*.pdf"))
+    for name in ("issues.jsonl", "cover-history.json"):
+        path = archive / name
+        if path.is_file():
+            targets.append(path)
+    for path in targets:
+        shutil.move(str(path), str(recovery / path.name))
+    result = generate_weekly_guide_admin()
+    issue_one = next(iter(sorted(archive.glob("CineMedia-Vault-Guide-Issue-001-*.pdf"))), None)
+    if not issue_one:
+        raise RuntimeError(f"Series reset was preserved at {recovery}, but Issue 001 was not created")
+    return f"Reset complete. Published {issue_one.name}. Previous series: {recovery}. {result}"
 
 
 def repair_guide_barker_state(movie_app, tv_app):
@@ -2940,6 +2963,9 @@ def handle_post(handler, user, path, movie_app, tv_app, stop_preview_fn=None):
                 return admin_page(handler, status)
             if action == "generate_weekly_guide":
                 started, status = start_admin_operation("Weekly Guide generation", generate_weekly_guide_admin)
+                return admin_page(handler, status)
+            if action == "reset_weekly_guide":
+                started, status = start_admin_operation("Weekly Guide series reset", reset_weekly_guide_admin)
                 return admin_page(handler, status)
             if action == "restart_barker":
                 BARKER_RESTART_FILE.parent.mkdir(parents=True, exist_ok=True)
