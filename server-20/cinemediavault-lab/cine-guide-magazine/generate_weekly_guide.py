@@ -145,6 +145,26 @@ class Catalog:
         except sqlite3.Error:
             return []
 
+    def story_portrait(self, story: dict) -> Path | None:
+        """Use an already-cached actor portrait when a story names that person."""
+        if not self.people_conn:
+            return None
+        haystack = clean(f"{story.get('title', '')} {story.get('summary', '')}").casefold()
+        try:
+            rows = self.people_conn.execute(
+                """SELECT name,profile_local_path FROM tmdb_people
+                   WHERE profile_local_path<>'' ORDER BY popularity DESC LIMIT 2500"""
+            ).fetchall()
+        except sqlite3.Error:
+            return None
+        for row in rows:
+            name = clean(row["name"])
+            if len(name) >= 5 and re.search(rf"\b{re.escape(name.casefold())}\b", haystack):
+                path = Path(row["profile_local_path"] or "")
+                if path.is_file():
+                    return path
+        return None
+
     def other_credits(self, names: list[str], exclude: str, limit: int = 5) -> list[str]:
         if not names:
             return []
@@ -259,6 +279,40 @@ def cover(c: Canvas, feature: dict, issue: str, masthead: Path | None = None) ->
     c.showPage()
 
 
+def contents_page(c: Canvas, picks: list[dict], issue: str, page: int) -> None:
+    c.setPageSize(LETTER); w, h = LETTER
+    c.setFillColor(PAPER); c.rect(0, 0, w, h, fill=1, stroke=0)
+    c.setFillColor(colors.HexColor("#e94057")); c.rect(0, h - 132, w, 132, fill=1, stroke=0)
+    c.setFillColor(WHITE); c.setFont("Helvetica-Bold", 38); c.drawString(30, h - 72, "CONTENTS")
+    c.setFont("Helvetica-Bold", 11); c.drawString(32, h - 100, "YOUR WEEK IN MOVIES, TELEVISION, PEOPLE AND ENTERTAINMENT")
+    featured = [item for item in picks if item.get("poster_path")][:3]
+    for index, item in enumerate(featured):
+        x = 30 + index * 134
+        draw_crop(c, item.get("poster_path"), x, 390, 118, 178)
+        c.setFillColor(colors.Color(0, 0, 0, alpha=.74)); c.rect(x, 390, 118, 30, fill=1, stroke=0)
+        c.setFillColor(WHITE); c.setFont("Helvetica-Bold", fit_text(c, item.get("title") or "", 108, 9, 6))
+        c.drawCentredString(x + 59, 401, clean(item.get("title") or ""))
+    sections = [
+        ("03", "COVER STORY", "The featured title, cast and scenes behind this week's cover."),
+        ("05", "WHAT TO WATCH", "Editors' picks and newly available on-demand highlights."),
+        ("09", "MOVIES THIS WEEK", "Seven days of movie listings in aligned twelve-hour grids."),
+        ("27", "TELEVISION THIS WEEK", "Series and episode listings from Monday through Sunday."),
+        ("THROUGHOUT", "ENTERTAINMENT & NEWS", "Photo-led reports, longer story digests and industry headlines."),
+    ]
+    sx, sy = 432, 568
+    for number, title, description in sections:
+        c.setFillColor(BLUE); c.setFont("Helvetica-Bold", 10); c.drawString(sx, sy, number)
+        c.setFillColor(NAVY); c.setFont("Helvetica-Bold", 13); c.drawString(sx, sy - 19, title)
+        para(c, description, sx, sy - 59, 150, 36, 7.3, INK, 9)
+        sy -= 72
+    c.setFillColor(colors.HexColor("#142b50")); c.roundRect(30, 58, w - 60, 154, 12, fill=1, stroke=0)
+    c.setFillColor(GOLD); c.setFont("Helvetica-Bold", 10); c.drawString(50, 184, "INSIDE THIS ISSUE")
+    inside_title = "More stories. More pictures. Your schedule."
+    c.setFillColor(WHITE); c.setFont("Helvetica-Bold", fit_text(c, inside_title, w - 100, 22, 15)); c.drawString(50, 151, inside_title)
+    para(c, "Current Monday-through-Sunday schedules meet cast profiles, entertainment reporting, news digests, on-demand picks and visual previews selected from your library.", 50, 78, w - 100, 52, 9.5, WHITE, 12)
+    footer(c, page, issue, w); c.showPage()
+
+
 def editorial(c: Canvas, feature: dict, stills: list[Path], also_features: list[dict], issue: str, page: int) -> None:
     c.setPageSize(LETTER); w, h = LETTER; c.setFillColor(PAPER); c.rect(0, 0, w, h, fill=1, stroke=0)
     c.setFillColor(NAVY); c.rect(0, h - 82, w, 82, fill=1, stroke=0)
@@ -360,32 +414,41 @@ def news_page(c: Canvas, stories: list[dict], issue: str, page: int, heading: st
 
 
 def news_articles_page(c: Canvas, stories: list[dict], issue: str, page: int, heading: str = "NEWS FEATURES") -> None:
-    """Magazine-style article page using the complete RSS story text we pulled.
-
-    Unlike the four-card roundup, this deliberately gives each sourced story
-    enough room for its entire available summary instead of truncating it.
-    """
+    """Colorful magazine page using complete attributed RSS summaries."""
     c.setPageSize(LETTER); w, h = LETTER; c.setFillColor(PAPER); c.rect(0, 0, w, h, fill=1, stroke=0)
-    c.setFillColor(NAVY); c.rect(0, h - 74, w, 74, fill=1, stroke=0)
-    c.setFillColor(GOLD); c.setFont("Helvetica-Bold", 10); c.drawString(28, h - 25, "CINE NEWS WEEKLY")
-    c.setFillColor(WHITE); c.setFont("Helvetica-Bold", 28); c.drawString(28, h - 56, heading)
-    slots = [
-        (28, 392, w - 56, 286),
-        (28, 52, (w - 70) / 2, 312),
-        (35 + (w - 70) / 2, 52, (w - 70) / 2, 312),
-    ]
-    for index, story in enumerate(stories[:3]):
-        x, y, sw, sh = slots[index]
-        c.setFillColor(WHITE if index == 0 else colors.HexColor("#e4ebf6")); c.roundRect(x, y, sw, sh, 8, fill=1, stroke=0)
-        source = clean(story.get("source") or "CINE NEWS").upper()
-        c.setFillColor(BLUE); c.setFont("Helvetica-Bold", 8); c.drawString(x + 15, y + sh - 24, source)
+    entertainment = "ENTERTAINMENT" in heading
+    accent = colors.HexColor("#e83f6f") if entertainment else colors.HexColor("#2267d8")
+    secondary = colors.HexColor("#ffb703") if entertainment else colors.HexColor("#4cc9a7")
+    c.setFillColor(accent); c.rect(0, h - 92, w, 92, fill=1, stroke=0)
+    c.setFillColor(WHITE); c.setFont("Helvetica-Bold", 10); c.drawString(28, h - 27, "CINEMEDIA VAULT WEEKLY")
+    c.setFont("Helvetica-Bold", 30); c.drawString(28, h - 65, heading)
+    if stories:
+        story = stories[0]
+        x, y, sw, sh = 28, 408, w - 56, 264
+        c.setFillColor(WHITE); c.roundRect(x, y, sw, sh, 10, fill=1, stroke=0)
+        image_path = story.get("image_path")
+        text_x = x + 20
+        text_w = sw - 40
+        if image_path and Path(image_path).is_file():
+            draw_crop(c, Path(image_path), x, y, 192, sh)
+            c.setFillColor(accent); c.rect(x + 192, y, 5, sh, fill=1, stroke=0)
+            text_x, text_w = x + 216, sw - 236
+        c.setFillColor(accent); c.setFont("Helvetica-Bold", 8); c.drawString(text_x, y + sh - 25, clean(story.get("source") or "CINE NEWS").upper())
         title = unicodedata.normalize("NFKD", clean(story.get("title") or "News update")).encode("ascii", "ignore").decode("ascii")
-        para(c, title, x + 15, y + sh - (96 if index == 0 else 116), sw - 30, 62 if index == 0 else 82,
-             17 if index == 0 else 12, NAVY, 20 if index == 0 else 14, True)
+        para(c, title, text_x, y + sh - 112, text_w, 74, 17, NAVY, 20, True)
         summary = unicodedata.normalize("NFKD", clean(story.get("summary"))).encode("ascii", "ignore").decode("ascii")
-        body_top = y + sh - (114 if index == 0 else 132)
-        para(c, summary or "This developing story will be updated in the next Cine News edition.",
-             x + 15, y + 18, sw - 30, body_top - y - 24, 9.2 if index == 0 else 8.4, INK, 12 if index == 0 else 10.5)
+        para(c, summary or "This developing story will be updated in the next edition.", text_x, y + 22, text_w, sh - 142, 9.3, INK, 12)
+    slots = [(28, 55, (w - 70) / 2, 322), (35 + (w - 70) / 2, 55, (w - 70) / 2, 322)]
+    card_colors = [colors.HexColor("#fff0f5") if entertainment else colors.HexColor("#eaf2ff"), colors.HexColor("#fff4cf") if entertainment else colors.HexColor("#e6faf4")]
+    for index, story in enumerate(stories[1:3]):
+        x, y, sw, sh = slots[index]
+        c.setFillColor(card_colors[index]); c.roundRect(x, y, sw, sh, 10, fill=1, stroke=0)
+        c.setFillColor(accent if index == 0 else secondary); c.rect(x, y + sh - 9, sw, 9, fill=1, stroke=0)
+        c.setFillColor(accent); c.setFont("Helvetica-Bold", 8); c.drawString(x + 15, y + sh - 32, clean(story.get("source") or "CINE NEWS").upper())
+        title = unicodedata.normalize("NFKD", clean(story.get("title") or "News update")).encode("ascii", "ignore").decode("ascii")
+        para(c, title, x + 15, y + sh - 125, sw - 30, 78, 13, NAVY, 15, True)
+        summary = unicodedata.normalize("NFKD", clean(story.get("summary"))).encode("ascii", "ignore").decode("ascii")
+        para(c, summary or "This developing story will be updated in the next edition.", x + 15, y + 22, sw - 30, sh - 155, 8.6, INK, 11)
     footer(c, page, issue, w); c.showPage()
 
 
@@ -605,12 +668,18 @@ def generate(args) -> Path:
             requested_masthead = Path(args.masthead).expanduser()
             masthead = requested_masthead if requested_masthead.is_absolute() else base / requested_masthead
             masthead = masthead.resolve()
-        cover(c, cover_feature, issue, masthead); editorial(c, cover_feature, stills, also_features, issue, 2)
-        cast_spotlight(c, cover_feature, issue, 3)
-        picks_page(c, picks[1:], issue, 4)
-        picks_page(c, recent, issue, 5, "NEW ON DEMAND")
-        page = 6
+        cover(c, cover_feature, issue, masthead)
+        contents_page(c, picks, issue, 2)
+        editorial(c, cover_feature, stills, also_features, issue, 3)
+        cast_spotlight(c, cover_feature, issue, 4)
+        picks_page(c, picks[1:], issue, 5)
+        picks_page(c, recent, issue, 6, "NEW ON DEMAND")
+        page = 7
         stories, entertainment = load_news_data(Path(args.news_data).expanduser())
+        for story in stories + entertainment:
+            portrait = cat.story_portrait(story)
+            if portrait:
+                story["image_path"] = str(portrait)
         actor_features = [item for item in picks if item.get("cast_profiles") and item["title"].casefold() != cover_feature["title"].casefold()][:2]
         for actor_feature in actor_features:
             cast_spotlight(c, actor_feature, issue, page); page += 1
