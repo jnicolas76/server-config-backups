@@ -7149,7 +7149,7 @@ strong {{ display:block; font-size:18px; line-height:1.15; }} span {{ display:bl
         for prefix in movie_id_routes:
             if path.startswith(prefix):
                 requested_id = path.rsplit("/", 1)[-1]
-                route_query = urllib.parse.parse_qs(parsed.query)
+                route_query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
                 stable_key = (route_query.get("stable_key") or [""])[-1]
                 if prefix == "/player/movie/" and stable_key:
                     # Virtual-channel schedule rows carry a durable asset key.
