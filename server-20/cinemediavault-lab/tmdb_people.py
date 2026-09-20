@@ -21,18 +21,30 @@ def _connect():
     return conn
 
 
-def credits(media_type: str, media_id: int, fallback_names=(), limit: int = 12) -> list[dict]:
+def credits(media_type: str, media_id: int, fallback_names=(), limit: int = 12, tmdb_media_id: int | None = None) -> list[dict]:
     conn = _connect()
     if not conn:
         return [{"name": str(name), "character_name": "", "biography": "", "person_id": 0, "has_image": False} for name in fallback_names[:limit]]
     try:
-        rows = conn.execute(
-            """SELECT p.person_id,p.name,p.biography,p.birthday,p.place_of_birth,p.known_for_department,
-                      p.profile_local_path,c.character_name,c.credit_order
-               FROM tmdb_media_credits c JOIN tmdb_people p ON p.person_id=c.person_id
-               WHERE c.media_type=? AND c.media_id=? ORDER BY c.credit_order,p.name LIMIT ?""",
-            (media_type, int(media_id), int(limit)),
-        ).fetchall()
+        # The web library and SQLite catalog maintain independent local IDs.
+        # Prefer TMDB's stable ID whenever it is available; otherwise an
+        # unrelated title with the same numeric local ID can supply its cast.
+        if tmdb_media_id:
+            rows = conn.execute(
+                """SELECT p.person_id,p.name,p.biography,p.birthday,p.place_of_birth,p.known_for_department,
+                          p.profile_local_path,c.character_name,c.credit_order
+                   FROM tmdb_media_credits c JOIN tmdb_people p ON p.person_id=c.person_id
+                   WHERE c.media_type=? AND c.tmdb_media_id=? ORDER BY c.credit_order,p.name LIMIT ?""",
+                (media_type, int(tmdb_media_id), int(limit)),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT p.person_id,p.name,p.biography,p.birthday,p.place_of_birth,p.known_for_department,
+                          p.profile_local_path,c.character_name,c.credit_order
+                   FROM tmdb_media_credits c JOIN tmdb_people p ON p.person_id=c.person_id
+                   WHERE c.media_type=? AND c.media_id=? ORDER BY c.credit_order,p.name LIMIT ?""",
+                (media_type, int(media_id), int(limit)),
+            ).fetchall()
         if not rows and fallback_names:
             marks = ",".join("?" for _ in fallback_names[:limit])
             rows = conn.execute(
@@ -56,8 +68,8 @@ def credits(media_type: str, media_id: int, fallback_names=(), limit: int = 12) 
     return [{"name": str(name), "character_name": "", "biography": "", "person_id": 0, "has_image": False} for name in fallback_names[:limit]]
 
 
-def cards_html(media_type: str, media_id: int, fallback_names=(), limit: int = 12) -> str:
-    people = credits(media_type, media_id, fallback_names, limit)
+def cards_html(media_type: str, media_id: int, fallback_names=(), limit: int = 12, tmdb_media_id: int | None = None) -> str:
+    people = credits(media_type, media_id, fallback_names, limit, tmdb_media_id)
     if not people:
         return "<li class='cast-empty'>No actor data available yet.</li>"
     cards = []

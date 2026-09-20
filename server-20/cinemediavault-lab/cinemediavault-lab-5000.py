@@ -4716,7 +4716,8 @@ def actor_items_for(metadata: dict, media_type: str | None = None, media_id: int
     actors = actor_names_for(metadata)
     if media_type and media_id is not None:
         try:
-            return tmdb_people.cards_html(media_type, int(media_id), actors, limit=12)
+            stable_tmdb_id = metadata.get("tmdb_id") or metadata.get("id")
+            return tmdb_people.cards_html(media_type, int(media_id), actors, limit=12, tmdb_media_id=stable_tmdb_id)
         except (TypeError, ValueError):
             pass
     return "".join(f"<li><a href='/actor?name={urllib.parse.quote(actor)}'>{html.escape(actor)}</a></li>" for actor in actors) or "<li>No actor data available yet.</li>"
