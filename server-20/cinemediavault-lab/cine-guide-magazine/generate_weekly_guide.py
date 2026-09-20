@@ -397,6 +397,157 @@ def section_page(c: Canvas, kind: str, picks: list[dict], issue: str, page: int)
     footer(c, page, issue, w); c.showPage()
 
 
+def crossword_candidates(picks: list[dict]) -> list[dict]:
+    candidates, seen = [], set()
+    for item in picks:
+        title = clean(item.get("title") or item.get("schedule_title"))
+        answer = re.sub(r"[^A-Z]", "", title.upper())
+        if 4 <= len(answer) <= 15 and answer not in seen:
+            overview = shorten(item.get("overview") or "A featured CineMedia Vault selection scheduled this week.", 185)
+            year = clean(item.get("year") or item.get("release_year"))
+            genre = clean(item.get("genre") or item.get("genres"))
+            suffix = ""
+            if year and genre:
+                suffix = f" ({year} {genre})"
+            elif year:
+                suffix = f" ({year})"
+            candidates.append({"answer": answer, "clue": overview + suffix, "label": title})
+            seen.add(answer)
+        for person in (item.get("cast_profiles") or [])[:2]:
+            name = clean(person.get("name"))
+            parts = re.findall(r"[A-Za-z]+", name)
+            if len(parts) < 2:
+                continue
+            answer = parts[-1].upper()
+            if not (4 <= len(answer) <= 15) or answer in seen:
+                continue
+            role = clean(person.get("character_name"))
+            clue = (f"Performer whose character is {role} in {title}" if role
+                    else f"A credited performer in {title}")
+            candidates.append({"answer": answer, "clue": clue, "label": name})
+            seen.add(answer)
+    return sorted(candidates, key=lambda item: (-len(item["answer"]), item["answer"]))
+
+
+def build_crossword(candidates: list[dict], size: int = 19, limit: int = 22) -> dict:
+    grid: dict[tuple[int, int], str] = {}
+    entries = []
+
+    def fits(word: str, row: int, col: int, direction: str) -> tuple[bool, int]:
+        dr, dc = (0, 1) if direction == "across" else (1, 0)
+        end_r, end_c = row + dr * (len(word) - 1), col + dc * (len(word) - 1)
+        if min(row, col, end_r, end_c) < 0 or max(row, end_r) >= size or max(col, end_c) >= size:
+            return False, 0
+        before, after = (row - dr, col - dc), (end_r + dr, end_c + dc)
+        if before in grid or after in grid:
+            return False, 0
+        crossings = 0
+        for index, letter in enumerate(word):
+            r, c = row + dr * index, col + dc * index
+            current = grid.get((r, c))
+            if current and current != letter:
+                return False, 0
+            if current == letter:
+                crossings += 1
+            elif direction == "across" and ((r - 1, c) in grid or (r + 1, c) in grid):
+                return False, 0
+            elif direction == "down" and ((r, c - 1) in grid or (r, c + 1) in grid):
+                return False, 0
+        return crossings > 0 or not grid, crossings
+
+    for candidate in candidates:
+        if len(entries) >= limit:
+            break
+        word = candidate["answer"]
+        placements = []
+        if not grid:
+            placements.append((0, size // 2, (size - len(word)) // 2, "across"))
+        else:
+            for index, letter in enumerate(word):
+                for (r, c), existing in grid.items():
+                    if existing != letter:
+                        continue
+                    for direction in ("across", "down"):
+                        row = r if direction == "across" else r - index
+                        col = c - index if direction == "across" else c
+                        valid, crossings = fits(word, row, col, direction)
+                        if valid:
+                            center_penalty = abs((row + (0 if direction == "across" else len(word) / 2)) - size / 2) + abs((col + (len(word) / 2 if direction == "across" else 0)) - size / 2)
+                            placements.append((-crossings, center_penalty, row, col, direction))
+        if not placements:
+            continue
+        chosen = min(placements)
+        if len(chosen) == 4:
+            _, row, col, direction = chosen
+        else:
+            _, _, row, col, direction = chosen
+        valid, _ = fits(word, row, col, direction)
+        if not valid:
+            continue
+        dr, dc = (0, 1) if direction == "across" else (1, 0)
+        for index, letter in enumerate(word):
+            grid[(row + dr * index, col + dc * index)] = letter
+        entries.append({**candidate, "row": row, "col": col, "direction": direction})
+
+    start_numbers = {}
+    for number, cell in enumerate(sorted({(entry["row"], entry["col"]) for entry in entries}), 1):
+        start_numbers[cell] = number
+    for entry in entries:
+        entry["number"] = start_numbers[(entry["row"], entry["col"])]
+    return {"size": size, "grid": grid, "entries": entries, "numbers": start_numbers}
+
+
+def crossword_page(c: Canvas, puzzle: dict, issue: str, page: int, answers: bool = False) -> None:
+    c.setPageSize(LETTER); w, h = LETTER
+    c.setFillColor(PAPER); c.rect(0, 0, w, h, fill=1, stroke=0)
+    accent = colors.HexColor("#7b2cbf") if not answers else colors.HexColor("#197278")
+    c.setFillColor(accent); c.rect(0, h - 88, w, 88, fill=1, stroke=0)
+    c.setFillColor(WHITE); c.setFont("Helvetica-Bold", 10); c.drawString(28, h - 28, "CINEMEDIA VAULT WEEKLY PUZZLE")
+    c.setFont("Helvetica-Bold", 29); c.drawString(28, h - 63, "ANSWER KEY" if answers else "THE WEEK IN CROSSWORDS")
+    size = puzzle["size"]; cell = 17; gx, gy = 28, 375
+    grid = puzzle["grid"]
+    for row in range(size):
+        for col in range(size):
+            x, y = gx + col * cell, gy + (size - row - 1) * cell
+            if (row, col) not in grid:
+                c.setFillColor(NAVY); c.rect(x, y, cell, cell, fill=1, stroke=0)
+                continue
+            c.setFillColor(WHITE); c.setStrokeColor(colors.HexColor("#404a5d")); c.rect(x, y, cell, cell, fill=1, stroke=1)
+            number = puzzle["numbers"].get((row, col))
+            if number:
+                c.setFillColor(MUTED); c.setFont("Helvetica-Bold", 5.2); c.drawString(x + 1.5, y + cell - 6, str(number))
+            if answers:
+                c.setFillColor(INK); c.setFont("Helvetica-Bold", 10); c.drawCentredString(x + cell / 2, y + 6, grid[(row, col)])
+    clue_x, clue_w = 370, 214
+    c.setFillColor(NAVY); c.setFont("Helvetica-Bold", 16); c.drawString(clue_x, 676, "SOLUTIONS" if answers else "CLUES")
+    across = sorted((entry for entry in puzzle["entries"] if entry["direction"] == "across"), key=lambda item: item["number"])
+    down = sorted((entry for entry in puzzle["entries"] if entry["direction"] == "down"), key=lambda item: item["number"])
+    clue_step = min(34, 540 / max(1, len(across) + len(down) + 2))
+    y = 651
+    for heading, entries in (("ACROSS", across), ("DOWN", down)):
+        c.setFillColor(accent); c.setFont("Helvetica-Bold", 8); c.drawString(clue_x, y, heading); y -= 15
+        for entry in entries:
+            text = entry["answer"] if answers else entry["clue"]
+            if answers:
+                # Solutions are compact labels, so keep each one on a single line.
+                c.setFillColor(INK); c.setFont("Helvetica", 6.8)
+                c.drawString(clue_x, y - 7, f"{entry['number']}. {text}")
+                y -= 20
+            else:
+                box_h = max(18, clue_step - 3)
+                para(c, f"<b>{entry['number']}.</b> {text}", clue_x, y - box_h, clue_w, box_h, 5.8, INK, 6.6)
+                y -= clue_step
+        y -= 5
+    if not answers:
+        c.setFillColor(accent); c.roundRect(28, 316, 323, 34, 7, fill=1, stroke=0)
+        c.setFillColor(WHITE); c.setFont("Helvetica-Bold", 9); c.drawCentredString(189.5, 328, "ANSWERS APPEAR ON THE FINAL PAGE")
+        para(c, "A larger, denser challenge drawn from this week's movies, television, characters, performers, years, genres, and story details.", 28, 248, 323, 52, 9, INK, 12)
+    else:
+        c.setFillColor(colors.HexColor("#dff4ef")); c.roundRect(28, 244, 323, 106, 8, fill=1, stroke=0)
+        para(c, "How did you do? A new schedule creates a new large-format puzzle, so each numbered weekly issue has its own crossword and solution.", 46, 266, 287, 62, 10, INK, 13)
+    footer(c, page, issue, w); c.showPage()
+
+
 def news_page(c: Canvas, stories: list[dict], issue: str, page: int, heading: str) -> None:
     c.setPageSize(LETTER); w, h = LETTER; c.setFillColor(PAPER); c.rect(0, 0, w, h, fill=1, stroke=0)
     c.setFillColor(NAVY); c.rect(0, h - 72, w, 72, fill=1, stroke=0)
@@ -717,6 +868,11 @@ def generate(args) -> Path:
                         else:
                             news_articles_page(c, payload, issue, page, "ENTERTAINMENT REPORT" if insert_index == 1 else "ENTERTAINMENT NOTEBOOK")
                         page += 1; insert_index += 1
+        puzzle = build_crossword(crossword_candidates(picks))
+        if len(puzzle["entries"]) < 6:
+            raise RuntimeError(f"Crossword generator placed only {len(puzzle['entries'])} entries")
+        crossword_page(c, puzzle, issue, page, answers=False); page += 1
+        crossword_page(c, puzzle, issue, page, answers=True); page += 1
         c.save()
     issue_number = next_issue_number(archive_dir)
     archived = archive_issue(output, archive_dir, issue_number, week, cover_feature)
