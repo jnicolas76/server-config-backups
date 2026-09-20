@@ -2296,7 +2296,7 @@ function advanceToNext(){
     document.getElementById('upNext').classList.add('hidden');
     document.body.classList.add('channel-fullscreen');
     v.play().catch(()=>{});
-    v.addEventListener('ended',showUpNext,{once:true});
+    v.addEventListener('ended',handleEnded,{once:true});
   }).catch(()=>{location.href=nextUrlFallback()});
 }
 function leaveNativeFullscreen(){
@@ -2317,7 +2317,26 @@ function revealUpNext(){
   const timer=setInterval(()=>{remaining-=1;document.getElementById('nextCount').textContent=Math.max(0,remaining);if(remaining<=0){clearInterval(timer);advanceToNext()}},1000);
 }
 function showUpNext(){leaveNativeFullscreen().finally(revealUpNext)}
-v.addEventListener('ended',showUpNext,{once:true});
+function handleEnded(){
+  const secondsUntilScheduledEnd=Number(currentInfo?.stop||0)-(Date.now()/1000);
+  if(secondsUntilScheduledEnd>15){
+    /* A decoder/network/source failure must never skip the active schedule
+       entry. Re-resolve the channel without advance_after so the server
+       returns the program that is actually live and seeks to its wall-clock
+       position. */
+    fetchTune({}).then(data=>{
+      if(!data.ok){setTimeout(handleEnded,5000);return}
+      applyProgramData(data,null);
+      document.getElementById('upNext').classList.add('hidden');
+      document.body.classList.add('channel-fullscreen');
+      v.play().catch(()=>{});
+      v.addEventListener('ended',handleEnded,{once:true});
+    }).catch(()=>setTimeout(handleEnded,5000));
+    return;
+  }
+  showUpNext();
+}
+v.addEventListener('ended',handleEnded,{once:true});
 </script></body></html>'''
 
 HOLDING_PAGE = r'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>__TITLE__</title><style>
